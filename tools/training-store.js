@@ -80,6 +80,30 @@ export function writeJsonSecure(filePath, obj) {
   writeTextSecure(filePath, JSON.stringify(obj));
 }
 
+// A rename (or unlink) is durable only once its directory entry is: writeTextSecure fsyncs the
+// file's bytes before the rename, but the rename itself survives a power loss only after the
+// directory is fsynced. Opt-in, for the places where a later irreversible step (consuming the
+// evidence that could redo the write) must not outrun the write. Windows cannot open a
+// directory for fsync from Node; that is reported as `{ synced: false }` rather than failing
+// every caller there, and leaves the POSIX contract untouched. Any POSIX failure throws.
+export function syncDirectory(dirPath, { fsImpl = fs, platform = process.platform } = {}) {
+  if (platform === 'win32') return { synced: false, reason: 'win32' };
+  const st = fsImpl.lstatSync(dirPath);
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    throw coded('UNSAFE_PATH', `${dirPath}는 안전한 디렉터리가 아닙니다.`);
+  }
+  let fd;
+  try {
+    fd = fsImpl.openSync(dirPath, fs.constants.O_RDONLY | NOFOLLOW | (fs.constants.O_DIRECTORY ?? 0));
+    fsImpl.fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) {
+      try { fsImpl.closeSync(fd); } catch { /* fsync result already known */ }
+    }
+  }
+  return { synced: true };
+}
+
 export function readJsonSecure(filePath) {
   assertRegularFileOrAbsent(filePath);
   const fd = openNoFollow(filePath, fs.constants.O_RDONLY);
@@ -234,6 +258,13 @@ function reinspectAncestors(ancestors) {
   }
 }
 
+// A stat (lstat before the open, fstat after it) that a contained read may proceed on.
+function assertSafeRegularStat(st, filePath, maxBytes) {
+  if (st.isSymbolicLink() || !st.isFile()) throw coded('UNSAFE_PATH', `${filePath}는 안전한 일반 파일이 아닙니다.`);
+  if (st.nlink !== 1) throw coded('UNSAFE_PATH', `${filePath}는 단일 링크 파일이 아닙니다.`);
+  if (st.size > maxBytes) throw coded('TOO_LARGE', `${filePath}가 maxBytes를 초과합니다.`);
+}
+
 function mapOpenError(error, filePath) {
   if (error?.code === 'ELOOP' || error?.code === 'EMLINK' || error?.code === 'EISDIR') {
     return coded('UNSAFE_PATH', `${filePath}는 안전한 일반 파일이 아닙니다.`);
@@ -274,16 +305,35 @@ export function openContained(root, segments, { maxBytes } = {}) {
   const ancestors = walkAncestors(root, dirSegments);
   const filePath = path.join(root, ...segments);
 
+  // Preinspection BEFORE any open: only a regular, single-link, non-symlink entry within the
+  // byte bound is opened at all — a FIFO, a device, a directory, a link or a hard link is
+  // refused here without being opened, so nothing can block this process on it. ENOENT keeps
+  // its meaning for callers (absence), unchanged.
+  let before;
+  try {
+    before = fs.lstatSync(filePath);
+  } catch (error) {
+    throw mapOpenError(error, filePath);
+  }
+  assertSafeRegularStat(before, filePath, maxBytes);
+
   let fd;
   try {
     try {
-      fd = openNoFollow(filePath, fs.constants.O_RDONLY);
+      // O_NOFOLLOW|O_NONBLOCK: an entry replaced between the preinspection and this open (the
+      // race the preinspection alone cannot close) is opened without blocking — a FIFO without
+      // a writer included — and refused by the fstat recheck below. On a regular file the
+      // flag changes nothing. Windows has neither flag (0) nor FIFOs; the lstat/fstat type
+      // checks carry the contract there.
+      fd = openNoFollow(filePath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
     } catch (error) {
       throw mapOpenError(error, filePath);
     }
     const st = fs.fstatSync(fd);
-    if (!st.isFile()) throw coded('UNSAFE_PATH', `${filePath}는 안전한 일반 파일이 아닙니다.`);
-    if (st.size > maxBytes) throw coded('TOO_LARGE', `${filePath}가 maxBytes를 초과합니다.`);
+    assertSafeRegularStat(st, filePath, maxBytes);
+    if (st.dev !== before.dev || st.ino !== before.ino) {
+      throw coded('UNSAFE_PATH', `${filePath}가 읽는 중 교체되었습니다.`);
+    }
     reinspectAncestors(ancestors);
     const buf = Buffer.alloc(st.size);
     let offset = 0;

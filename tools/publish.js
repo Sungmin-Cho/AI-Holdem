@@ -5,17 +5,31 @@
 import { projectHint } from '../shared/hint-contract.js';
 import fs from 'node:fs';
 import path from 'node:path';
-import { withNamedLock, writeJsonAtomic } from '../engine/state.js';
+import { serverProcessStartTime, withNamedLock, writeJsonAtomic } from '../engine/state.js';
+import { createListenerOwnedBy } from './listener-ownership.js';
+import {
+  appendRejectionRecord, installAttemptDurably, readRetirementEvidence, removeDurably, removeRetirementEvidence,
+  writeRetirementEvidence,
+} from './rejection-audit.js';
+import { readRecordedAttempt } from './rejection-audit.js';
+import { syncDirectory } from './training-store.js';
 import {
   HAND_REPLAY_TRIGGER_MAX,
   MAX_PUBLISH_BODY_BYTES,
   MAX_PUBLISH_ID,
   SUPPORTED_COACH_AUTHORITY_SCHEMAS,
   SUPPORTED_TRAINING_AUTHORITY_SCHEMAS,
+  annotationAttemptSettlementReason,
   gameEpochOf,
+  isAnnotationOnlyAttempt,
+  isRetirableAnnotationRejection,
   payloadSha256,
+  preserveInitialRejection,
   projectTrainingAnnotation,
   projectTrainingSummary,
+  sanitizePublishRejection,
+  sanitizeRejectionFields,
+  sha256Hex,
   utf8ByteLength,
   validateActionAck,
   validateHandReplayTrigger,
@@ -41,14 +55,16 @@ function reply(envelope, exitCode) {
 }
 
 class ToolError extends Error {
-  constructor(code, message) {
+  constructor(code, message, extra = null) {
     super(message);
     this.code = code;
+    // Closed diagnostic fields only (httpStatus, serverCode) — see sanitizePublishRejection.
+    if (extra) Object.assign(this, extra);
   }
 }
 
-function bail(code, message) {
-  throw new ToolError(code, message);
+function bail(code, message, extra = null) {
+  throw new ToolError(code, message, extra);
 }
 
 function parseArgs(argv) {
@@ -56,7 +72,9 @@ function parseArgs(argv) {
     gameDir: 'game', from: null, narrations: [], narrationCodes: [],
     turnDeadline: null, resultHold: null,
     viewOnly: false, wait: false, waitOnly: false, waitMs: 25_000,
-    lockWaitMs: DEFAULT_LOCK_WAIT_MS, retry: false,
+    lockWaitMs: DEFAULT_LOCK_WAIT_MS, retry: false, retireRejected: false,
+    expectAttemptSha256: null, expectGameEpoch: null,
+    relayPid: null, relayStartTime: null, relayPort: null,
     printGameEpoch: false, deadlineMonotonicNs: null, actionAckFile: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -100,6 +118,16 @@ function parseArgs(argv) {
     }
     else if (arg === '--view-only') out.viewOnly = true;
     else if (arg === '--retry') out.retry = true;
+    // Resend the recorded annotation body once; if the relay refuses that exact body for a
+    // retirable reason (RETIRABLE_ANNOTATION_REJECTIONS), retire the attempt with durable evidence (#274).
+    else if (arg === '--retire-rejected') { out.retry = true; out.retireRejected = true; }
+    // The exact attempt and the verified relay the caller expects that resend to reach. A
+    // retirement without all of them is refused before anything is read or sent.
+    else if (arg === '--expect-attempt-sha256') out.expectAttemptSha256 = needsValue(arg);
+    else if (arg === '--expect-game-epoch') out.expectGameEpoch = needsValue(arg);
+    else if (arg === '--relay-pid') out.relayPid = Number(needsValue(arg));
+    else if (arg === '--relay-start-time') out.relayStartTime = needsValue(arg);
+    else if (arg === '--relay-port') out.relayPort = Number(needsValue(arg));
     else if (arg === '--wait') out.wait = true;
     else if (arg === '--wait-only') { out.wait = true; out.waitOnly = true; }
     else if (arg === '--wait-ms') out.waitMs = positiveMs(arg);
@@ -112,6 +140,26 @@ function parseArgs(argv) {
     else bail('USAGE', `알 수 없는 옵션: ${arg}`);
   }
   if (!out.from && !out.printGameEpoch) bail('USAGE', '--from <파일>이 필요합니다.');
+  // #274: an ordinary --retry may bind itself to the exact recorded body its caller captured
+  // (digest and game epoch, both required together); the resend then refuses any other record
+  // before anything is sent, exactly as a retirement does. The options default to null: only
+  // an option actually given on the command line is "provided".
+  if (!out.retireRejected && (out.expectAttemptSha256 != null || out.expectGameEpoch != null)) {
+    const sha = /^[0-9a-f]{64}$/;
+    if (!out.retry || !sha.test(out.expectAttemptSha256 ?? '') || !sha.test(out.expectGameEpoch ?? '')) {
+      bail('USAGE', '--expect-attempt-sha256와 --expect-game-epoch는 --retry와 함께, 둘 다 64자리 hex로 주어야 합니다.');
+    }
+  }
+  if (out.retireRejected) {
+    const sha = /^[0-9a-f]{64}$/;
+    if (!sha.test(out.expectAttemptSha256 ?? '') || !sha.test(out.expectGameEpoch ?? '')
+      || !Number.isSafeInteger(out.relayPid) || out.relayPid < 1
+      || !Number.isInteger(out.relayPort) || out.relayPort < 1 || out.relayPort > 65535
+      || typeof out.relayStartTime !== 'string' || out.relayStartTime.length === 0
+      || out.relayStartTime.length > 128) {
+      bail('RETIRE_BINDING_REQUIRED', '--retire-rejected에는 기대 attempt digest·게임 epoch·검증된 relay identity가 필요합니다.');
+    }
+  }
   return out;
 }
 
@@ -379,7 +427,8 @@ async function postPublish(lock, body, timeoutMs = PUBLISH_TIMEOUT_MS) {
   }
   const json = await res.json().catch(() => null);
   if (res.status !== 200 || !json?.ok) {
-    bail('PUBLISH_REJECTED', `서버가 게시를 거부했습니다 (${res.status}).`);
+    const rejection = sanitizePublishRejection(res.status, json);
+    bail('PUBLISH_REJECTED', `서버가 게시를 거부했습니다 (${rejection.httpStatus}).`, rejection);
   }
   return json;
 }
@@ -393,6 +442,40 @@ async function postPublish(lock, body, timeoutMs = PUBLISH_TIMEOUT_MS) {
 // as the duplicate it already has.
 function attemptPath(gameDir) {
   return path.join(gameDir, '.publish-attempt.json');
+}
+
+// #274: a retirement only counts when the refusal came from the relay the caller verified.
+// The loop proved that relay (listener, wrong/real token, startTime, pinned lock) and passed
+// its identity here; around the exact retiring POST — before it and again after the reply,
+// before any mutation — this re-checks that lock.json still names that process, port and
+// game, that the process is still the one that started then, and that it still owns the
+// listener the POST went to. Any doubt refuses the retirement and keeps the attempt.
+let relayListenerOwnedBy = null;
+async function assertRelayBinding(gameDir, opts, lock) {
+  let recorded;
+  try {
+    recorded = JSON.parse(fs.readFileSync(path.join(gameDir, 'lock.json'), 'utf8'));
+  } catch {
+    bail('RELAY_BINDING_UNVERIFIED', 'relay lock을 다시 확인할 수 없어 폐기하지 않았습니다.');
+  }
+  if (!recorded || typeof recorded !== 'object' || Array.isArray(recorded)
+    || recorded.serverPid !== opts.relayPid
+    || Number(recorded.port) !== opts.relayPort
+    || lock.port !== opts.relayPort
+    || recorded.sessionToken !== lock.sessionToken
+    || gameEpochOf(recorded.sessionToken) !== opts.expectGameEpoch
+    || (recorded.serverStartTime !== undefined && recorded.serverStartTime !== opts.relayStartTime)) {
+    bail('RELAY_BINDING_CHANGED', 'relay lock이 검증된 relay와 달라 폐기하지 않았습니다.');
+  }
+  let startTime = null;
+  try { startTime = serverProcessStartTime(opts.relayPid); } catch { startTime = null; }
+  if (startTime === null) bail('RELAY_BINDING_UNVERIFIED', 'relay 프로세스 identity를 확인할 수 없어 폐기하지 않았습니다.');
+  if (startTime !== opts.relayStartTime) bail('RELAY_BINDING_CHANGED', 'relay 프로세스가 검증 이후 바뀌어 폐기하지 않았습니다.');
+  relayListenerOwnedBy ??= createListenerOwnedBy();
+  let owns;
+  try { owns = await relayListenerOwnedBy(opts.relayPid, opts.relayPort); } catch { owns = null; }
+  if (owns === null) bail('RELAY_BINDING_UNVERIFIED', 'relay listener 소유를 확인할 수 없어 폐기하지 않았습니다.');
+  if (owns !== true) bail('RELAY_BINDING_CHANGED', 'relay listener가 검증된 relay 소유가 아니어서 폐기하지 않았습니다.');
 }
 
 function replayPendingPath(gameDir) {
@@ -435,6 +518,20 @@ function drainReplayPending(gameDir, report, fallbackHandNos = []) {
   writeJsonAtomic(replayPendingPath(gameDir), { handNos: next });
 }
 
+// Ordering seam for regressions only (env AI_HOLDEM_PUBLISH_CHECKPOINT_DIR): at a named point
+// the child records that it got there and waits, bounded, for the test to release it, so a
+// concurrent settlement can be scheduled exactly between two of its reads. Unset in production:
+// a no-op. It pauses only; nothing is skipped or weakened.
+function orderingCheckpoint(name) {
+  const dir = process.env.AI_HOLDEM_PUBLISH_CHECKPOINT_DIR;
+  if (!dir) return;
+  try { fs.writeFileSync(path.join(dir, `${name}.reached`), String(process.pid)); } catch { return; }
+  const release = path.join(dir, `${name}.release`);
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + 20_000;
+  while (!fs.existsSync(release) && Date.now() < deadline) Atomics.wait(pause, 0, 0, 25);
+}
+
 // A half-written record is worse than none: --retry would read it and stop the game.
 function writeAttempt(gameDir, record) {
   const target = attemptPath(gameDir);
@@ -452,20 +549,58 @@ async function publishOnce(gameDir, lock, envelope, opts) {
       const liveLock = readLock(gameDir);
       Object.assign(lock, liveLock);
       const epoch = gameEpochOf(lock.sessionToken);
+      // #274 ordering: outstanding retirement evidence is read BEFORE the authorities are
+      // captured, under this publish lock. The training control settles evidence by writing
+      // the authority first and removing the evidence only afterwards, and no other publisher
+      // can install new evidence while this lock is held — so an absence seen here is paired
+      // with an authority read that already reflects every settlement that consumed evidence,
+      // and a presence seen here refuses every annotation body below (the exact-record retry
+      // exception is decided later, against the body). Unreadable evidence fails closed.
+      let pendingEvidence = null;
+      let pendingEvidenceUnreadable = false;
+      try { pendingEvidence = readRetirementEvidence(gameDir); } catch { pendingEvidenceUnreadable = true; }
       const auth = readAuthority(gameDir);
       const trainingAuth = readTrainingAuthority(gameDir);
+      orderingCheckpoint('authority-captured');
       assertSupportedAuthority(auth);
       let body = null;
       let coachAuthority = envelope.coachAuthority ?? null;
       let trainingAuthority = envelope.trainingAuthority ?? null;
       let annotationAuthority = envelope.annotationAuthority ?? null;
       const pendingPath = attemptPath(gameDir);
-      const pending = fs.existsSync(pendingPath);
+      // The recorded attempt is read only through the bounded, preinspected, non-blocking
+      // reader (tools/rejection-audit.js), under the publish lock: a FIFO without a writer, a
+      // link, a hard link, an oversize or replaced entry can neither block this process nor
+      // read as absent. Such an entry is a durability failure of the record (the same closed
+      // classification installAttemptDurably reports), never BAD_ATTEMPT: nothing is sent and
+      // nothing is removed. Only a regular file that is not valid JSON is BAD_ATTEMPT.
+      let pendingRead;
+      try {
+        pendingRead = readRecordedAttempt(gameDir);
+      } catch (readFailure) {
+        bail('ATTEMPT_SYNC_FAILED', '기록된 게시 시도를 안전하게 읽지 못해 보내지 않았습니다.', {
+          auditCode: readFailure?.code === 'REJECTION_AUDIT_UNSAFE' ? 'REJECTION_AUDIT_UNSAFE' : 'REJECTION_AUDIT_UNAVAILABLE',
+        });
+      }
+      const pending = !pendingRead.absent;
       if (opts.retry && !pending) {
         bail('NO_ATTEMPT', '재시도할 기록된 게시 시도가 없습니다.');
       }
       if (pending) {
-        const record = readJson(pendingPath, 'BAD_ATTEMPT', '직전 게시 시도');
+        let record;
+        try {
+          record = JSON.parse(pendingRead.raw);
+        } catch {
+          bail('BAD_ATTEMPT', '직전 게시 시도가 올바른 JSON이 아닙니다.');
+        }
+        // #274: a retirement — and an ordinary retry that declared what it captured — resends
+        // only the exact attempt its caller read. Another one — replaced, settled and
+        // re-recorded, or from another game — is left exactly as it is, unsent.
+        if ((opts.retireRejected || opts.expectAttemptSha256) && (record?.expectedGameEpoch !== opts.expectGameEpoch
+          || epoch !== opts.expectGameEpoch
+          || sha256Hex(JSON.stringify(record?.body ?? null)) !== opts.expectAttemptSha256)) {
+          bail('ATTEMPT_CHANGED', '기록된 게시 시도가 호출자가 읽은 것과 달라 보내지 않았습니다.');
+        }
         const stale = staleAttemptReason(record, epoch, auth, trainingAuth);
         if (stale === 'BAD_ATTEMPT' || stale === 'BAD_ATTEMPT_VERSION') {
           bail(stale, '재시도 기록이 온전하지 않습니다. 그 파일을 지운 뒤 §4 표를 따르세요.');
@@ -620,20 +755,164 @@ async function publishOnce(gameDir, lock, envelope, opts) {
       if (coachAuthority) attemptRecord.coachAuthority = coachAuthority;
       if (trainingAuthority) attemptRecord.trainingAuthority = trainingAuthority;
       if (annotationAuthority) attemptRecord.annotationAuthority = annotationAuthority;
-      writeAttempt(gameDir, attemptRecord);
+      const bodySha256 = sha256Hex(JSON.stringify(body));
+      if (Array.isArray(body.trainingAnnotations) && body.trainingAnnotations.length > 0) {
+        // #274: outstanding retirement evidence (the snapshot taken above, before the
+        // authorities) means a refused explanation's queue settlement has not happened yet (it
+        // may be waiting behind another holder of the training lock, or an interrupted
+        // process). Until it is settled, no annotation-bearing body may be judged by the relay
+        // — with or without the private authority wrapper, which the relay never sees — the
+        // relay's answer can change with the hand being played, and a body carrying the
+        // retired explanation's notes would be judged again. The one exception is the resend
+        // of exactly the recorded body the evidence names (an interrupted retirement of that
+        // attempt), which the retirement path and an ordinary retry both settle.
+        if (pendingEvidenceUnreadable) {
+          bail('REJECTION_EVIDENCE_UNAVAILABLE', '비공개 폐기 증거를 안전하게 읽지 못해 보내지 않았습니다.');
+        }
+        if (pendingEvidence && !(opts.retry && pendingEvidence.bodySha256 === bodySha256)) {
+          bail('REJECTION_EVIDENCE_PENDING', '정리되지 않은 폐기 증거가 남아 있어 annotation을 보내지 않았습니다.');
+        }
+      }
+      if (opts.retry) {
+        // #274: a resent recorded body — a retirement or an ordinary retry — may already stand
+        // beside unfinished private evidence, and that evidence will point at this exact
+        // record: its bytes (not only its directory entry) must be on disk before anything
+        // depends on it. The record just read is kept and fsynced through a writable handle
+        // when its bytes already are the canonical serialization; otherwise the canonical bytes
+        // replace it durably. Links and other unsafe records are refused untouched. A failure
+        // here changes nothing and sends nothing.
+        try {
+          installAttemptDurably(gameDir, path.basename(attemptPath(gameDir)), JSON.stringify(attemptRecord));
+        } catch (syncFailure) {
+          bail('ATTEMPT_SYNC_FAILED', '기록된 게시 시도를 내구성 있게 보존하지 못해 보내지 않았습니다.', {
+            auditCode: ['REJECTION_AUDIT_UNSAFE', 'REJECTION_AUDIT_CHANGED'].includes(syncFailure?.code)
+              ? syncFailure.code : 'REJECTION_AUDIT_UNAVAILABLE',
+          });
+        }
+      } else {
+        writeAttempt(gameDir, attemptRecord);
+      }
       const afterLock = remainingMs(opts.deadlineMonotonicNs);
       if (afterLock === 0) bail('DEADLINE_EXPIRED', '락 획득 뒤 게시 deadline이 만료됐습니다.');
       const httpMs = afterLock == null ? PUBLISH_TIMEOUT_MS : Math.min(PUBLISH_TIMEOUT_MS, afterLock);
-      const json = await postPublish(lock, body, httpMs);
+      if (opts.expectAttemptSha256 && bodySha256 !== opts.expectAttemptSha256) {
+        bail('ATTEMPT_CHANGED', '보낼 본문이 호출자가 읽은 시도와 달라 보내지 않았습니다.');
+      }
+      if (opts.retireRejected) {
+        if (!isAnnotationOnlyAttempt({ body, coachAuthority, trainingAuthority, annotationAuthority })) {
+          bail('ATTEMPT_NOT_RETIRABLE', '설명 annotation만 담은 시도만 폐기 경로로 보낼 수 있습니다.');
+        }
+        // A refusal of this body becomes evidence the training control must be able to
+        // settle: every note bound to its authority item by value digest and public proof.
+        // Checked here, before anything is sent, so a retirement never removes an attempt
+        // whose evidence the verifier would reject.
+        const ineligible = annotationAttemptSettlementReason({ body, annotationAuthority });
+        if (ineligible) {
+          bail('ATTEMPT_NOT_RETIRABLE', `기록된 시도의 annotation 증명이 정산 조건을 만족하지 않아 보내지 않았습니다 (${ineligible}).`);
+        }
+        // The seal that queued these annotations was a rename into training/, and their
+        // canonical files were created in training/annotations: make both directory entries
+        // durable before evidence that depends on the queue and on those names exists (POSIX;
+        // reported, not claimed, on Windows). A failure here sends nothing.
+        try {
+          const annotationsDir = path.join(gameDir, 'training', 'annotations');
+          if (fs.existsSync(annotationsDir)) syncDirectory(annotationsDir);
+          syncDirectory(path.join(gameDir, 'training'));
+        } catch {
+          bail('ATTEMPT_SYNC_FAILED', 'training authority 디렉터리를 동기화하지 못해 보내지 않았습니다.', {
+            auditCode: 'REJECTION_AUDIT_UNAVAILABLE',
+          });
+        }
+        await assertRelayBinding(gameDir, opts, lock);
+      }
+      let json;
+      try {
+        json = await postPublish(lock, body, httpMs);
+      } catch (error) {
+        // The relay answered and judged this exact body. Transport failures (PUBLISH_FAILED)
+        // and every refusal outside the retirable set keep the attempt and fail closed.
+        if (!(opts.retireRejected && error?.code === 'PUBLISH_REJECTED'
+          && isRetirableAnnotationRejection(error.httpStatus, error.serverCode))) {
+          // #274: the identity of the recorded body this POST carried travels with the failure
+          // (digest, publishId, game epoch — closed fields only), so an automatic resend can be
+          // bound to exactly this record and never to whichever record exists later.
+          if (error instanceof ToolError && (error.code === 'PUBLISH_FAILED' || error.code === 'PUBLISH_REJECTED')) {
+            error.attempt = { bodySha256, publishId: body.publishId, expectedGameEpoch: epoch };
+          }
+          throw error;
+        }
+        // The refusal is evidence only if it came from the relay verified before the POST. A
+        // binding that no longer holds is the failure, carrying the refusal that was observed.
+        try {
+          await assertRelayBinding(gameDir, opts, lock);
+        } catch (bindingFailure) {
+          throw preserveInitialRejection(bindingFailure, error);
+        }
+        const evidence = {
+          schemaVersion: 1,
+          at: new Date().toISOString(),
+          publishId: body.publishId,
+          expectedGameEpoch: epoch,
+          bodySha256,
+          httpStatus: error.httpStatus,
+          serverCode: error.serverCode,
+          items: annotationAuthority.items.map((entry) => ({
+            evaluationId: entry.evaluationId,
+            field: entry.field,
+            valueSha256: entry.valueSha256,
+          })),
+        };
+        // Ordered and durable: the private evidence (exact body, authority and verified relay
+        // identity), then the digest-only audit line, each with file and directory fsynced,
+        // exist before the attempt is removed, and the removal is durable before the caller
+        // settles the queue. An interruption after the removal is settled from the evidence
+        // (training control) before any new annotation is published. Any failure keeps the
+        // attempt exactly as it was and reports only the original refusal's closed fields.
+        try {
+          writeRetirementEvidence(gameDir, {
+            ...evidence,
+            body,
+            annotationAuthority,
+            relayBinding: { pid: opts.relayPid, startTime: opts.relayStartTime, port: opts.relayPort },
+          });
+          appendRejectionRecord(gameDir, evidence);
+        } catch (auditFailure) {
+          bail('REJECTION_AUDIT_FAILED', '거절 감사 기록을 안전하게 남기지 못해 시도를 보존했습니다.', {
+            httpStatus: error.httpStatus, serverCode: error.serverCode,
+            auditCode: ['REJECTION_AUDIT_UNSAFE', 'REJECTION_AUDIT_CHANGED', 'REJECTION_EVIDENCE_PENDING'].includes(auditFailure?.code)
+              ? auditFailure.code : 'REJECTION_AUDIT_UNAVAILABLE',
+          });
+        }
+        try {
+          removeDurably(gameDir, path.basename(attemptPath(gameDir)));
+        } catch {
+          bail('REJECTION_AUDIT_FAILED', '거절은 기록했지만 시도 제거를 확정하지 못했습니다.', {
+            httpStatus: error.httpStatus, serverCode: error.serverCode, auditCode: 'REJECTION_AUDIT_UNAVAILABLE',
+          });
+        }
+        return { retired: true, evidence };
+      }
+      // An accepted retirement resend is reported with the identity of what was actually
+      // sent, and only from the relay that was verified around it.
+      if (opts.retireRejected) await assertRelayBinding(gameDir, opts, lock);
       if (!opts.retry && json.applied === false) {
         try { fs.unlinkSync(attemptPath(gameDir)); } catch { /* already gone */ }
         bail('PUBLISH_ID_REUSED', '이 publishId는 이미 다른 본문이 소비했습니다. 기록을 지웠으니 새 id로 다시 게시하세요.');
       }
       const fallback = opts.retry && json.applied === false ? (body.handReplay?.handNos ?? []) : [];
       drainReplayPending(gameDir, json.handReplay, fallback);
+      // #274: the relay took a resend of this exact attempt after all. Evidence an interrupted
+      // retirement of the same body left behind no longer proves a refusal; it goes before
+      // the attempt, or the attempt stays for another resend.
+      if (opts.retry) {
+        try { removeRetirementEvidence(gameDir, bodySha256); } catch {
+          bail('REJECTION_EVIDENCE_UNAVAILABLE', '이전 폐기 증거를 정리하지 못해 시도를 보존했습니다.');
+        }
+      }
       try { fs.unlinkSync(attemptPath(gameDir)); } catch { /* already gone */ }
       return {
         publishId: body.publishId,
+        bodySha256,
         revision: json.revision,
         hadCoach: Array.isArray(body.coach),
         applied: json.applied !== false,
@@ -641,6 +920,7 @@ async function publishOnce(gameDir, lock, envelope, opts) {
         hintDisposition: json.hintDisposition,
       };
     }, { timeoutMs: lockWaitMs });
+    if (published.retired) return published;
     if (published.hadCoach) {
       const snapshotFile = path.join(gameDir, 'ui-snapshot.json');
       const left = remainingMs(opts.deadlineMonotonicNs);
@@ -719,12 +999,23 @@ async function main() {
   const published = opts.waitOnly ? null : await publishOnce(gameDir, lock, envelope, opts);
 
   const out = { ok: true };
+  if (published?.retired) {
+    out.retired = true;
+    out.applied = false;
+    out.publishId = published.evidence.publishId;
+    const { bodySha256, httpStatus, serverCode, expectedGameEpoch } = published.evidence;
+    out.rejection = { publishId: published.evidence.publishId, expectedGameEpoch, bodySha256, httpStatus, serverCode };
+    reply(out, 0);
+    return;
+  }
   if (published) {
     out.publishId = published.publishId;
     out.revision = published.revision;
     out.hadCoach = published.hadCoach === true;
     out.reconcilePending = published.reconcilePending === true;
     out.applied = published.applied;
+    // #274: a caller that resent a recorded body settles only what this resend actually carried.
+    if (opts.retry) out.bodySha256 = published.bodySha256;
     if (published.hintDisposition) out.hintDisposition = published.hintDisposition;
     if (published.handReplay) out.handReplay = published.handReplay;
   }
@@ -748,6 +1039,28 @@ async function main() {
 try {
   await main();
 } catch (error) {
-  if (error instanceof ToolError) reply({ ok: false, code: error.code, message: error.message }, 1);
-  else reply({ ok: false, code: 'INTERNAL', message: error?.message ?? '알 수 없는 오류' }, 1);
+  if (error instanceof ToolError) {
+    // A refusal observed before this failure (preserveInitialRejection) travels as closed
+    // status/code pairs only — the first and at most one recheck — whatever the final code.
+    const closed = (tuple) => (tuple && typeof tuple === 'object'
+      ? sanitizeRejectionFields(tuple.httpStatus, tuple.serverCode) : null);
+    const observed = closed(error.rejection);
+    const recheck = closed(error.recheckRejection);
+    // The recorded body a failed POST carried: closed identity fields only.
+    const attempt = error.attempt && typeof error.attempt === 'object'
+      && /^[0-9a-f]{64}$/.test(error.attempt.bodySha256 ?? '')
+      && Number.isSafeInteger(error.attempt.publishId) && error.attempt.publishId >= 1
+      && /^[0-9a-f]{64}$/.test(error.attempt.expectedGameEpoch ?? '')
+      ? { bodySha256: error.attempt.bodySha256, publishId: error.attempt.publishId, expectedGameEpoch: error.attempt.expectedGameEpoch }
+      : null;
+    reply({
+      ok: false, code: error.code, message: error.message,
+      ...(error.code === 'PUBLISH_REJECTED' || error.code === 'REJECTION_AUDIT_FAILED'
+        ? { httpStatus: error.httpStatus, serverCode: error.serverCode } : {}),
+      ...(error.code === 'REJECTION_AUDIT_FAILED' || error.code === 'ATTEMPT_SYNC_FAILED' ? { auditCode: error.auditCode } : {}),
+      ...(observed && observed.httpStatus !== 0 ? { rejection: observed } : {}),
+      ...(recheck && recheck.httpStatus !== 0 ? { recheckRejection: recheck } : {}),
+      ...(attempt ? { attempt } : {}),
+    }, 1);
+  } else reply({ ok: false, code: 'INTERNAL', message: error?.message ?? '알 수 없는 오류' }, 1);
 }

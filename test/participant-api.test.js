@@ -1246,7 +1246,8 @@ test('#263 a restart that fails before ending the previous game keeps its room b
   manager.command(restart);
   const failed = await settle(manager, restart.requestId);
   loop.endGame = endGameOf;
-  assert.equal(failed.error, 'END_REFUSED');
+  // #273/#274: a code no repository source defines is not shown to a host as-is.
+  assert.equal(failed.error, 'UNLISTED');
   assert.equal(manager.snapshot().state, 'paused');
   assertRoomBoundTo(manager, previous, guest);
   await resumeSucceeds(manager, previous);

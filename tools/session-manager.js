@@ -24,6 +24,8 @@ import { abortModeFor, neverDealt, validateAbortingCheckpoint } from './recovery
 import { createRoomManager } from "./room-manager.js";
 import { projectNotices } from "./notice-projection.js";
 import { validateParticipantName } from "../shared/seat-roles.js";
+import { sanitizeRejectionFields } from "../publish-contract.js";
+import { projectDiagnosticCode, projectPublicCode } from "./diagnostic-codes.js";
 const read = readPrivateJson;
 const stable = (value) =>
   value && typeof value === "object"
@@ -60,6 +62,7 @@ export function createSessionManager({
     pending = null,
     closed = false,
     initialized = false,
+    errorDetail = null,
     stateSince = new Date().toISOString();
   const setupFile = () =>
     current && path.join(current.sessionDir, ".app-setup.json");
@@ -216,10 +219,77 @@ export function createSessionManager({
       /* room may be absent */
     }
   };
-  const emit = (next, code = null) => {
+  // #273: what a host may be told about why the app is in `error`, as closed codes only —
+  // the failure that ended the run and, when cleanup then failed too, that failure (a
+  // relay refusal adds its status and allowlisted code). Never a message.
+  // Closed vocabulary only (tools/diagnostic-codes.js): an identifier-shaped code is still
+  // untrusted text, so anything unlisted is 'UNLISTED'.
+  const safeCode = projectDiagnosticCode;
+  const failureDetail = (runFailure, cleanup) => {
+    const rejection = runFailure?.rejection
+      ? sanitizeRejectionFields(runFailure.rejection.httpStatus, runFailure.rejection.serverCode)
+      : null;
+    // #274: `rejection` is the FIRST relay refusal of the sequence that ended the run; when a
+    // recheck answered differently, that later closed tuple travels beside it.
+    const recheckRejection = runFailure?.recheckRejection
+      ? sanitizeRejectionFields(runFailure.recheckRejection.httpStatus, runFailure.recheckRejection.serverCode)
+      : null;
+    return {
+      run: safeCode(runFailure?.code),
+      cleanup: safeCode(cleanup?.code),
+      rejection,
+      ...(recheckRejection ? { recheckRejection } : {}),
+    };
+  };
+  // #273/#274: the one projection of a command receipt for a host. Every code-bearing field a
+  // journal row can carry — written by this version or by an earlier one that stored a raw
+  // adapter/child code — passes the closed vocabulary on the way out: the receipt's `error`,
+  // its `result` snapshot's `error`, `errorDetail` (run/cleanup codes and refusal tuples) and
+  // `pendingDecision.code`. The journal row itself is never rewritten and never returned
+  // directly, so its bytes (and the payload the request-id conflict check compares) stay as
+  // recorded. Returns a deep copy.
+  const publicReceipt = (row) => {
+    if (!row || typeof row !== "object") return row;
+    const out = structuredClone(row);
+    if (out.error !== undefined) out.error = projectPublicCode(out.error);
+    const result = out.result;
+    if (result && typeof result === "object") {
+      if (result.error !== undefined) result.error = projectPublicCode(result.error);
+      const detail = result.errorDetail;
+      if (detail && typeof detail === "object") {
+        // The same closed projection as the live snapshot: codes, the two tuples, nothing else.
+        result.errorDetail = publicDetail(detail);
+      }
+      const pendingDecision = result.pendingDecision;
+      if (pendingDecision && typeof pendingDecision === "object" && pendingDecision.code !== undefined) {
+        pendingDecision.code = projectPublicCode(pendingDecision.code);
+      }
+    }
+    return out;
+  };
+  // #273/#274: the one closed projection of an error detail for a host, applied at the public
+  // state boundary to EVERY incoming detail whatever produced it (this manager, a loop, a
+  // resolver or adapter error carrying its own `errorDetail`): run/cleanup through the closed
+  // code vocabulary (unknown => UNLISTED, absent => null), the first and recheck refusal
+  // tuples re-sanitized, every other key dropped. Known codes stay exactly as useful as before.
+  const closedTuple = (tuple) => (tuple && typeof tuple === "object"
+    ? sanitizeRejectionFields(tuple.httpStatus, tuple.serverCode)
+    : null);
+  const publicDetail = (detail) => {
+    if (!detail || typeof detail !== "object" || Array.isArray(detail)) return null;
+    const recheck = closedTuple(detail.recheckRejection);
+    return {
+      run: safeCode(detail.run),
+      cleanup: safeCode(detail.cleanup),
+      rejection: closedTuple(detail.rejection),
+      ...(recheck ? { recheckRejection: recheck } : {}),
+    };
+  };
+  const emit = (next, code = null, detail = null) => {
     if (next !== state) stateSince = new Date().toISOString();
     state = next;
     error = code;
+    errorDetail = next === "error" ? publicDetail(detail) : null;
     revision++;
     if (["ended", "completed"].includes(next) && current?.gameId) {
       const keepLock = pending && START_KINDS.includes(pending.kind);
@@ -297,7 +367,7 @@ export function createSessionManager({
       defaultSetup,
       pendingDecision: pendingDecision ? {
         decisionId: pendingDecision.decisionId, generation:pendingDecision.generation, status: pendingDecision.status,
-        code: pendingDecision.code ?? null, softWait: pendingDecision.softWait === true,
+        code: projectPublicCode(pendingDecision.code ?? null), softWait: pendingDecision.softWait === true,
         closeConfirmed: pendingDecision.closeConfirmed === true,
         retryable: pendingDecision.schemaVersion === 3 ? pendingDecision.retryable === true : true,
         diagnostics: diagnostics ? {detail:diagnostics.detail ?? null, corrections:diagnostics.corrections,
@@ -315,7 +385,10 @@ export function createSessionManager({
             : kind === 'resume' && publicState === 'paused' ? !pendingDecision
             : publicState === 'error' && ['end','restart'].includes(kind) ? !!recoveryExit && (kind!=='restart' || currentSetup()!==null) : true),
       pendingRequestId: pending?.requestId ?? null,
-      error,
+      // #273/#274: a host sees only codes this repository defines; a child's or adapter's own
+      // text is 'UNLISTED' (the raw value stays inside this process).
+      error: projectPublicCode(error),
+      errorDetail: state === "error" ? publicDetail(errorDetail) : null,
       recoveryExit,
       ...progress,
     };
@@ -391,6 +464,9 @@ export function createSessionManager({
       })
       .catch(async (err) => {
         let cleanupConfirmed = true;
+        // #273: the failure that ended the run, kept beside a cleanup failure that follows.
+        const runFailure = launched.loop.runFailure ?? { code: err?.code };
+        let cleanupFailure = null;
         try {
           await launched.loop.requestStop();
         } catch (cleanup) {
@@ -398,11 +474,12 @@ export function createSessionManager({
           // record the cleanup, not that the lock is the failure worth reporting. Keep the
           // original run error in that case; every other cleanup failure still replaces it.
           if (cleanup?.code !== 'LOOP_LOCK_LOST') err = cleanup;
+          cleanupFailure = cleanup;
           cleanupConfirmed = false;
         }
         if (session === launched) {
           if (cleanupConfirmed) session = null;
-          emit("error", err.code ?? "SESSION_FAILED");
+          emit("error", err.code ?? "SESSION_FAILED", failureDetail(runFailure, cleanupFailure));
         }
         throw err;
       });
@@ -519,7 +596,7 @@ export function createSessionManager({
     emit('finalizing');
     await runPromise;
   }
-  function reconcileFailure(code) {
+  function reconcileFailure(code, detail = null) {
     try {
       current = resolveCurrentSession(root);
       if (session && !session.loop.stopping) {
@@ -531,7 +608,7 @@ export function createSessionManager({
       }
       const lock = readOwnedLock(root, "loop.lock.d");
       if (lock && lock.status !== "dead") {
-        emit(lock.pid === process.pid ? "error" : "external", code);
+        emit(lock.pid === process.pid ? "error" : "external", code, detail);
         return;
       }
       if (!current) {
@@ -542,7 +619,7 @@ export function createSessionManager({
       const loopFile = path.join(current.sessionDir, "loop-state.json");
       const loop = fs.existsSync(loopFile) ? read(loopFile) : null;
       if (engine.result === "abort" && loop?.aborting) {
-        emit("error", code);
+        emit("error", code, detail);
         return;
       }
       if (engine.result === "abort") {
@@ -553,11 +630,53 @@ export function createSessionManager({
         emit("completed", code);
         return;
       }
-      emit("error", code);
+      emit("error", code, detail);
     } catch {
-      emit("error", code ?? "SESSION_UNAVAILABLE");
+      emit("error", code ?? "SESSION_UNAVAILABLE", detail);
     }
   }
+  const RESUMED_STATES = ["playing", "paused", "finalizing", "completed", "ended"];
+  // #273: retry the cleanup a failed loop could not confirm. On failure ownership stays with
+  // the retained session and the error names both the failure that ended the run and the
+  // cleanup failure that still blocks it.
+  async function settleRetainedSession() {
+    const retained = session;
+    const runFailure = retained.loop.runFailure ?? null;
+    emit("stopping");
+    try {
+      await retained.loop.requestStop();
+    } catch (cleanup) {
+      throw Object.assign(controlError(cleanup?.code ?? "CLEANUP_FAILED"), {
+        errorDetail: failureDetail(runFailure, cleanup),
+      });
+    }
+    if (session === retained) session = null;
+  }
+  // #273: a launch whose bootstrap/recovery failed and whose cleanup could not be confirmed
+  // keeps its loop in `startingLoop` (it still owns the loop lock and maybe children). It is
+  // owned work like a retained session: resume retries its cleanup first and keeps it on
+  // every unconfirmed result; only a confirmed stop lets a replacement launch.
+  async function settleRetainedLaunch() {
+    const retained = startingLoop;
+    const runFailure = retained.runFailure ?? null;
+    emit("stopping");
+    try {
+      await retained.requestStop();
+    } catch (cleanup) {
+      throw Object.assign(controlError(cleanup?.code ?? "CLEANUP_FAILED"), {
+        errorDetail: failureDetail(runFailure, cleanup),
+      });
+    }
+    if (startingLoop === retained) startingLoop = null;
+  }
+  // The run and cleanup failure of a launch that left its loop retained, for the error state.
+  // The launch's headline is its run failure when the cleanup was refused as LOOP_LOCK_LOST
+  // (the loop keeps that refusal beside it as `cleanupFailure`); otherwise the thrown error is
+  // the cleanup failure itself. Either way the cleanup column names the actual cleanup outcome.
+  const retainedLaunchDetail = (err) =>
+    !session && startingLoop
+      ? failureDetail(startingLoop.runFailure ?? null, err?.cleanupFailure ?? err)
+      : null;
   async function execute(row) {
     try {
       sameCurrent(row);
@@ -578,16 +697,34 @@ export function createSessionManager({
         await session.loop.retryDecision(row.decisionId, {freshAuthorization: row.freshSession ? {source:'app',requestId:row.requestId} : null});
         emit('playing');
       } else if (row.kind === "resume") {
+        // #273: a session kept in `error` is a loop whose cleanup could not be confirmed (it
+        // still owns its children or relay). Resuming it first re-checks that cleanup; only
+        // a confirmed one lets recovery launch, and nothing else may stand in for it.
+        if (session && state === "error") await settleRetainedSession();
+        else if (!session && startingLoop) await settleRetainedLaunch();
         if (!session) {
+          // Shutdown may have begun while cleanup was retried; it forbids any new launch. The
+          // caller's selector must still name the game this cleanup released.
+          if (closed) throw controlError("APP_STOPPING");
+          sameCurrent(row);
           emit("starting");
           await recoverPaused();
         }
         if (session?.loop.playState === "paused") {
           if (session.loop.pendingDecision) emit('paused');
           else {
-            await session.loop.resumePlay();
-            emit("playing");
+            const resumed = session;
+            await resumed.loop.resumePlay();
+            // The run may already have failed again; that failure is the answer, not "playing".
+            if (session === resumed && state !== "error") emit("playing");
           }
+        }
+        // A command that changed nothing must not be recorded as success.
+        if (!RESUMED_STATES.includes(state)) {
+          // The failure already reported for this state (run and cleanup detail) stays the answer.
+          throw Object.assign(controlError(state === "error" && error ? error : "RESUME_NOT_APPLIED"), {
+            errorDetail: state === "error" ? errorDetail : null,
+          });
         }
       } else {
         if (state === "paused" || session) {
@@ -611,8 +748,8 @@ export function createSessionManager({
     } catch (err) {
       settleRoomAfterFailure(row, { bindWhen: row.roomLocked });
       row.status = "failed";
-      row.error = err.code ?? "COMMAND_FAILED";
-      reconcileFailure(row.error);
+      row.error = projectPublicCode(err.code ?? "COMMAND_FAILED");
+      reconcileFailure(row.error, err.errorDetail ?? retainedLaunchDetail(err));
     } finally {
       row.completedAt = new Date().toISOString();
       save(row);
@@ -636,7 +773,8 @@ export function createSessionManager({
     if (fs.existsSync(file)) {
       const old = read(file);
       if (old.payload !== payload) throw controlError("REQUEST_ID_CONFLICT");
-      return old;
+      // An idempotent replay is a receipt like any other: projected, never the raw row.
+      return publicReceipt(old);
     }
     if (closed) throw controlError("APP_STOPPING");
     if (pending) throw controlError("COMMAND_PENDING");
@@ -711,7 +849,7 @@ export function createSessionManager({
         }
       });
     });
-    return row;
+    return publicReceipt(row);
   }
   async function initialize() {
     try {
@@ -782,8 +920,8 @@ export function createSessionManager({
         } catch (err) {
           settleRoomAfterFailure(row, { bindWhen: row.roomLocked || setupHasParticipants(row.setup) });
           row.status = "failed";
-          row.error = err.code ?? "RECOVERY_REQUIRED";
-          reconcileFailure(row.error);
+          row.error = projectPublicCode(err.code ?? "RECOVERY_REQUIRED");
+          reconcileFailure(row.error, err.errorDetail ?? retainedLaunchDetail(err));
         } finally {
           row.completedAt = new Date().toISOString();
           save(row);
@@ -861,7 +999,7 @@ export function createSessionManager({
     initialize,
     initializationFailed(error) {
       closed = true;
-      emit("error", error.code ?? "APP_INIT_FAILED");
+      emit("error", error?.code ?? "APP_INIT_FAILED");
     },
     snapshot,
     command,
@@ -880,7 +1018,9 @@ export function createSessionManager({
     },
     receipt(id) {
       if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw controlError("BAD_COMMAND");
-      return read(path.join(journalDir, `${id}.json`));
+      // Rows written before this boundary existed may carry raw codes; the same projection
+      // every public return path uses applies on the way out.
+      return publicReceipt(read(path.join(journalDir, `${id}.json`)));
     },
   };
 }

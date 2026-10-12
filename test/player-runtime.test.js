@@ -1748,6 +1748,104 @@ test('dispose: 종료 확인 실패 뒤에도 runtime은 영구 closed이고 두
   }
 });
 
+// #273: only the observation in flight is shared. A failed one is not replayed — the next
+// disposal looks at the child again, because a child that closed late is closed.
+function lateClosingChild({ pid = 424242 } = {}) {
+  const child = { signals: [], execCalls: 0 };
+  child.exec = () => {
+    child.execCalls += 1;
+    let finish;
+    const closed = new Promise((resolve) => { finish = resolve; });
+    child.close = () => finish();
+    return {
+      pid,
+      kill: (signal) => { child.signals.push(signal); return child.killResult ?? true; },
+      done: closed.then(() => ({ code: 0, stdout: '{}', stderr: '' })),
+      closed,
+    };
+  };
+  return child;
+}
+
+test('#273 dispose: a child that closes after a failed observation is confirmed by the next disposal, without a second signal', async () => {
+  const child = lateClosingChild();
+  const rt = createPlayerRuntime('claude', { terminateKillWaitMs: 20, exec: child.exec });
+  const decision = rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 1 });
+  decision.catch(() => {});
+  await assert.rejects(rt.dispose(), (error) => {
+    assert.equal(error.code, 'CHILD_CLOSE_UNCONFIRMED');
+    assert.equal(error.details.closeConfirmed, false);
+    return true;
+  });
+  // Still open: the next attempt observes again (bounded) and fails closed again. The first
+  // signal reached this child, so no second one is sent to a pid that may be reused.
+  const started = Date.now();
+  await assert.rejects(rt.dispose(), { code: 'CHILD_CLOSE_UNCONFIRMED' });
+  assert.ok(Date.now() - started < 2_000, 'each observation is bounded by the wait budget');
+  assert.deepEqual(child.signals, ['SIGKILL']);
+
+  child.close();
+  await rt.dispose();
+  await decision.catch(() => {});
+  assert.deepEqual(child.signals, ['SIGKILL']);
+  await assert.rejects(
+    rt.decide({ playerId: 'p1', sessionId: 's', message: 'm2', timeoutMs: 20 }),
+    (error) => error.code === 'RUNTIME_CLOSED',
+  );
+  assert.equal(child.execCalls, 1, 'a runtime that failed to close never starts another child');
+});
+
+test('#273 dispose: a missing process is not close evidence, so an exited-looking child stays unconfirmed', async () => {
+  // The signal "succeeds" and no such process exists any more, but the close event never comes
+  // (an inherited stdio pipe is still open). Nothing here may turn that into a confirmation.
+  assert.throws(() => process.kill(2_147_483_646, 0), { code: 'ESRCH' });
+  const child = lateClosingChild({ pid: 2_147_483_646 });
+  const rt = createPlayerRuntime('claude', { terminateKillWaitMs: 20, exec: child.exec });
+  const decision = rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 1 });
+  decision.catch(() => {});
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await assert.rejects(rt.dispose(), { code: 'CHILD_CLOSE_UNCONFIRMED' });
+  }
+  child.close();
+  await rt.dispose();
+  await decision.catch(() => {});
+});
+
+test('#273 dispose: a signal that never reached the child is sent again, a delivered one is not', async () => {
+  const child = lateClosingChild();
+  child.killResult = false;
+  const rt = createPlayerRuntime('claude', { terminateKillWaitMs: 20, exec: child.exec });
+  const decision = rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 1 });
+  decision.catch(() => {});
+  await assert.rejects(rt.dispose(), { code: 'CHILD_SIGNAL_FAILED' });
+  await assert.rejects(rt.dispose(), { code: 'CHILD_SIGNAL_FAILED' });
+  assert.deepEqual(child.signals, ['SIGKILL', 'SIGKILL'], 'an undelivered signal is retried');
+  child.killResult = true;
+  await assert.rejects(rt.dispose(), { code: 'CHILD_CLOSE_UNCONFIRMED' });
+  await assert.rejects(rt.dispose(), { code: 'CHILD_CLOSE_UNCONFIRMED' });
+  assert.deepEqual(child.signals, ['SIGKILL', 'SIGKILL', 'SIGKILL'], 'once delivered it is not repeated');
+  child.close();
+  await rt.dispose();
+  await decision.catch(() => {});
+});
+
+test('#273 dispose: concurrent callers share the in-flight observation, and a failed one is not shared with later callers', async () => {
+  const child = lateClosingChild();
+  const rt = createPlayerRuntime('claude', { terminateKillWaitMs: 40, exec: child.exec });
+  const decision = rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 1 });
+  decision.catch(() => {});
+  const [a, b] = await Promise.allSettled([rt.dispose(), rt.dispose()]);
+  assert.equal(a.status, 'rejected');
+  assert.equal(b.status, 'rejected');
+  assert.equal(a.reason, b.reason, 'both concurrent callers saw the very same observation');
+  const later = await rt.dispose().catch((error) => error);
+  assert.equal(later.code, 'CHILD_CLOSE_UNCONFIRMED');
+  assert.notEqual(later, a.reason, 'a later caller observes again instead of replaying the old failure');
+  child.close();
+  await rt.dispose();
+  await decision.catch(() => {});
+});
+
 test('#192 sJ4: runtime adapter는 disposeConfirmsChildren을 true로 선언한다', () => {
   // game-loop.js의 owner-runtime-closure receipt(§3 E1)는 coach-capable adapter가 이
   // 플래그를 true로 선언할 때만 `dispose()` 성공을 "이 adapter가 띄운 모든 child가

@@ -136,7 +136,22 @@ async function abaDescriptorAtParse(f,nth,run) {
   const fd=open.call(this,name,...args);if(target)targetFd=fd;return fd;
  };
  fs.readSync=function(fd,...args){const n=read.call(this,fd,...args);if(fd===targetFd&&!restored){fs.renameSync(held,file);restored=true;}return n;};
- try{await run();assert.ok(swapped&&restored);assert.deepEqual(fs.readFileSync(file),original);}finally{fs.openSync=open;fs.readSync=read;}
+ // The contained reader may refuse the swapped descriptor BEFORE any read (its preinspection
+ // identity no longer matches the opened file) or only after reading B: either way parsed B is
+ // never paired with A's identity. The original inode is put back whether production read or
+ // refused, so the fixture leaves the exact original bytes behind.
+ let readAfterSwap=false;
+ try{
+  const probe=fs.readSync;fs.readSync=function(fd,...args){if(fd===targetFd)readAfterSwap=true;return probe.call(this,fd,...args);};
+  await run();
+  assert.equal(swapped,true,'the swap must occur at the targeted open');
+ }finally{
+  fs.openSync=open;fs.readSync=read;
+  if(!restored&&fs.existsSync(held)){fs.renameSync(held,file);restored=true;}
+ }
+ assert.equal(restored,true,'the original inode is back');
+ assert.deepEqual(fs.readFileSync(file),original);
+ return {readAfterSwap};
 }
 test('ABA source replacement cannot pair parsed B with captured A identity',async t=>{
  if(skipOnWin32(t,'TOCTOU injection via openSync/readSync is POSIX; Windows readFile may not enter those hooks'))return;

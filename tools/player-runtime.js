@@ -843,7 +843,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       if (purpose === 'resume' && !fs.existsSync(dir)) grokFail('GROK_SESSION_RECORD_MISSING');
     }
     const spawned = exec({ command, args, cwd: ensureCwd(), env: buildEnv(), input });
-    const entry = { handle: null, closed: false, error: null, purpose, model, termination: null };
+    const entry = { handle: null, closed: false, error: null, purpose, model, termination: null, signalDelivered: false };
     const done = Promise.resolve(spawned.done).then(
       (result) => {
         entry.closed = true;
@@ -876,8 +876,13 @@ export function createPlayerRuntime(kind, opts = {}) {
     // Watchdog and shutdown can reach the same child concurrently. Share one
     // signal/close observation; a second kill is not additional exit evidence.
     if (entry.termination) return entry.termination;
-    entry.termination = confirmChildClose(entry, signal);
-    return entry.termination;
+    const attempt = confirmChildClose(entry, signal);
+    entry.termination = attempt;
+    // #273: only the in-flight observation is shared. Once it fails, the next caller observes
+    // again (a late close, or a signal that was never delivered); a cached rejection would
+    // make every retry of the same child fail without looking at it.
+    attempt.catch(() => { if (entry.termination === attempt) entry.termination = null; });
+    return attempt;
   }
 
   async function confirmChildClose(entry, signal) {
@@ -894,11 +899,17 @@ export function createPlayerRuntime(kind, opts = {}) {
     // JS cannot observe that state; whether a libuv release marks reaped handles depends on
     // the bundled version (test/coach-signal-authority.test.js logs `process.versions.uv`).
     // Windows kills through the process handle instead.
-    let delivered;
-    try {
-      delivered = entry.handle.pid === null && entry.handle.closed ? true : entry.handle.kill(signal);
-    } catch (error) {
-      throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}을 보내지 못했습니다.`, { cause: error, details: details() });
+    // A retry after an unconfirmed close observes again but does not signal again: the
+    // first signal reached this very child, and a second one to a pid that may since have
+    // been reused is no additional evidence. A signal that never reached it is retried.
+    let delivered = entry.signalDelivered ? true : undefined;
+    if (!entry.signalDelivered) {
+      try {
+        delivered = entry.handle.pid === null && entry.handle.closed ? true : entry.handle.kill(signal);
+      } catch (error) {
+        throw runtimeError('CHILD_SIGNAL_FAILED', `CHILD_SIGNAL_FAILED: ${kind} 자식에 ${signal}을 보내지 못했습니다.`, { cause: error, details: details() });
+      }
+      if (delivered !== false) entry.signalDelivered = true;
     }
     // exit may precede close: a false kill result is not closure evidence, but
     // allow the same bounded close observation to settle before declaring it unsafe.
@@ -1405,7 +1416,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       // 성공 여부와 무관하게 첫 disposal 시도가 lifecycle의 영구 닫힘 경계다.
       // 실패 뒤 재사용하면 아직 살아 있는 handle과 새 child가 겹칠 수 있다.
       disposed = true;
-      disposePromise = (async () => {
+      const attempt = (async () => {
         const pending = [...activeHandles];
         const results = await Promise.allSettled(
           pending.map((entry) => killAndConfirmClose(entry, 'SIGKILL')),
@@ -1419,7 +1430,12 @@ export function createPlayerRuntime(kind, opts = {}) {
         try { fs.rmdirSync(cwd); } catch { /* 비어 있지 않거나 이미 없다 */ }
         cwd = null;
       })();
-      return disposePromise;
+      disposePromise = attempt;
+      // #273: the runtime stays closed to new work, but a failed disposal may be retried — the
+      // unconfirmed child can close later — and must re-examine the registry rather than
+      // replay the old rejection.
+      attempt.catch(() => { if (disposePromise === attempt) disposePromise = null; });
+      return attempt;
     },
   };
 }

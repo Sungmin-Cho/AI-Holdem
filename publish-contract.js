@@ -137,6 +137,216 @@ export function gameEpochOf(sessionToken) {
   return sha256Hex(sessionToken);
 }
 
+// #274: what a publisher and the loop may say about a relay's refusal. The relay's reply is
+// untrusted text; only an HTTP status and a code from this closed set survive (anything else
+// is 'UNLISTED', no body at all is 'NONE'), so a diagnostic can never carry a message, URL,
+// token, annotation value or card.
+export const PUBLISH_REJECTION_CODES = Object.freeze([
+  'ACTION_RECOVERY_REQUIRED', 'ANNOTATION_CONFLICT', 'ANNOTATION_ORPHAN',
+  'ANNOTATION_PROOF_MISMATCH', 'BAD_ACTION_ACK', 'BAD_EVENTS', 'BAD_HAND_REPLAY',
+  'BAD_JSON', 'BAD_MESSAGES', 'BAD_PUBLISH_ID', 'BAD_RESULT_HOLD', 'BAD_TURN_DEADLINE',
+  'BAD_VIEWS', 'COACH_PROOF_MISMATCH', 'COACH_PROOF_REQUIRED', 'COACH_SEMANTIC_CONFLICT',
+  'EXPLOIT_BEFORE_GAMEOVER', 'FORBIDDEN', 'FORBIDDEN_LITERAL', 'FORBIDDEN_LITERAL_UNAVAILABLE',
+  'HINT_PROOF_MISMATCH', 'INTERNAL', 'NOT_FOUND', 'PAYLOAD_TOO_LARGE', 'PERSIST_FAILED',
+  'PRIVATE_LITERAL_INVALID', 'TRAINING_PROOF_MISMATCH', 'UNAUTHORIZED', 'VIEWS_REQUIRED',
+]);
+const PUBLISH_REJECTION_SET = new Set(PUBLISH_REJECTION_CODES);
+
+// Refusals after which the explanatory annotation is retired rather than resent. Proof
+// mismatch and conflict depend on the exact body and what the relay already holds.
+// FORBIDDEN_LITERAL does NOT depend on the body alone: the relay's deny set includes the
+// current hand's private cards (collectPrivateLiteralsDetailed), so an explanation of a past
+// hand that names a public card can be refused only while that card is someone's hole card
+// in the hand being played, and could be accepted later. Retiring it anyway is a deliberate,
+// conservative trade (privacy fail-safe; the text stays on the item with the refusal and the
+// audit line) at the cost of possibly losing an innocent explanation. Whether such a
+// collision caused the 2026-10-08 refusal is an unconfirmed hypothesis.
+// Transient or ordering-dependent refusals are deliberately absent — ANNOTATION_ORPHAN (the
+// machine row has not been published yet), EXPLOIT_BEFORE_GAMEOVER,
+// FORBIDDEN_LITERAL_UNAVAILABLE and every 5xx stay fail-closed.
+export const RETIRABLE_ANNOTATION_REJECTIONS = Object.freeze({
+  ANNOTATION_PROOF_MISMATCH: 400,
+  FORBIDDEN_LITERAL: 400,
+  ANNOTATION_CONFLICT: 409,
+});
+
+// Strict on both fields: a present, own (not inherited) allowlisted code AND the integer
+// status that code is listed with. A missing status and a missing code are never "equal":
+// evidence, audit rows and reported refusals without them authorize nothing.
+export function isRetirableAnnotationRejection(httpStatus, serverCode) {
+  return typeof serverCode === 'string'
+    && Object.prototype.hasOwnProperty.call(RETIRABLE_ANNOTATION_REJECTIONS, serverCode)
+    && Number.isInteger(httpStatus)
+    && RETIRABLE_ANNOTATION_REJECTIONS[serverCode] === httpStatus;
+}
+
+// The one definition of a recorded attempt that carries explanatory annotations and nothing
+// else (plus the replay trigger the publisher itself attaches) — the only kind that may be
+// retired. A view, coach note or machine row is never dropped by that path.
+const ANNOTATION_ONLY_BODY_KEYS = new Set(['publishId', 'trainingAnnotations', 'handReplay']);
+export function isAnnotationOnlyAttempt(record) {
+  const body = record?.body;
+  return Boolean(record?.annotationAuthority) && !record.coachAuthority && !record.trainingAuthority
+    && body !== null && typeof body === 'object' && !Array.isArray(body)
+    && Array.isArray(body.trainingAnnotations)
+    && Object.keys(body).every((key) => ANNOTATION_ONLY_BODY_KEYS.has(key));
+}
+
+// Re-validates both fields: a child's reply is as untrusted as the relay's.
+export function sanitizeRejectionFields(status, serverCode) {
+  const httpStatus = Number.isInteger(status) && status >= 100 && status <= 599 ? status : 0;
+  const known = serverCode === 'NONE' || serverCode === 'UNLISTED' || PUBLISH_REJECTION_SET.has(serverCode);
+  return { httpStatus, serverCode: known ? serverCode : 'UNLISTED' };
+}
+
+export function sanitizePublishRejection(status, json) {
+  const raw = json !== null && typeof json === 'object' && !Array.isArray(json) ? json.code : undefined;
+  return sanitizeRejectionFields(status, typeof raw === 'string' ? raw : 'NONE');
+}
+
+function closedTuple(status, serverCode) {
+  const tuple = sanitizeRejectionFields(status, serverCode);
+  return tuple.httpStatus === 0 ? null : tuple;
+}
+
+// #274: whether a recorded annotation-only attempt could be settled from retirement evidence
+// by the training control (verifyRetirementEvidence) — the same internal exactness it will
+// demand: one authority item per note, unique, every note bound to its item by value digest
+// and by the public proof (id and digest). Checked by the publisher BEFORE it sends a retiring
+// resend, so a refusal never becomes evidence that cannot be reconciled. Null when eligible,
+// otherwise a closed reason.
+export function annotationAttemptSettlementReason({ body, annotationAuthority } = {}) {
+  const notes = body?.trainingAnnotations;
+  const items = annotationAuthority?.items;
+  if (!Array.isArray(notes) || !Array.isArray(items) || items.length === 0 || items.length !== notes.length) {
+    return 'AUTHORITY_SHAPE';
+  }
+  const keys = new Set();
+  for (const item of items) {
+    if (!plainObject(item) || typeof item.evaluationId !== 'string' || typeof item.field !== 'string'
+      || !/^[0-9a-f]{64}$/.test(item.valueSha256 ?? '')) return 'AUTHORITY_ITEM';
+    const key = `${item.evaluationId}:${item.field}`;
+    if (keys.has(key)) return 'AUTHORITY_DUPLICATE';
+    keys.add(key);
+  }
+  // One-to-one: every note names a distinct item and every item is named by a note, so an
+  // audit line of this body can never name an item the relay did not judge ([A, A] against
+  // [A, B] would otherwise isolate B for a refusal B was never part of).
+  const named = new Set();
+  for (const note of notes) {
+    if (!plainObject(note)) return 'NOTE_SHAPE';
+    const key = `${note.evaluationId}:${note.field}`;
+    if (named.has(key)) return 'NOTE_DUPLICATE';
+    named.add(key);
+    const bound = items.find((item) => item.evaluationId === note.evaluationId && item.field === note.field);
+    if (!bound || note.valueSha256 !== bound.valueSha256) return 'NOTE_UNBOUND';
+    if (!plainObject(note.annotationProof)
+      || note.annotationProof.valueSha256 !== bound.valueSha256
+      || note.annotationProof.id !== publicProofId(`${bound.evaluationId}:${bound.field}`)) return 'PROOF';
+  }
+  for (const key of keys) if (!named.has(key)) return 'AUTHORITY_UNCOVERED';
+  return null;
+}
+
+// The closed tuple an error itself reports: the publisher child's envelope fields
+// (PUBLISH_REJECTED / REJECTION_AUDIT_FAILED) or the details of a PENDING_ANNOTATION_BLOCKED
+// refusal. Null for any other error; never a message or text. This — not the first tuple a
+// recovery boundary may have attached — is what classifies the error itself.
+export function ownRejectionTupleOf(error) {
+  if (!error || typeof error !== 'object') return null;
+  if (error.code === 'PUBLISH_REJECTED' || error.code === 'REJECTION_AUDIT_FAILED') {
+    const own = error.envelope && typeof error.envelope === 'object' ? error.envelope : error;
+    return closedTuple(own.httpStatus, own.serverCode);
+  }
+  if (error.code === 'PENDING_ANNOTATION_BLOCKED' && error.details && typeof error.details === 'object') {
+    return closedTuple(error.details.httpStatus, error.details.serverCode);
+  }
+  return null;
+}
+
+// A tuple attached to the error itself (preserveInitialRejection) or, for a publisher child's
+// failure, the closed tuple its reply carried (`envelope.rejection`): a refusal the child
+// observed before failing for another reason travels to the loop and the app this way.
+function attachedRejectionTupleOf(error) {
+  if (!error || typeof error !== 'object') return null;
+  const source = error.rejection && typeof error.rejection === 'object'
+    ? error.rejection
+    : (error.envelope?.rejection && typeof error.envelope.rejection === 'object' ? error.envelope.rejection : null);
+  return source ? closedTuple(source.httpStatus, source.serverCode) : null;
+}
+
+const sameTuple = (a, b) => a.httpStatus === b.httpStatus && a.serverCode === b.serverCode;
+
+// #274: the closed refusal tuple an error carries, re-validated. Precedence: a tuple attached by
+// preserveInitialRejection (the FIRST relay refusal of a recovery sequence), then the error's
+// own fields. Null for any other error.
+export function rejectionTupleOf(error) {
+  return attachedRejectionTupleOf(error) ?? ownRejectionTupleOf(error);
+}
+
+// A later, different closed tuple (the relay answered the recheck differently), kept apart from
+// the first one by preserveInitialRejection. Null when there is none.
+export function recheckRejectionTupleOf(error) {
+  if (!error || typeof error !== 'object') return null;
+  const source = error.recheckRejection && typeof error.recheckRejection === 'object'
+    ? error.recheckRejection
+    : (error.envelope?.recheckRejection && typeof error.envelope.recheckRejection === 'object' ? error.envelope.recheckRejection : null);
+  return source ? closedTuple(source.httpStatus, source.serverCode) : null;
+}
+
+// A relay refusal (`original`) may be followed by a recovery step that fails for another
+// reason — relay verification, retirement, evidence — and `failure` would otherwise replace the
+// first closed status/code in every diagnostic. The first tuple travels on the replacement as
+// `rejection`; a different tuple the recheck produced is kept separately as `recheckRejection`.
+// Exactly two bounded fields, only sanitized status/code pairs — never messages, bodies, values.
+//
+// Boundaries compose from the inside out: an inner boundary (the pipeline's settlement, a
+// publisher recovery) attaches before an outer one (the loop's publication) does, and the outer
+// boundary caught its `original` before it invoked the inner one. So whenever `failure` already
+// carries an attached tuple that differs from this caller's `original`, this caller's is the
+// chronologically earlier refusal: it becomes `rejection`, and the inner boundary's first tuple
+// — the earliest later answer — becomes `recheckRejection` (anything the inner boundary had
+// kept after it is dropped; the record stays two tuples). An attached tuple equal to `original`
+// is left exactly as it is, recheck included, so the same boundary applied twice is idempotent.
+export function preserveInitialRejection(failure, original) {
+  const initial = rejectionTupleOf(original);
+  if (!initial || !failure || typeof failure !== 'object') return failure;
+  const attached = attachedRejectionTupleOf(failure);
+  if (attached) {
+    if (sameTuple(attached, initial)) {
+      // The same first refusal: nothing to reorder. The earliest recheck the original observed
+      // is still merged when the failure carries none — once; a recheck already there stays.
+      if (!recheckRejectionTupleOf(failure)) {
+        const earlier = recheckRejectionTupleOf(original);
+        if (earlier && !sameTuple(earlier, initial)) failure.recheckRejection = earlier;
+      }
+      return failure;
+    }
+    failure.rejection = initial;
+    // The earliest later answer wins: a recheck the outer original already observed comes
+    // before the inner boundary's first tuple.
+    const earlier = recheckRejectionTupleOf(original);
+    failure.recheckRejection = earlier && !sameTuple(earlier, initial) ? earlier : attached;
+    return failure;
+  }
+  const own = ownRejectionTupleOf(failure);
+  failure.rejection = initial;
+  // The one recheck tuple is the EARLIEST later answer: a recheck the original already carried
+  // (a retry that answered differently before this failure) comes before this failure's own
+  // different answer, which is kept only when nothing earlier was observed.
+  const earlier = recheckRejectionTupleOf(original);
+  if (earlier && !sameTuple(earlier, initial)) failure.recheckRejection = earlier;
+  else if (own && !sameTuple(own, initial)) failure.recheckRejection = own;
+  return failure;
+}
+
+// The relay read the body and judged it (400/409/413 with a code of its own): server recovery
+// or a restart cannot change that answer. Everything else — no JSON, auth, 5xx, transport —
+// may still be a relay problem and keeps the recover-and-retry path.
+export function isSemanticPublishRejection(httpStatus, serverCode) {
+  return [400, 409, 413].includes(httpStatus) && serverCode !== 'NONE';
+}
+
 const ACTION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const ACTION_REQUEST_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const ACTION_DIGEST_RE = /^[0-9a-f]{64}$/;

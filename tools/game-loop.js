@@ -49,6 +49,14 @@ import {
   coachNoteStrings,
   collectPrivateLiteralsDetailed,
   gameEpochOf,
+  isAnnotationOnlyAttempt,
+  isRetirableAnnotationRejection,
+  isSemanticPublishRejection,
+  ownRejectionTupleOf,
+  preserveInitialRejection,
+  recheckRejectionTupleOf,
+  rejectionTupleOf,
+  sanitizeRejectionFields,
   validateActionAck,
   validateCoachDecisions,
 } from '../publish-contract.js';
@@ -93,6 +101,7 @@ import {
   flushMachinePublish,
   isTrainingEnabled,
   reconcileSession,
+  retireRejectedAnnotationAttempt,
   retryUnresolvedTrainingAttempt as retryTrainingAttempt,
   runHandPipeline,
   runSolveTask,
@@ -101,6 +110,7 @@ import {
   trainingAggregate,
   EXPLAIN_HELD,
 } from './training-pipeline.js';
+import { readRecordedAttempt } from './rejection-audit.js';
 import {
   completeSessionStoreMigration,
   installPracticeFocus,
@@ -118,6 +128,7 @@ import {
   resolveCurrentSession,
 } from '../engine/session-catalog.js';
 import { projectNotices } from './notice-projection.js';
+import { projectDiagnosticCode } from './diagnostic-codes.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENGINE_CLI = path.join(ROOT, 'engine/cli.js');
@@ -215,6 +226,53 @@ function codedError(code, message, extra = {}) {
   return error;
 }
 
+// #274: what the publisher said about a relay refusal, re-validated (a child's stdout is not
+// trusted) down to an HTTP status and a code from the closed set. Null for any other error.
+// A recovery failure that followed a refusal (relay verification, retirement, evidence) carries
+// the FIRST refusal's tuple (preserveInitialRejection), so it is reported here under the later
+// failure's own code; a different answer the recheck produced is `recheckRejectionOf`.
+function rejectionOf(error) {
+  if (!error || typeof error !== 'object') return null;
+  const attached = rejectionTupleOf(error);
+  if (attached) return attached;
+  // The publisher's closed fields are reported even when they are not a usable tuple (0/NONE),
+  // exactly as before this boundary preserved earlier refusals.
+  if (error.code === 'PUBLISH_REJECTED' || error.code === 'REJECTION_AUDIT_FAILED') {
+    return sanitizeRejectionFields(error.envelope?.httpStatus, error.envelope?.serverCode);
+  }
+  if (error.code === 'PENDING_ANNOTATION_BLOCKED') {
+    return sanitizeRejectionFields(error.details?.httpStatus, error.details?.serverCode);
+  }
+  return null;
+}
+const recheckRejectionOf = (error) => recheckRejectionTupleOf(error);
+// The tuple an error itself reports (publisher envelope or blocked details), ignoring any
+// first tuple a recovery boundary attached: what classifies this error — semantic or not,
+// retirable or not — is its own answer, never an earlier one.
+function ownRejectionOf(error) {
+  if (!error || typeof error !== 'object') return null;
+  const own = ownRejectionTupleOf(error);
+  if (own) return own;
+  if (error.code === 'PUBLISH_REJECTED' || error.code === 'REJECTION_AUDIT_FAILED') {
+    return sanitizeRejectionFields(error.envelope?.httpStatus, error.envelope?.serverCode);
+  }
+  if (error.code === 'PENDING_ANNOTATION_BLOCKED') {
+    return sanitizeRejectionFields(error.details?.httpStatus, error.details?.serverCode);
+  }
+  return null;
+}
+// The closed refusal fields of an error for a log line or metric: the first refusal and, when
+// a recheck answered differently, that later tuple beside it.
+function rejectionFieldsOf(error, { prefix = '' } = {}) {
+  const first = rejectionOf(error);
+  const recheck = recheckRejectionOf(error);
+  const key = (name) => (prefix ? `${prefix}${name.charAt(0).toUpperCase()}${name.slice(1)}` : name);
+  return {
+    ...(first ? { [key('rejection')]: first } : {}),
+    ...(recheck ? { [key('recheckRejection')]: recheck } : {}),
+  };
+}
+
 // #192 D5 (design memo §4 D5, G11): top-level error `code` values the three coach/publish/
 // engine CLI children can legitimately print on their own stdout — every `fail(...)`/
 // `bail(...)` (CoachError/ToolError) call and every literal top-level `code:` field in
@@ -242,6 +300,10 @@ const KNOWN_CHILD_ERROR_CODES = new Set([
   'DEADLINE_EXPIRED', 'NO_ATTEMPT', 'ATTEMPT_PENDING', 'BAD_ATTEMPT',
   'PLAYTIME_PUBLISH_STOPPED', 'PUBLISH_ID_OVERFLOW', 'BAD_HAND_REPLAY', 'BAD_ACTION_ACK',
   'PAYLOAD_TOO_LARGE', 'PUBLISH_ID_REUSED', 'LOCK_TIMEOUT',
+  // #274 retirement refusals: binding, exact-attempt and audit gates of --retire-rejected.
+  'RETIRE_BINDING_REQUIRED', 'RELAY_BINDING_UNVERIFIED', 'RELAY_BINDING_CHANGED',
+  'ATTEMPT_CHANGED', 'ATTEMPT_NOT_RETIRABLE', 'ATTEMPT_SYNC_FAILED', 'REJECTION_AUDIT_FAILED',
+  'REJECTION_EVIDENCE_PENDING', 'REJECTION_EVIDENCE_UNAVAILABLE',
   // #192 I6: assertCoachQueue and staleAttemptReason's own bail(stale, …) both surface
   // these — staleAttemptReason additionally returns BAD_ATTEMPT_VERSION/STALE_GAME_ATTEMPT,
   // and readJson(ui-snapshot.json, 'BAD_SNAPSHOT', …) surfaces BAD_SNAPSHOT.
@@ -837,6 +899,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const activeChildren = new Set();
   const adapters = new Set();
   const adapterDisposals = new Map();
+  const failedAdapterDisposals = new Set();
   const coachTasks = new Set();
   const coachAttempts = new Map();
   const trainingTasks = new Set();
@@ -1438,20 +1501,41 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // #192 I4: test seam for wherever the loop spawns the publish CLI — defaults to the real
   // tools/publish.js path.
   const publishCliPath = opts.publishCliPath ?? PUBLISH_CLI;
+  // The recorded attempt, read by this process only through the bounded, preinspected,
+  // non-blocking reader (tools/rejection-audit.js): a FIFO without a writer, a link, a hard
+  // link or an oversize entry can never block the event loop and never reads as absent. Null
+  // when truly absent; a syntax-invalid file keeps the publisher's BAD_ATTEMPT classification
+  // (BAD_PUBLISH_ATTEMPT with a SyntaxError cause); anything unsafe is a closed failure.
+  const readRecordedAttemptJson = () => {
+    let read;
+    try {
+      read = readRecordedAttempt(root);
+    } catch (error) {
+      throw codedError('REJECTION_EVIDENCE_UNAVAILABLE', '기록된 게시 시도를 안전하게 읽지 못했습니다.', { cause: error });
+    }
+    if (read.absent) return null;
+    try {
+      return JSON.parse(read.raw);
+    } catch (error) {
+      throw codedError('BAD_PUBLISH_ATTEMPT', 'PUBLISH_ATTEMPT을 읽을 수 없습니다.', { cause: error });
+    }
+  };
+
   const runPublish = (args) => {
     // Replayed bodies and queued/fallback envelopes cross the same output boundary.
     const from = args.indexOf('--from');
+    const replaying = args.includes('--retry') || args.includes('--retire-rejected');
     let envelope;
     try {
-      envelope = args.includes('--retry')
-        ? readJsonOptional(path.join(root, '.publish-attempt.json'), 'PUBLISH_ATTEMPT')?.body
+      envelope = replaying
+        ? readRecordedAttemptJson()?.body
         : (from >= 0 ? readJsonOptional(args[from + 1], 'PUBLISH_ENVELOPE') : null);
     } catch (error) {
       // The publisher owns malformed-attempt rejection and its BAD_ATTEMPT code
       // drives the existing bounded recovery matrix. A syntax-invalid JSON file
       // has no publishable feedback; let that parser reject it, without bypassing
       // claim validation for a readable replay or swallowing I/O failures.
-      if (!args.includes('--retry') || error.code !== 'BAD_PUBLISH_ATTEMPT'
+      if (!replaying || error.code !== 'BAD_PUBLISH_ATTEMPT'
         || !(error.cause instanceof SyntaxError)) throw error;
     }
     const feedback = [...(Array.isArray(envelope?.coach) ? envelope.coach.map((note) => note.text) : []), envelope?.review];
@@ -1994,7 +2078,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     } catch (error) {
       disposal = Promise.reject(error);
     }
-    disposal.catch(() => {});
+    // #273: a failed disposal (its child close unconfirmed) is shared with the rest of this
+    // stop attempt, then forgotten when the attempt settles (see requestStop) so a retried
+    // requestStop() asks the adapter again instead of replaying the old rejection.
+    disposal.catch(() => { if (adapterDisposals.get(adapter) === disposal) failedAdapterDisposals.add(adapter); });
     adapterDisposals.set(adapter, disposal);
     return disposal;
   };
@@ -3093,10 +3180,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         storeDir,
         shouldStop: publishStopped,
         executePublish,
+        retirePending: settleRejectedPendingAnnotation,
       });
     } catch (error) {
       log('training-publish-error', {
         code: error.code ?? 'ERROR',
+        ...rejectionFieldsOf(error),
         ...(error.details ? { details: error.details } : {}),
       });
       if (error.code === 'TRAINING_MARK_FAILED'
@@ -3117,11 +3206,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         storeDir,
         shouldStop: publishStopped,
         executePublish,
+        retirePending: settleRejectedPendingAnnotation,
         onNotice: appendNotice,
       });
     } catch (error) {
       log('training-annotation-publish-error', {
         code: error.code ?? 'ERROR',
+        ...rejectionFieldsOf(error),
         ...(error.details ? { details: error.details } : {}),
       });
       if (error.code === 'TRAINING_MARK_FAILED'
@@ -3135,10 +3226,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const retryUnresolvedTrainingAttempt = async () => {
     if (machinePublishHalt || annotationPublishHalt) return;
     try {
-      await retryTrainingAttempt(root, { executePublish, storeDir });
+      await retryTrainingAttempt(root, {
+        executePublish, storeDir, retirePending: settleRejectedPendingAnnotation,
+      });
     } catch (error) {
       if (error.code === 'NO_ATTEMPT') return;
-      log('training-attempt-retry-error', { code: error.code ?? 'ERROR' });
+      log('training-attempt-retry-error', {
+        code: error.code ?? 'ERROR',
+        ...rejectionFieldsOf(error),
+        ...(error.details ? { details: error.details } : {}),
+      });
       if (error.code === 'TRAINING_MARK_FAILED'
         || error.code === 'TRAINING_FLUSH_NO_PROGRESS') {
         machinePublishHalt = error.code;
@@ -3600,31 +3697,177 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       return out;
     } catch (error) {
       if (error.code !== 'PUBLISH_FAILED' && error.code !== 'PUBLISH_REJECTED') throw error;
-      if (finalizationDeadlineNs !== null && remainingMsUntil(finalizationDeadlineNs) <= 0) {
-        throw codedError(
+      // The relay is alive and judged this exact body; restarting or re-verifying it cannot
+      // change that answer. Transport failures and every non-semantic refusal still recover.
+      // Classification uses the error's own answer (ownRejectionOf), never an attached one.
+      const rejection = ownRejectionOf(error);
+      // #274: the first HTTP answer of this publication is recorded here, before anything
+      // decides what follows — a semantic refusal the caller settles, a recovery that succeeds,
+      // a retirement whose recheck answers differently. Closed fields only (the sanitized
+      // status and code); the retirement's own evidence stays bound to the actual recheck.
+      logRefusal(error, args);
+      if (rejection && isSemanticPublishRejection(rejection.httpStatus, rejection.serverCode)) throw error;
+      // #274: whatever ends this recovery — the deadline, relay verification, the retry's own
+      // refusal — carries the first closed status/code of the refusal that started it beside
+      // its own code (and a different retry answer as the one recheck tuple), so the run
+      // failure, the applied-action metric and the cleanup diagnostics keep the first response.
+      const first = error;
+      const deadlineExceeded = () => finalizationDeadlineNs !== null && remainingMsUntil(finalizationDeadlineNs) <= 0;
+      if (deadlineExceeded()) {
+        throw preserveInitialRejection(codedError(
           'FINALIZATION_DEADLINE_EXCEEDED',
           'finalization 공통 deadline이 만료됐습니다.',
           { cause: error },
-        );
+        ), first);
       }
       try {
         await recoverServerForPublish();
       } catch (recoveryError) {
-        if (finalizationDeadlineNs !== null && remainingMsUntil(finalizationDeadlineNs) <= 0) {
-          throw codedError(
+        if (deadlineExceeded()) {
+          throw preserveInitialRejection(codedError(
             'FINALIZATION_DEADLINE_EXCEEDED',
             'finalization 공통 deadline이 만료됐습니다.',
             { cause: recoveryError },
-          );
+          ), first);
         }
-        throw recoveryError;
+        throw preserveInitialRejection(recoveryError, first);
       }
-      d9Checkpoint('before-retry');
-      const retryArgs = args.includes('--retry') ? args : [...args, '--retry'];
-      const retried = await runPublish(retryArgs);
+      try {
+        d9Checkpoint('before-retry');
+      } catch (checkpointError) {
+        throw preserveInitialRejection(checkpointError, first);
+      }
+      // #274: the automatic resend is bound to EXACTLY the record the failed POST carried —
+      // the closed identity the publisher reported with its failure, captured before the
+      // recovery above awaited anything. The publisher enforces it under its lock before any
+      // POST (ATTEMPT_CHANGED leaves a replacement record unsent and intact), and the accepted
+      // reply must name that same body before the caller may mark anything from it. A failure
+      // that reported no identity cannot be resent safely: it fails closed with its own code.
+      const bound = boundAttemptOf(first);
+      const alreadyBound = args.includes('--expect-attempt-sha256') || args.includes('--retire-rejected');
+      if (!alreadyBound && !bound) {
+        throw preserveInitialRejection(codedError(
+          'RETRY_BINDING_REQUIRED',
+          '실패한 게시가 보낸 본문의 identity를 보고하지 않아 자동 재전송을 묶을 수 없습니다. 기록은 보존됩니다.',
+          { cause: first },
+        ), first);
+      }
+      const retryArgs = [
+        ...(args.includes('--retry') ? args : [...args, '--retry']),
+        ...(alreadyBound ? [] : ['--expect-attempt-sha256', bound.bodySha256, '--expect-game-epoch', bound.expectedGameEpoch]),
+      ];
+      let retried;
+      try {
+        retried = await runPublish(retryArgs);
+      } catch (retryError) {
+        // The resend's own HTTP answer — the first one when the failure that started this
+        // recovery was a transport failure — is recorded the same way, before any caller
+        // settles it (a retirement whose resend is then accepted leaves no other trace of it).
+        logRefusal(retryError, retryArgs);
+        throw preserveInitialRejection(retryError, first);
+      }
+      if (!alreadyBound && (retried?.bodySha256 !== bound.bodySha256 || retried?.publishId !== bound.publishId)) {
+        throw preserveInitialRejection(codedError(
+          'RETIRE_RESULT_UNBOUND',
+          '재전송 결과가 실패한 게시의 본문과 일치하지 않아 아무것도 표시하지 않았습니다.',
+          { cause: first },
+        ), first);
+      }
       reportHandReplay(retried);
       return retried;
     }
+  };
+
+  // #274: one publisher invocation's own sanitized HTTP answer, persisted in the owned loop log
+  // with closed fields only — the status, the allowlisted code, and which kind of invocation
+  // answered (an ordinary send, a --retry, a resend bound to a recorded body, a retirement).
+  // Nothing of the relay's text, the body, the token or any path. Logged once per invocation,
+  // at the boundary that observed it; a transport failure has no answer and logs nothing here.
+  function logRefusal(error, args) {
+    const own = ownRejectionOf(error);
+    if (!own) return false;
+    log('publish-refused', {
+      code: error.code, httpStatus: own.httpStatus, serverCode: own.serverCode,
+      retry: args.includes('--retry'), bound: args.includes('--expect-attempt-sha256'), retire: args.includes('--retire-rejected'),
+    });
+    return true;
+  }
+
+  // The closed identity of the record a failed POST carried, as the publisher reported it.
+  function boundAttemptOf(error) {
+    const attempt = error?.envelope?.attempt;
+    if (!attempt || typeof attempt !== 'object') return null;
+    if (!/^[0-9a-f]{64}$/.test(attempt.bodySha256 ?? '') || !/^[0-9a-f]{64}$/.test(attempt.expectedGameEpoch ?? '')
+      || !Number.isSafeInteger(attempt.publishId) || attempt.publishId < 1) return null;
+    return { bodySha256: attempt.bodySha256, publishId: attempt.publishId, expectedGameEpoch: attempt.expectedGameEpoch };
+  }
+
+  // #274: a recorded explanatory attempt (annotations alone) that the relay keeps refusing
+  // must not hold every later publish hostage. Retire it only for a retirable refusal of that
+  // exact body (RETIRABLE_ANNOTATION_REJECTIONS), from the re-verified relay, with durable
+  // evidence (see retireRejectedAnnotationAttempt). Returns true when the attempt is settled;
+  // false when this is not an annotation attempt or the refusal was not semantic (the
+  // caller keeps its own error); throws PENDING_ANNOTATION_BLOCKED for a semantic refusal
+  // that is not retirable — the attempt and the queue stay as they are.
+  const settleRejectedPendingAnnotation = async (error) => {
+    // The refusal to settle is this error's own answer; an earlier tuple a recovery boundary
+    // attached (a first nonsemantic refusal before this retry's semantic one, for example) is
+    // kept for diagnostics but never decides whether this refusal is retirable.
+    const rejection = ownRejectionOf(error);
+    if (!rejection || !trainingOn) return false;
+    // Test seam: a deterministic point before this caller's first read of the record.
+    await opts.beforeRetirementRead?.();
+    let record = null;
+    let absent = false;
+    try {
+      record = readRecordedAttemptJson();
+      absent = record === null;
+    } catch (readError) {
+      // A syntax-invalid record is the publisher's to classify (BAD_ATTEMPT): nothing to retire
+      // here. An entry in doubt (special file, link, oversize) is a closed failure that keeps
+      // the first refusal beside it; nothing is sent, disposed or removed on it.
+      if (readError?.code === 'BAD_PUBLISH_ATTEMPT') return false;
+      throw readError;
+    }
+    if (absent) {
+      // An ABSENT record may have been settled by a competing retirement before this read:
+      // only its verified evidence — surviving, or already consumed and proven by the exact
+      // identity the publisher reported for the refused attempt against the durable audit and
+      // disposition — settles anything. The helper sends nothing for an absent record.
+      assertNotStopping();
+      const settled = await retireRejectedAnnotationAttempt(root, {
+        executePublish, storeDir, expectedAttempt: boundAttemptOf(error),
+      });
+      return settled.settledElsewhere === true;
+    }
+    if (!isAnnotationOnlyAttempt(record)) return false;
+    if (!isRetirableAnnotationRejection(rejection.httpStatus, rejection.serverCode)) {
+      if (!isSemanticPublishRejection(rejection.httpStatus, rejection.serverCode)) return false;
+      throw codedError(
+        'PENDING_ANNOTATION_BLOCKED',
+        '해소되지 않은 학습 설명 게시를 서버가 거부했고 안전하게 폐기할 수 없어 멈춥니다. 기록은 보존됩니다.',
+        { cause: error, details: { ...rejection, pending: 'annotation' } },
+      );
+    }
+    assertNotStopping();
+    // Test seam: a deterministic point between this caller's presence read and the helper's
+    // own read of the record.
+    await opts.beforeRetirementHelper?.();
+    const settled = await retireRejectedAnnotationAttempt(root, {
+      executePublish,
+      storeDir,
+      verifyRelay: recoverServerForPublish,
+      // The identity recoverServerForPublish just proved; the publisher re-checks it around
+      // the exact retiring POST and refuses to retire for any other relay.
+      relayBinding: () => serverBindingVerified,
+      onRetired: (info) => log('training-annotation-retired', info),
+      // The refused request's own closed identity, in this branch too: a competitor may
+      // complete this very retirement between the read above and the helper's read (record
+      // and evidence both gone) — only that identity, proven against the durable audit and
+      // disposition, settles it then; a replacement record is never sent or marked by this caller.
+      expectedAttempt: boundAttemptOf(error),
+    });
+    return settled.retired === true || settled.published === true || settled.settledElsewhere === true;
   };
 
   let hintReadyLatch = true;
@@ -3666,6 +3909,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         await publish(['--from', turnPath, '--view-only']);
       } catch (error) {
         if (error.code === 'ATTEMPT_PENDING') continue;
+        if (recover && error.code === 'PUBLISH_REJECTED'
+          && await settleRejectedPendingAnnotation(error).catch(() => false)) continue;
         appendNotice(`gameOver 뷰 게시 실패: ${error.code ?? 'ERROR'}`);
         return;
       }
@@ -3740,13 +3985,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     try {
       for (;;) {
         try {
-          // A retry with a still-present record publishes the old exact body; once that
-          // succeeds the current transition must still publish. If the record vanished
-          // before invocation, --retry publishes the current turn itself and is terminal.
-          const resolvingRecordedBody = resolvingPending
-            && fs.existsSync(path.join(root, '.publish-attempt.json'));
+          // A drain (--retry after ATTEMPT_PENDING) publishes whatever recorded body the
+          // publisher finds under its own lock — never the current turn: a retry without a
+          // record is NO_ATTEMPT (handled below), and the record it finds may be one another
+          // publisher installed after this loop last looked. So a successful drain never counts
+          // as this transition's publication, whatever the file looked like beforehand: the
+          // current args are always published next, in order, without repeating the engine step.
           out = await executePublish(args);
-          if (resolvingPending && resolvingRecordedBody) {
+          if (resolvingPending) {
             resolvingPending = false;
             args = currentArgs;
             continue;
@@ -3760,6 +4006,29 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             continue;
           }
           if (recovered.has(code)) throw error;
+          if (code === 'PUBLISH_REJECTED') {
+            recovered.add(code);
+            let settled;
+            try {
+              settled = await settleRejectedPendingAnnotation(error);
+            } catch (failure) {
+              // The recovery failed for its own reason (relay verification, retirement,
+              // evidence): that failure is the answer, carrying this first refusal's closed
+              // status/code beside it rather than in place of it.
+              throw preserveInitialRejection(failure, error);
+            }
+            if (!settled) throw error;
+            log('publish-recovery', { code, mode: 'retire-rejected-annotation' });
+            // A caller that only asked to settle the recorded body is done; otherwise the
+            // current transition still has to be published, normally and in order.
+            if (resolvingPending || !currentArgs.includes('--retry')) {
+              resolvingPending = false;
+              args = currentArgs;
+              continue;
+            }
+            out = { ok: true, retired: true, applied: false };
+            break;
+          }
           if (code === 'ATTEMPT_PENDING') {
             recovered.add(code);
             assertNotStopping();
@@ -4924,7 +5193,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       let attemptedCoachQueueId = null;
       let attemptedPublishId = null;
       try {
-        const record = JSON.parse(fs.readFileSync(path.join(root, '.publish-attempt.json'), 'utf8'));
+        const record = readRecordedAttemptJson();
         attemptedCoachQueueId = record?.coachAuthority?.queueId ?? null;
         attemptedPublishId = Number.isInteger(record?.body?.publishId) ? record.body.publishId : null;
       } catch { /* publish.js owns malformed/stale attempt classification */ }
@@ -7387,6 +7656,20 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     'loop 락을 잃어 stop 결과를 기록하지 않았습니다.',
   );
 
+  // #273: bounded record of the failure that ended bootstrap/resume/run (closed code and, for
+  // a relay refusal, status + allowlisted code — never a message), so a cleanup failure that
+  // follows is persisted next to it instead of replacing it.
+  let lastRunFailure = null;
+  const noteRunFailure = (error) => {
+    if (!error || error.code === 'STOPPING') return;
+    // Closed vocabulary (tools/diagnostic-codes.js): a code a child or adapter printed is
+    // untrusted text even when it is shaped like an identifier.
+    const code = projectDiagnosticCode(error.code ?? 'ERROR');
+    // The first relay refusal of the sequence that ended the run and, when a recheck answered
+    // differently, that later tuple — both closed status/code pairs, never text.
+    lastRunFailure = { code, ...rejectionFieldsOf(error) };
+  };
+
   const persistCleanupFailure = (error) => {
     if (!lifecycleStarted) return null;
     // #192 L2: re-validate lock ownership before writing a cleanupError, exactly like the
@@ -7407,6 +7690,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       code: error.code ?? 'ERROR',
       message: error.message ?? String(error),
       ...(error.details ? { details: error.details } : {}),
+      // #273: the failure that ended the run, beside the cleanup failure that followed it.
+      ...(lastRunFailure ? { runError: lastRunFailure } : {}),
     };
     try {
       // requestStop may already have closed the normal log descriptor.
@@ -7626,6 +7911,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         // silently when the on-disk identity no longer matches this handle, so calling it
         // here even when `lockLostOnStop` is true is harmless.
         releaseLock();
+        // #273: the failure that ended the run is history only once this stop actually
+        // succeeded. A stop refused as LOOP_LOCK_LOST keeps the loop retained (session or
+        // starting loop), and every later resume must still report that first cause.
+        if (!lockLostOnStop) lastRunFailure = null;
       } catch (error) {
         throw persistCleanupFailure(error) ?? error;
       }
@@ -7643,6 +7932,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // condition changes (child exits, signal works, filesystem recovers). Concurrent
       // callers during this attempt still shared the exact same Promise above.
       if (stopPromise === attempt) stopPromise = null;
+      for (const adapter of failedAdapterDisposals) adapterDisposals.delete(adapter);
+      failedAdapterDisposals.clear();
     });
     return attempt;
   };
@@ -7844,13 +8135,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       log('bootstrap-playing', { port });
       return state;
     } catch (error) {
+      noteRunFailure(error);
       try {
         await requestStop();
       } catch (stopError) {
         // #192 L2: same rule as resume — a lost loop lock must not hide why bootstrap
         // failed; other cleanup failures keep surfacing as before.
-        if (stopError?.code !== 'LOOP_LOCK_LOST') throw stopError;
+        if (stopError?.code !== 'LOOP_LOCK_LOST') {
+          if (lastRunFailure && stopError.runError === undefined) stopError.runError = lastRunFailure;
+          throw stopError;
+        }
         log('bootstrap-cleanup-lock-lost', {});
+        // #273: the headline stays the failure that ended bootstrap; the cleanup that was
+        // refused is kept beside it, as a closed code only, so the retained launch reports
+        // run:<that failure> and cleanup:LOOP_LOCK_LOST — never the run failure twice.
+        if (error && typeof error === 'object' && error.cleanupFailure === undefined) {
+          error.cleanupFailure = { code: 'LOOP_LOCK_LOST' };
+        }
       }
       throw error;
     }
@@ -8315,6 +8616,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       return resumed;
     } catch (error) {
       const translated = translateFinalizationDeadline(error);
+      noteRunFailure(translated);
       // #192 L2: this cleanup stop is best-effort — a failure here (e.g. `LOOP_LOCK_LOST`,
       // surfaced once `requestStop` itself started re-checking lock ownership) must not mask
       // the original halt/finalization reason `translated` already carries.
@@ -8324,9 +8626,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       } catch (stopError) {
         // #192 L2: only a lost loop lock is swallowed here, so the halt that ended this
         // resume (for example FINALIZATION_ABORTED) stays the reported error. Any other
-        // cleanup failure keeps surfacing exactly as before this slice.
-        if (stopError?.code !== 'LOOP_LOCK_LOST') throw stopError;
+        // cleanup failure keeps surfacing exactly as before this slice — with the failure
+        // that ended the resume (#273) carried beside it.
+        if (stopError?.code !== 'LOOP_LOCK_LOST') {
+          if (lastRunFailure && stopError.runError === undefined) stopError.runError = lastRunFailure;
+          throw stopError;
+        }
         log('resume-cleanup-lock-lost', {});
+        // #273: as for bootstrap — the halt stays the headline, the refused cleanup travels
+        // beside it as a closed code for the retained launch's diagnostics.
+        if (translated && typeof translated === 'object' && translated.cleanupFailure === undefined) {
+          translated.cleanupFailure = { code: 'LOOP_LOCK_LOST' };
+        }
       }
       throw translated;
     }
@@ -8584,6 +8895,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           ...metric,
           publishMs: Math.max(0, monotonicNow() - publishStarted),
           publishError: error.code ?? 'ERROR',
+          ...rejectionFieldsOf(error, { prefix: 'publish' }),
         });
         throw error;
       } finally {
@@ -8596,13 +8908,22 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   return {
     bootstrap,
     resume,
-    run,
+    async run() {
+      try {
+        return await run();
+      } catch (error) {
+        noteRunFailure(error);
+        throw error;
+      }
+    },
     coachPipeline,
     pause, resumePlay, retryDecision, endGame, skipHandResult, interruptDecision,
     get pendingDecision() { return readLoopState()?.pendingDecision ?? null; },
     get playState() { return control?.read().playState ?? null; },
     requestStop,
     get stopping() { return stopRequested; },
+    // #273: the bounded failure that ended the last bootstrap/resume/run, if any.
+    get runFailure() { return lastRunFailure; },
     get serverPid() { return serverPid; },
     // Host lobby read-only progress (tools/session-manager.js snapshot). No
     // tokens, paths or PIDs: stage names, runtime names, counts and times.

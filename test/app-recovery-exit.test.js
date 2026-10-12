@@ -376,9 +376,10 @@ test('#197 an unverified same-PID loop owner keeps startingLoop recovery exits f
   try {
     f.manager.command(request);
     const receipt=await settle(f.manager,request.requestId);
-    assert.equal(receipt.status,'failed');assert.equal(receipt.error,'FINALIZE_RESOLVER_CUT');
+    // #273/#274: a resolver's own code is not a repository code; the host sees UNLISTED.
+    assert.equal(receipt.status,'failed');assert.equal(receipt.error,'UNLISTED');
     const snapshot=f.manager.snapshot();
-    assert.equal(snapshot.state,'error');assert.equal(snapshot.error,'FINALIZE_RESOLVER_CUT');
+    assert.equal(snapshot.state,'error');assert.equal(snapshot.error,'UNLISTED');
     assert.equal(snapshot.recoveryExit,null,'unverified owner leaves startingLoop in the recovery gate');
     assert.deepEqual(snapshot.allowedCommands,['resume']);
     assert.equal(fs.existsSync(path.join(root,'loop.lock.d')),true);

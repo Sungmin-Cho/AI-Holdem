@@ -11,13 +11,22 @@ import { assertEvaluationId } from '../training/contracts.js';
 import { toPublicSummary } from '../training/public-view.js';
 import { createProfileStore, createMistakeBank } from './training-stores.js';
 import {
+  readRecordedAttempt as readAttemptFile,
+  readRejectionRecords as readAuditRecords,
+  readRetirementEvidence as readEvidenceFile,
+  removeRetirementEvidence,
+} from './rejection-audit.js';
+import {
   collectPrivateLiterals,
   detailRefOf,
   gameEpochOf,
+  isAnnotationOnlyAttempt,
+  isRetirableAnnotationRejection,
   legacyExplanationAnnotation,
   legacyTrainingPayloadSha256,
   projectTrainingAnnotation,
   projectTrainingSummary,
+  publicProofId,
   sha256Hex,
   textLeaksPrivate,
   validatePrivateEngineState,
@@ -28,6 +37,7 @@ import {
   openContained,
   readJsonl,
   readJsonSecure,
+  syncDirectory,
   writeContained,
   writeJsonSecure,
   writeTextSecure,
@@ -247,7 +257,17 @@ function loadMistakeIds(storeDir) {
   }
 }
 
-export function writeAnnotationExactFile(sessionDir, detailRef, field, canonical) {
+// #274: the canonical annotation files live in training/annotations; their NAMES are durable
+// only once that directory (and its parent) is synced. Both are synced after a fresh create
+// and again by every retirement before evidence that depends on those names exists.
+export function syncAnnotationDirectories(sessionDir, sync = syncDirectory) {
+  const root = trainingDir(sessionDir);
+  const annotations = path.join(root, 'annotations');
+  if (fs.existsSync(annotations)) sync(annotations);
+  sync(root);
+}
+
+export function writeAnnotationExactFile(sessionDir, detailRef, field, canonical, { sync = syncDirectory } = {}) {
   const root = trainingDir(sessionDir);
   ensureDir(path.join(root, 'annotations'));
   const bytes = JSON.stringify(canonical);
@@ -260,6 +280,9 @@ export function writeAnnotationExactFile(sessionDir, detailRef, field, canonical
     if (existing !== bytes) return { reused: true, conflict: true };
     return { reused: true, conflict: false };
   }
+  // The file's bytes were fsynced by writeContained; its name is durable only with the
+  // directory entry (POSIX; reported, not claimed, on Windows).
+  syncAnnotationDirectories(sessionDir, sync);
   return { reused: false, conflict: false };
 }
 
@@ -330,6 +353,232 @@ function collectRecoveryDenyLiterals(sessionDir, auth) {
     throw coded('DENY_LITERALS_EMPTY', 'deny literal 목록이 비어 있습니다.');
   }
   return literals;
+}
+
+// The publisher appends one line per refusal it retired (tools/publish.js) through
+// tools/rejection-audit.js; reading goes through the same bounded, single-link, non-symlink
+// reader. Only a missing log is empty; any other read failure throws and nothing is settled.
+function readRejectionRecords(sessionDir) {
+  try {
+    return readAuditRecords(sessionDir);
+  } catch (error) {
+    throw coded('REJECTION_EVIDENCE_UNAVAILABLE', '게시 거절 감사 로그를 안전하게 읽지 못했습니다.');
+  }
+}
+
+function readRetirementEvidence(sessionDir) {
+  try {
+    return readEvidenceFile(sessionDir);
+  } catch {
+    throw coded('REJECTION_EVIDENCE_UNAVAILABLE', '비공개 폐기 증거를 안전하게 읽지 못했습니다.');
+  }
+}
+
+// The digest of the attempt the publisher still holds, or null when there is none. An attempt
+// that cannot be read safely is not "absent": nothing is settled while it is in doubt.
+function recordedAttemptSha256(sessionDir) {
+  // The bounded, preinspected, non-blocking reader of tools/rejection-audit.js: a FIFO, a link,
+  // a hard link or an oversize entry at the attempt's name is refused without opening it in a
+  // way that could block this process, and reads as "in doubt", never as absent.
+  let read;
+  try {
+    read = readAttemptFile(sessionDir);
+  } catch {
+    throw coded('REJECTION_EVIDENCE_UNAVAILABLE', '기록된 게시 시도를 안전하게 읽지 못했습니다.');
+  }
+  if (read.absent) return null;
+  try {
+    return sha256Hex(JSON.stringify(JSON.parse(read.raw)?.body ?? null));
+  } catch {
+    throw coded('REJECTION_EVIDENCE_UNAVAILABLE', '기록된 게시 시도가 JSON이 아닙니다.');
+  }
+}
+
+// #274 local artifact integrity: every lookup a retirement makes into the authority's maps —
+// items, the annotation queue, an item's annotations — must land on an OWN, registered,
+// plain record. A key such as __proto__ or constructor resolves through the prototype chain
+// on a plain object; crafted evidence naming it must never read Object.prototype as an
+// evaluation, restore a file for it, or write a disposition onto it. Legitimate own keys are
+// unaffected (no name blacklist): membership is decided by hasOwnProperty alone.
+function ownRecord(map, key) {
+  if (!plainObject(map) || typeof key !== 'string' || key.length === 0) return null;
+  if (!Object.prototype.hasOwnProperty.call(map, key)) return null;
+  const value = map[key];
+  return plainObject(value) ? value : null;
+}
+// A registered evaluation: an own item whose identity parses and whose payload digest is one.
+function ownEvaluationItem(auth, evaluationId) {
+  const item = ownRecord(auth?.items, evaluationId);
+  if (!item) return null;
+  try { assertEvaluationId(evaluationId); } catch { return null; }
+  if (!SHA256_RE.test(item.payloadSha256 ?? '')) return null;
+  return item;
+}
+const ownQueued = (auth, evaluationId, field) => ownRecord(ownRecord(auth?.annotationQueue, evaluationId), field);
+const ownAnnotation = (item, field) => ownRecord(ownRecord(item, 'annotations'), field);
+
+const evidenceItemsOf = (annotationAuthority) => annotationAuthority.items.map((entry) => ({
+  evaluationId: entry?.evaluationId, field: entry?.field, valueSha256: entry?.valueSha256,
+}));
+const sameItems = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length
+  && a.every((entry, i) => plainObject(entry) && entry.evaluationId === b[i].evaluationId
+    && entry.field === b[i].field && entry.valueSha256 === b[i].valueSha256);
+
+// The private evidence proves a retirement only when it is internally exact (its body hashes
+// to the digest it names, every body annotation is bound by its authority and proof), belongs
+// to this game, names a retirable refusal and a well-formed verified relay identity, and the
+// digest-only audit line the publisher wrote after it agrees on every field. Returns the
+// matching audit record; anything else throws and nothing is settled.
+function verifyRetirementEvidence(sessionDir, evidence, auth) {
+  const invalid = () => coded('REJECTION_EVIDENCE_INVALID', '비공개 폐기 증거가 이 게임·본문에 묶이지 않습니다.');
+  if (!plainObject(evidence) || evidence.schemaVersion !== 1
+    || !Number.isSafeInteger(evidence.publishId)
+    || !SHA256_RE.test(evidence.bodySha256 ?? '')
+    || evidence.expectedGameEpoch !== auth.gameEpoch
+    || !isRetirableAnnotationRejection(evidence.httpStatus, evidence.serverCode)
+    || !plainObject(evidence.body) || evidence.body.publishId !== evidence.publishId
+    || sha256Hex(JSON.stringify(evidence.body)) !== evidence.bodySha256
+    || !isAnnotationOnlyAttempt({ body: evidence.body, annotationAuthority: evidence.annotationAuthority })
+    || evidence.annotationAuthority.expectedGameEpoch !== auth.gameEpoch
+    || !Array.isArray(evidence.annotationAuthority.items)
+    || evidence.annotationAuthority.items.length !== evidence.body.trainingAnnotations.length
+    || evidence.annotationAuthority.items.length === 0) throw invalid();
+  const binding = evidence.relayBinding;
+  if (!plainObject(binding) || !Number.isSafeInteger(binding.pid) || binding.pid < 1
+    || typeof binding.startTime !== 'string' || binding.startTime.length === 0 || binding.startTime.length > 128
+    || !Number.isInteger(binding.port) || binding.port < 1 || binding.port > 65535) throw invalid();
+  const items = evidenceItemsOf(evidence.annotationAuthority);
+  const itemKeys = items.map((entry) => `${entry.evaluationId}:${entry.field}`);
+  if (new Set(itemKeys).size !== items.length) throw invalid();
+  // One-to-one membership: every note is a distinct identity bound to its item, and every item
+  // is named by a note — the audit line may only name what the relay actually judged.
+  const named = new Set();
+  evidence.body.trainingAnnotations.forEach((note) => {
+    const bound = plainObject(note)
+      ? items.find((entry) => entry.evaluationId === note.evaluationId && entry.field === note.field)
+      : null;
+    if (!bound || note.valueSha256 !== bound.valueSha256 || !SHA256_RE.test(bound.valueSha256 ?? '')
+      || note.annotationProof?.valueSha256 !== bound.valueSha256
+      || note.annotationProof?.id !== publicProofId(`${bound.evaluationId}:${bound.field}`)) throw invalid();
+    // The note's actual value must BE the digest it claims: the projection is recomputed from
+    // its field, status and value against the item's payload digest, whether or not the
+    // canonical file exists. A value that disagrees with an unchanged digest and proof is
+    // forged evidence, never a disposition — the claimed digests alone prove nothing. The
+    // item itself must be an OWN registered evaluation (never an inherited property) and the
+    // field a plain name.
+    if (typeof bound.field !== 'string' || !/^[a-z][A-Za-z0-9]{0,31}$/.test(bound.field)) throw invalid();
+    const item = ownEvaluationItem(auth, bound.evaluationId);
+    if (!item) throw invalid();
+    let projected;
+    try {
+      projected = projectTrainingAnnotation({
+        evaluationId: bound.evaluationId, payloadSha256: item.payloadSha256,
+        field: bound.field, status: note.status, value: note.value,
+      });
+    } catch {
+      throw invalid();
+    }
+    if (projected.valueSha256 !== bound.valueSha256) throw invalid();
+    const key = `${bound.evaluationId}:${bound.field}`;
+    if (named.has(key)) throw invalid();
+    named.add(key);
+  });
+  if (itemKeys.some((key) => !named.has(key))) throw invalid();
+  const record = readRejectionRecords(sessionDir).findLast((row) => (
+    plainObject(row)
+    && row.schemaVersion === 1
+    && row.publishId === evidence.publishId
+    && row.bodySha256 === evidence.bodySha256
+    && row.expectedGameEpoch === evidence.expectedGameEpoch
+    && row.httpStatus === evidence.httpStatus
+    && row.serverCode === evidence.serverCode
+    && sameItems(row.items, items)
+  ));
+  if (!record) throw coded('REJECTION_EVIDENCE_MISSING', '게시 거절의 영속 감사 기록이 없습니다.');
+  return record;
+}
+
+// Idempotent disposition of one proven retirement. A body of one annotation retires it — out
+// of the queue, kept on the item with the refusal for audit. A body of several cannot say
+// which one was refused, so each stays queued but is marked (once per refused body) to be sent
+// alone; the next flush then isolates the refused one. Entries already settled (published,
+// retired, or no longer queued with that digest) are skipped, so a replay after an
+// interruption changes nothing a first pass already did.
+// #274 rollback: the refusal disposition of a proven value when its queue entry is absent. A
+// permitted crash may restore the authority from before the seal that queued the annotation
+// (the seal is a rename into training/ whose entry was not yet synced) while the exact
+// annotation file, the evidence and the audit survive; the hand pipeline would then find the
+// exact file and seal — and send — the refused value again. The item's annotation is given the
+// refusal for that exact digest (status from the evidence's own note, its canonical value left
+// on disk untouched); an annotation that is published, that carries another digest, or that
+// already holds the refusal is left exactly as it is. True when a disposition was recorded.
+function disposeAbsentQueued(auth, entry, record, notes) {
+  const item = ownEvaluationItem(auth, entry.evaluationId);
+  if (!item) return false;
+  const rejection = {
+    publishId: record.publishId, httpStatus: record.httpStatus, serverCode: record.serverCode, at: record.at,
+  };
+  if (!ownRecord(item, 'annotations')) item.annotations = {};
+  const annotation = ownAnnotation(item, entry.field);
+  if (!annotation) {
+    const note = (notes ?? []).find((row) => plainObject(row)
+      && row.evaluationId === entry.evaluationId && row.field === entry.field);
+    item.annotations[entry.field] = {
+      status: note?.status === 'unavailable' ? 'unavailable' : 'ready',
+      valueSha256: entry.valueSha256,
+      published: false,
+      publishFailed: 'rejected',
+      rejection,
+    };
+    return true;
+  }
+  if (annotation.published === true || annotation.valueSha256 !== entry.valueSha256
+    || annotation.publishFailed === 'rejected') return false;
+  annotation.publishFailed = 'rejected';
+  annotation.rejection = rejection;
+  return true;
+}
+
+function applyRetirement(auth, record, notes = []) {
+  const alone = record.items.length === 1;
+  const result = { retired: 0, isolated: 0, skipped: 0 };
+  let changed = false;
+  for (const entry of record.items) {
+    const queued = ownQueued(auth, entry.evaluationId, entry.field);
+    if (!queued || queued.published || queued.valueSha256 !== entry.valueSha256) {
+      if (alone && !queued && disposeAbsentQueued(auth, entry, record, notes)) {
+        changed = true;
+        result.retired += 1;
+        continue;
+      }
+      result.skipped += 1;
+      continue;
+    }
+    if (!alone) {
+      if (queued.solo !== true || queued.isolatedBy !== record.bodySha256) {
+        queued.solo = true;
+        queued.isolatedBy = record.bodySha256;
+        queued.rejections = (queued.rejections ?? 0) + 1;
+        changed = true;
+      }
+      result.isolated += 1;
+      continue;
+    }
+    removeQueuedAnnotation(auth, entry.evaluationId, entry.field);
+    const annotation = ownAnnotation(ownEvaluationItem(auth, entry.evaluationId), entry.field);
+    if (annotation) {
+      annotation.publishFailed = 'rejected';
+      annotation.rejection = {
+        publishId: record.publishId,
+        httpStatus: record.httpStatus,
+        serverCode: record.serverCode,
+        at: record.at,
+      };
+    }
+    changed = true;
+    result.retired += 1;
+  }
+  return { result, changed };
 }
 
 function snapshotAnnotationRow(snapshot, evaluationId, field) {
@@ -412,9 +661,9 @@ function validateRecoverySnapshotRow(sessionDir, auth, item, field, annotation, 
 }
 
 function removeQueuedAnnotation(auth, evaluationId, field) {
-  const queued = auth.annotationQueue?.[evaluationId];
+  const queued = ownRecord(auth.annotationQueue, evaluationId);
   if (!queued) return;
-  delete queued[field];
+  if (Object.prototype.hasOwnProperty.call(queued, field)) delete queued[field];
   if (Object.keys(queued).length === 0) delete auth.annotationQueue[evaluationId];
 }
 
@@ -524,15 +773,14 @@ function resolveV1Attempt(sessionDir, items, { gameEpoch, digestMap } = {}) {
   const attemptFile = path.join(sessionDir, '.publish-attempt.json');
   let record;
   try {
-    record = JSON.parse(openContained(sessionDir, ['.publish-attempt.json'], {
-      maxBytes: 1_000_000,
-    }).toString('utf8'));
-  } catch (error) {
-    if (error.code === 'ENOENT') {
+    const read = readAttemptFile(sessionDir);
+    if (read.absent) {
       return {
         resolved: false, applied: false, appliedIds: [], appliedAnnotationIds: [],
       };
     }
+    record = JSON.parse(read.raw);
+  } catch {
     throw coded('TRAINING_MIGRATION_CORRUPT', 'publish attempt 파일을 안전하게 읽을 수 없습니다.');
   }
   const trainingAuthz = record.trainingAuthority;
@@ -1077,6 +1325,43 @@ function persistAuth(sessionDir, auth) {
   writeJsonSecure(authPath(sessionDir), auth);
 }
 
+// #274: every operation on TRAINING_LOCK — ordinary mutation, accept, mark, consumption,
+// migration and retirement alike — is admitted per session inside this process, across
+// training control instances, before the filesystem mutex is taken. The mutex (withNamedLock)
+// is a cross-process primitive that waits synchronously (Atomics.wait): an in-process caller
+// polling it while another in-process caller holds it (a consumer suspended on an await, for
+// example) would stall the event loop that holder needs to run its release, and time out as
+// LOCKED. Admitted callers wait asynchronously instead, in order; the mutex, its timeout, its
+// ownership identity and every proof gate then run exactly as before, and cross-process
+// contention still answers LOCKED. Entries are removed once their work has settled, so the map
+// holds nothing for a session with no operation in flight. No locked body re-enters the lock
+// for the same session (the *Unlocked helpers are the only things called under it), so the
+// queue cannot wait on itself. The key is the session's real path, so an alias the store
+// contract accepts (trailing slash, `.` segments, a symlink to the same directory) admits to
+// the same queue as the path the mutex is taken under.
+const trainingAdmission = new Map();
+
+function admissionKeyOf(sessionDir) {
+  const resolved = path.resolve(sessionDir);
+  try {
+    return fs.realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function admitTrainingLock(sessionDir, work) {
+  const key = admissionKeyOf(sessionDir);
+  const prev = trainingAdmission.get(key) ?? Promise.resolve();
+  const run = prev.then(work);
+  const tail = run.then(() => {}, () => {});
+  trainingAdmission.set(key, tail);
+  tail.then(() => {
+    if (trainingAdmission.get(key) === tail) trainingAdmission.delete(key);
+  });
+  return run;
+}
+
 function userDecisionsOf(record) {
   if (!record || !Array.isArray(record.decisions)) return [];
   return record.decisions.filter((snap) => snap.actorId === 'user');
@@ -1229,12 +1514,36 @@ function verifyReferenceEvaluation(sessionDir, evaluation, handNo, gameEpoch, so
 }
 
 export function createTrainingControl({ storeDir, io } = {}) {
+  // In-process admission first (admitTrainingLock), then the cross-process mutex with its
+  // unchanged timeout and ownership semantics.
   async function withLock(sessionDir, fn) {
-    return withNamedLock(sessionDir, TRAINING_LOCK, fn);
+    return admitTrainingLock(sessionDir, () => withNamedLock(sessionDir, TRAINING_LOCK, fn));
+  }
+
+  // #274 crash durability: the authority replacement (a rename into training/) must be on
+  // disk before the private retirement evidence — the only thing that could redo it — is
+  // consumed. writeJsonSecure fsyncs the file, not the directory entry; this syncs the
+  // training directory, also on a replay that found the authority already updated (the
+  // earlier process may have died between its rename and its sync). A sync failure fails
+  // closed with the evidence kept; it never claims durability it did not get. The seam
+  // (`io.syncDirectory`) exists for failure injection and ordering tests only.
+  const syncAuthorityDirectory = typeof io?.syncDirectory === 'function' ? io.syncDirectory : syncDirectory;
+  // Ordering seam for regressions only: called at named points of a settlement so a test can
+  // schedule a concurrent change exactly between two reads. Absent in production.
+  const settlementCheckpoint = typeof io?.settlementCheckpoint === 'function' ? io.settlementCheckpoint : null;
+  function persistAuthDurably(sessionDir, auth, { changed }) {
+    if (changed) persistAuth(sessionDir, auth);
+    try {
+      syncAuthorityDirectory(trainingDir(sessionDir));
+    } catch (error) {
+      const failure = coded('REJECTION_EVIDENCE_UNAVAILABLE', 'training authority 디렉터리를 동기화하지 못해 폐기 증거를 유지합니다.');
+      if (typeof error?.code === 'string' && /^E[A-Z]{2,15}$/.test(error.code)) failure.causeCode = error.code;
+      throw failure;
+    }
   }
 
   async function withMigrationLock(sessionDir, fn) {
-    return withNamedLock(sessionDir, TRAINING_LOCK, fn, { timeoutMs: 10_000 });
+    return admitTrainingLock(sessionDir, () => withNamedLock(sessionDir, TRAINING_LOCK, fn, { timeoutMs: 10_000 }));
   }
 
   function loadAuthority(sessionDir) {
@@ -1672,6 +1981,241 @@ export function createTrainingControl({ storeDir, io } = {}) {
     });
   }
 
+  // #274: settle a retirement the publisher proved, under the training lock. The private
+  // evidence it left (exact body, authority, verified relay) is applied only when the attempt
+  // it retired is gone; while that attempt is still recorded the retirement is unfinished and
+  // nothing changes. After the disposition is persisted and its directory entry synced, the
+  // evidence is removed; an interruption between the two replays the same disposition
+  // (applyRetirement is idempotent) and syncs again before removing.
+  // #274: the canonical files a retired body's entries need for their isolated resends may
+  // have lost their directory entries in a crash while the authority, the evidence and the
+  // audit survived. Before the evidence — the only copy of those exact values — is consumed,
+  // every missing file is restored from the evidence's own (already verified) note: the value
+  // is re-projected against the current item and must reproduce the digest the authority
+  // binds; a file that exists is never overwritten, an item whose annotation now carries
+  // another digest or is published is left alone, and anything that cannot be reproduced
+  // keeps the evidence on disk (explicit failure). The names are synced before consumption.
+  function restoreExactFilesFromEvidence(sessionDir, auth, evidence) {
+    let restored = 0;
+    for (const note of evidence.body?.trainingAnnotations ?? []) {
+      // Verified evidence names own registered evaluations only (verifyRetirementEvidence);
+      // nothing is restored for anything else.
+      const item = ownEvaluationItem(auth, note.evaluationId);
+      if (!item) throw coded('REJECTION_EVIDENCE_INVALID', '폐기 증거가 등록되지 않은 평가를 가리켜 복원하지 않습니다.');
+      // The canonical file, read through the contained reader (preinspected, non-blocking):
+      // null only when absent; an unsafe or unreadable entry keeps the evidence, settles nothing.
+      let existing = null;
+      try {
+        existing = readAnnotationExactFile(sessionDir, item.detailRef, note.field);
+      } catch (error) {
+        if (error.code !== 'ENOENT') {
+          throw coded('REJECTION_EVIDENCE_UNAVAILABLE', '폐기된 annotation의 canonical 파일을 안전하게 확인하지 못했습니다.');
+        }
+      }
+      // An entry settled further since (published, or carrying another digest now) is left
+      // exactly as it is, its canonical file included: nothing newer is ever overwritten.
+      const annotation = ownAnnotation(item, note.field);
+      if (annotation && (annotation.published === true || annotation.valueSha256 !== note.valueSha256)) continue;
+      let projected;
+      try {
+        projected = projectTrainingAnnotation({
+          evaluationId: note.evaluationId, payloadSha256: item.payloadSha256,
+          field: note.field, status: note.status, value: note.value,
+        });
+      } catch {
+        throw coded('REJECTION_EVIDENCE_INVALID', '폐기 증거의 annotation 값을 투영하지 못해 canonical 파일을 복원하지 않습니다.');
+      }
+      if (projected.valueSha256 !== note.valueSha256) {
+        throw coded('REJECTION_EVIDENCE_INVALID', '폐기 증거의 annotation 값이 권한의 digest와 달라 canonical 파일을 복원하지 않습니다.');
+      }
+      if (existing !== null) {
+        // An entry still being settled whose canonical file exists: that file must BE the
+        // verified value — its own field, status and value must project to the digest the
+        // authority and the evidence agree on. A readable file holding another value or shape
+        // means the verified recovery copy is still needed: it is refused, the evidence and the
+        // queue are kept, and nothing is overwritten — the file is left for repair.
+        let found = null;
+        try {
+          found = plainObject(existing) && existing.field === note.field
+            ? projectTrainingAnnotation({
+              evaluationId: note.evaluationId, payloadSha256: item.payloadSha256,
+              field: existing.field, status: existing.status, value: existing.value,
+            })
+            : null;
+        } catch {
+          found = null;
+        }
+        if (!found || found.valueSha256 !== note.valueSha256 || found.status !== projected.status) {
+          throw coded('REJECTION_EVIDENCE_INVALID', '폐기된 annotation의 canonical 파일이 검증된 값과 달라 정리하지 않습니다.');
+        }
+        continue;
+      }
+      let written;
+      try {
+        written = writeAnnotationExactFile(sessionDir, item.detailRef, note.field, {
+          field: note.field, status: projected.status, value: projected.value,
+        }, { sync: syncAuthorityDirectory });
+      } catch (error) {
+        // The file may already be installed when its directory sync failed: the next
+        // settlement finds it and still syncs below before anything is consumed.
+        throw unsyncedEvidenceFailure(error);
+      }
+      if (written.conflict) {
+        throw coded('REJECTION_EVIDENCE_INVALID', '폐기된 annotation의 canonical 파일이 다른 값으로 존재해 복원하지 않습니다.');
+      }
+      if (!written.reused) restored += 1;
+    }
+    // Every verified settlement — a replay that found every file already installed included —
+    // makes the canonical names durable (training/annotations, then training) BEFORE the
+    // evidence that holds their values is consumed. A sync failure keeps the evidence.
+    try {
+      syncAnnotationDirectories(sessionDir, syncAuthorityDirectory);
+    } catch (error) {
+      throw unsyncedEvidenceFailure(error);
+    }
+    return restored;
+  }
+
+  function unsyncedEvidenceFailure(error) {
+    if (typeof error?.code === 'string' && error.code.startsWith('REJECTION_EVIDENCE_')) return error;
+    const failure = coded('REJECTION_EVIDENCE_UNAVAILABLE', 'canonical annotation 디렉터리를 동기화하지 못해 폐기 증거를 유지합니다.');
+    if (typeof error?.code === 'string' && /^E[A-Z]{2,15}$/.test(error.code)) failure.causeCode = error.code;
+    return failure;
+  }
+
+  function settleRetirementUnlocked(sessionDir, auth) {
+    // #274 ordering: the recorded attempt's state is established BEFORE the evidence is read.
+    // An ordinary retry that the relay accepts withdraws the evidence first and the attempt
+    // afterwards (publisher), so evidence read before the attempt check could be obsolete by
+    // the time the attempt is found absent and authorize a refusal that never stood. Reading
+    // the attempt first, then the evidence, and checking the attempt again afterwards (a
+    // retirement whose attempt is still recorded is unfinished) closes both directions.
+    const recordedBefore = recordedAttemptSha256(sessionDir);
+    settlementCheckpoint?.('attempt-checked');
+    const evidence = readRetirementEvidence(sessionDir);
+    if (!evidence) return null;
+    if (recordedBefore === evidence?.bodySha256 || recordedAttemptSha256(sessionDir) === evidence?.bodySha256) {
+      return { pending: true, publishId: evidence.publishId, bodySha256: evidence.bodySha256 };
+    }
+    if (!auth) throw coded('NO_TRAINING_AUTHORITY', 'training authority가 없습니다.');
+    const record = verifyRetirementEvidence(sessionDir, evidence, auth);
+    restoreExactFilesFromEvidence(sessionDir, auth, evidence);
+    const { result, changed } = applyRetirement(auth, record, evidence.body?.trainingAnnotations);
+    persistAuthDurably(sessionDir, auth, { changed });
+    let removed;
+    try { removed = removeRetirementEvidence(sessionDir, evidence.bodySha256); } catch { removed = false; }
+    if (!removed) throw coded('REJECTION_EVIDENCE_UNAVAILABLE', '정리한 폐기 증거를 지우지 못했습니다.');
+    return {
+      pending: false, publishId: record.publishId, bodySha256: record.bodySha256,
+      expectedGameEpoch: evidence.expectedGameEpoch,
+      httpStatus: record.httpStatus, serverCode: record.serverCode, ...result,
+    };
+  }
+
+  // Before any new annotation publication is built: settle a retirement an interruption left
+  // behind (the attempt already removed, the queue not yet settled). Null when there is none.
+  async function reconcileRetiredAnnotations(sessionDir) {
+    return withLock(sessionDir, () => settleRetirementUnlocked(sessionDir, loadAuthorityUnlocked(sessionDir)));
+  }
+
+  // #274: a retirement another caller COMPLETED — attempt removed, evidence consumed, queue
+  // disposed — leaves exactly two durable traces: the digest-only audit row and the queue
+  // disposition. The closed identity the publisher reported for the refused attempt (its body
+  // digest, publishId and game epoch — never a recheck tuple, never "the latest row") proves
+  // that retirement only when BOTH agree with it, under the training lock: exactly one audit row
+  // for that identity, a retirable refusal, and every item it names settled against the same
+  // value digest — alone: retired on the item with that publishId; as a batch: still queued and
+  // isolated by that very body, or since settled further (retired alone or published). An
+  // attempt still recorded, evidence still outstanding, a missing or ambiguous row, a mismatched
+  // or corrupt item, or any other state proves nothing: nothing is claimed, nothing changes.
+  async function verifyCompletedRetirement(sessionDir, expected) {
+    return withLock(sessionDir, () => {
+      const auth = loadAuthorityUnlocked(sessionDir);
+      if (!auth) return { settled: false, reason: 'NO_TRAINING_AUTHORITY' };
+      if (!plainObject(expected) || !Number.isSafeInteger(expected.publishId) || expected.publishId < 1
+        || !SHA256_RE.test(expected.bodySha256 ?? '') || expected.expectedGameEpoch !== auth.gameEpoch) {
+        return { settled: false, reason: 'IDENTITY' };
+      }
+      if (recordedAttemptSha256(sessionDir) !== null) return { settled: false, reason: 'ATTEMPT_PRESENT' };
+      if (readRetirementEvidence(sessionDir)) return { settled: false, reason: 'EVIDENCE_OUTSTANDING' };
+      const rows = readRejectionRecords(sessionDir).filter((row) => plainObject(row) && row.schemaVersion === 1
+        && row.publishId === expected.publishId && row.bodySha256 === expected.bodySha256
+        && row.expectedGameEpoch === expected.expectedGameEpoch
+        && isRetirableAnnotationRejection(row.httpStatus, row.serverCode)
+        && Array.isArray(row.items) && row.items.length > 0);
+      if (rows.length === 0) return { settled: false, reason: 'AUDIT_MISSING' };
+      // Repeated rows for the same body are legitimate history (an interrupted retirement that
+      // was audited and then retired again; the audit always appends) as long as every row
+      // names the SAME membership — the same items with the same value digests. Rows for the
+      // same identity that disagree on membership contradict each other and prove nothing.
+      // Timestamps and the retirable verdict may differ between consistent rows.
+      const membershipOf = (row) => row.items.map((entry) => (plainObject(entry)
+        ? `${entry.evaluationId}\u0000${entry.field}\u0000${entry.valueSha256}` : '\u0000invalid')).sort().join('\n');
+      const membership = membershipOf(rows[0]);
+      if (rows.some((row) => membershipOf(row) !== membership)) return { settled: false, reason: 'AUDIT_AMBIGUOUS' };
+      const record = rows[0];
+      const alone = record.items.length === 1;
+      for (const entry of record.items) {
+        if (!plainObject(entry) || typeof entry.evaluationId !== 'string' || typeof entry.field !== 'string'
+          || !SHA256_RE.test(entry.valueSha256 ?? '')) return { settled: false, reason: 'AUDIT_ITEM' };
+        const item = ownEvaluationItem(auth, entry.evaluationId);
+        if (!item) return { settled: false, reason: 'AUDIT_ITEM' };
+        const queued = ownQueued(auth, entry.evaluationId, entry.field);
+        const annotation = ownAnnotation(item, entry.field);
+        const sameDigest = (row) => plainObject(row) && row.valueSha256 === entry.valueSha256;
+        if (alone) {
+          const retired = !queued && sameDigest(annotation) && annotation.publishFailed === 'rejected'
+            && plainObject(annotation.rejection) && annotation.rejection.publishId === record.publishId;
+          if (!retired) return { settled: false, reason: 'DISPOSITION' };
+          continue;
+        }
+        const isolated = sameDigest(queued) && queued.solo === true && queued.isolatedBy === record.bodySha256;
+        const settledLater = !queued && sameDigest(annotation)
+          && (annotation.published === true || annotation.publishFailed === 'rejected');
+        if (!isolated && !settledLater) return { settled: false, reason: 'DISPOSITION' };
+      }
+      return { settled: true, publishId: record.publishId, bodySha256: record.bodySha256, items: record.items.length };
+    });
+  }
+
+  // The live path: what the publisher reported must name the evidence settled here (exact
+  // body digest, publishId, game epoch, refusal). Evidence already settled by a concurrent
+  // reconcile is fine only when the audit line for that exact refusal exists.
+  async function retireRejectedAnnotations(sessionDir, rejection) {
+    return withLock(sessionDir, () => {
+      const auth = loadAuthorityUnlocked(sessionDir);
+      if (!auth) throw coded('NO_TRAINING_AUTHORITY', 'training authority가 없습니다.');
+      if (!plainObject(rejection)
+        || !Number.isSafeInteger(rejection.publishId)
+        || !SHA256_RE.test(rejection.bodySha256 ?? '')
+        || rejection.expectedGameEpoch !== auth.gameEpoch
+        || !isRetirableAnnotationRejection(rejection.httpStatus, rejection.serverCode)) {
+        throw coded('REJECTION_EVIDENCE_INVALID', '게시 거절 증거가 이 게임·거절 종류에 묶이지 않습니다.');
+      }
+      const matches = (row) => row.publishId === rejection.publishId
+        && row.bodySha256 === rejection.bodySha256
+        && row.httpStatus === rejection.httpStatus
+        && row.serverCode === rejection.serverCode;
+      const evidence = readRetirementEvidence(sessionDir);
+      if (evidence) {
+        if (!matches(evidence)) {
+          throw coded('REJECTION_EVIDENCE_INVALID', '비공개 폐기 증거가 보고된 거절과 다릅니다.');
+        }
+        const settled = settleRetirementUnlocked(sessionDir, auth);
+        if (!settled || settled.pending) {
+          throw coded('REJECTION_EVIDENCE_INVALID', '폐기한 시도가 아직 기록돼 있습니다.');
+        }
+        return { retired: settled.retired, isolated: settled.isolated, skipped: settled.skipped };
+      }
+      const record = readRejectionRecords(sessionDir).findLast((row) => (
+        plainObject(row) && row.schemaVersion === 1 && row.expectedGameEpoch === auth.gameEpoch
+        && matches(row) && Array.isArray(row.items) && row.items.length > 0
+      ));
+      if (!record) throw coded('REJECTION_EVIDENCE_MISSING', '게시 거절의 영속 증거가 없습니다.');
+      return { retired: 0, isolated: 0, skipped: record.items.length };
+    });
+  }
+
   async function markAnnotationPublished(sessionDir, evaluationId, field, valueSha256) {
     return withLock(sessionDir, () => {
       const auth = loadAuthorityUnlocked(sessionDir);
@@ -1682,6 +2226,11 @@ export function createTrainingControl({ storeDir, io } = {}) {
       if (!annotation) throw coded('NO_TRAINING_ITEM', `${evaluationId}:${field}`);
       if (annotation.valueSha256 !== valueSha256) {
         throw coded('ANNOTATION_CONFLICT', '같은 annotation에 다른 digest가 있습니다.');
+      }
+      // A retired annotation (refused on evidence, out of the queue) can never have reached the
+      // relay afterwards: a mark for it is a caller that lost its binding, not a publication.
+      if (annotation.published !== true && annotation.publishFailed === 'rejected') {
+        throw coded('ANNOTATION_RETIRED', '폐기된 annotation은 게시된 것으로 표시할 수 없습니다.');
       }
       annotation.published = true;
       const queued = auth.annotationQueue[evaluationId];
@@ -1774,6 +2323,9 @@ export function createTrainingControl({ storeDir, io } = {}) {
     reapSolveTasks,
     sealAnnotation,
     reconcileAnnotationQueue,
+    reconcileRetiredAnnotations,
+    verifyCompletedRetirement,
+    retireRejectedAnnotations,
     markAnnotationPublished,
     writeCutoffMarker,
     consumeTrainingItems,
