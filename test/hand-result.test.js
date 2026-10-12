@@ -1,14 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const fixture=()=>({
+const {captureHandPrior:capturePrior}=await import('../server/public/hand-result.js');
+// The viewer's baseline as the client records it at the hand's start, tied to that hand_start.
+const baseline=(log,view,values)=>({...capturePrior(null,{view:{...view,handInProgress:true,street:'preflop'},log,viewer:'user'}),...values});
+const fixture=()=>{const input={
   log:[{type:'hand_start',handNo:3},{type:'showdown',reveals:[{playerId:'user',cards:['As','Ah'],handName:'원페어'}],mucks:['p2']},
     {type:'pot_award',potIndex:0,amount:300,winners:[{playerId:'user',share:300}]}],
   view:{handNo:3,handInProgress:false,gameOver:false,mode:'cash-training',viewer:'user',sessionNet:{user:150},
     seats:[{playerId:'user',kind:'human',stack:1150},{playerId:'p2',kind:'ai',stack:850}],
     holeCardsByPlayerId:{p2:['Kh','9s']},pots:[{potIndex:0,amount:300,winners:[{playerId:'user',share:300}]}]},
-  viewer:'user',prior:{handNo:3,sessionNet:{user:50},handStartStack:1050},
-});
+  viewer:'user',prior:null};
+  input.prior=baseline(input.log,input.view,{sessionNet:{user:50},handStartStack:1050});
+  return input;
+};
 
 test('hand result selects only public awards and revealed hand names, with cash net',async()=>{
   const {buildHandResult}=await import('../server/public/hand-result.js');
@@ -50,7 +55,8 @@ test('unknown baseline and spectators omit net; tournament uses captured hand-st
 test('same-hand side frames preserve result identity and a new hand clears it',async()=>{
   const {updateHandResult}=await import('../server/public/hand-result.js');const input=fixture();
   const result=updateHandResult(null,input);assert.ok(result);
-  assert.equal(updateHandResult(result,{...input,log:[]}),result);
+  assert.equal(updateHandResult(result,{...input}),result,'a side frame of the same hand keeps the object');
+  assert.equal(updateHandResult(result,{...input,log:[]}),null,'a log that no longer yields the hand clears it');
   assert.equal(updateHandResult(result,{...input,view:{...input.view,handInProgress:true}}),null);
   assert.equal(updateHandResult(result,{...input,view:{...input.view,handNo:4},log:[]}),null);
 });
@@ -77,11 +83,14 @@ test('hand baseline is known only before tournament actions; cash can reconnect 
   const {captureHandPrior}=await import('../server/public/hand-result.js');
   const view={handNo:2,viewer:'user',mode:'tournament',street:'preflop',handInProgress:true,seats:[{playerId:'user',stack:975,bet:25}]};
   const log=[{type:'hand_start',handNo:2},{type:'blinds_posted',posts:[]}];
-  assert.deepEqual(captureHandPrior(null,{view,log,viewer:'user'}),{handNo:2,handStartStack:1000});
+  const tournament=captureHandPrior(null,{view,log,viewer:'user'});
+  assert.deepEqual({handNo:tournament.handNo,handStartStack:tournament.handStartStack,viewer:tournament.viewer},{handNo:2,handStartStack:1000,viewer:'user'});
+  assert.equal(typeof tournament.start,'string');
   assert.equal(captureHandPrior(null,{view,log:[...log,{type:'action'}],viewer:'user'}),null);
   assert.equal(captureHandPrior(null,{view:{...view,street:'flop'},log,viewer:'user'}),null);
   assert.equal(captureHandPrior(null,{view,log,viewer:null}),null);
-  assert.deepEqual(captureHandPrior(null,{view:{...view,mode:'cash-training',sessionNet:{user:25}},log,viewer:'user'}),{handNo:2,sessionNet:{user:25}});
+  const cash=captureHandPrior(null,{view:{...view,mode:'cash-training',sessionNet:{user:25}},log,viewer:'user'});
+  assert.deepEqual(cash.sessionNet,{user:25});assert.equal(cash.start,tournament.start);
 });
 
 test('actual thinking painter announces transitions, not every second, and resets repeated AI turns',async()=>{
@@ -277,4 +286,22 @@ test('the live result follows a reused hand number to its new hand, and blinds a
   const low=trackLatestResult(null,{log:foldHand([50,100]),view,viewer:'user',prior:null});
   const high=trackLatestResult(low,{log:foldHand([100,200]),view,viewer:'user',prior:null});
   assert.notEqual(high,low);assert.deepEqual(high.blinds,[100,200]);
+});
+
+test('a cached live result never outlives a log that cannot rebuild it, and a reused number brings its own baseline',async()=>{
+  const {updateHandResult,buildHandResult,captureHandPrior}=await import('../server/public/hand-result.js');
+  const input=fixture();
+  const shown=updateHandResult(null,input);assert.ok(shown);
+  // The next hand's start is missing: more play follows hand 3's award.
+  const broken=[...input.log,{type:'street',street:'flop',board:['Ah','9d','7c']},{type:'pot_award',potIndex:0,amount:80,winners:[{playerId:'p2',share:80}]}];
+  assert.equal(updateHandResult(shown,{...input,log:broken}),null);
+  // Hand 3 again under a new hand_start: hand A's baseline does not price it.
+  const reused=[...input.log,{type:'hand_start',handNo:3,blinds:[100,200],button:'p2'},
+    {type:'pot_award',potIndex:0,amount:300,winners:[{playerId:'user',share:300}]}];
+  assert.equal(buildHandResult({...input,log:reused}).myNet,null,'the old baseline belongs to the first hand 3');
+  const playing={...input.view,handInProgress:true,street:'preflop',sessionNet:{user:150}};
+  const fresh=captureHandPrior(input.prior,{view:playing,log:reused,viewer:'user'});
+  assert.notEqual(fresh,input.prior);assert.deepEqual(fresh.sessionNet,{user:150});
+  assert.equal(buildHandResult({...input,log:reused,prior:fresh}).myNet,0,'priced from its own start');
+  assert.equal(captureHandPrior(fresh,{view:playing,log:reused,viewer:'p9'}),null,'another viewer has no seat here');
 });

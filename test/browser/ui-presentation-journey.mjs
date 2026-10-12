@@ -778,7 +778,6 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.deepEqual(timedFocus,{inBar:true,visible:true,enabled:true},'focus moved to a visible action');
     checks.push('onboarding-timed-turn');
     await measureState('turn');
-    const turnTable=await evaluate("JSON.stringify(document.querySelector('.table').getBoundingClientRect())");
     // The user's turn with folded, all-in and eliminated seats: the collapsed phone
     // action bar keeps those three statuses readable, in the stack's row.
     const turnView=view;
@@ -801,6 +800,9 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.ok(aiActor&&aiActor!=='user'&&view.seats.find(seat=>seat.playerId===aiActor)?.kind==='ai','an AI seat acts next');
     await browser(['wait','--fn',`(()=>{const tag=document.querySelector('.seat[data-player-id="${aiActor}"] .plate-thinking');return !!tag&&tag.getClientRects().length>0&&document.querySelector('#action-bar').hidden})()`]);
     await measureState('ai-thinking');
+    // The table box just before a result (an AI acting), on the fitted desktops.
+    const FIT_SIZES=[[1280,800],[1440,900],[1094,559]],tableBox="JSON.stringify(document.querySelector('.table').getBoundingClientRect())",beforeResult=[];
+    for(const [width,height] of FIT_SIZES){await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);beforeResult.push(await evaluate(tableBox));}
     const thinkingView=view;
     view={...thinkingView,seats:thinkingView.seats.map((seat,index)=>index===2?{...seat,folded:true}:index===3?{...seat,allIn:true,bet:seat.bet+seat.stack,stack:0}:index===4?{...seat,out:true,stack:0}:seat)};
     await publish();
@@ -813,13 +815,16 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.deepEqual(stateRuns,stateMatrix(),'the state matrix ran exactly the expected states');
     // The result shares the reserved action area: the table neither moves nor
     // shrinks, and a long result scrolls under a head that stays in view.
-    assert.equal(await evaluate("JSON.stringify(document.querySelector('.table').getBoundingClientRect())"),turnTable,'turn and result keep the same table box at 1280x800');
+    const withResult=[];
+    for(const [width,height] of FIT_SIZES){await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);withResult.push(await evaluate(tableBox));}
+    assert.deepEqual(withResult,beforeResult,'showing the result never moves or shrinks the table');
+    await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
     const sticky=await evaluate(`(()=>{const dock=document.querySelector('#result-dock'),list=document.querySelector('#hand-result .hand-result-winners'),extra=[];
       for(let i=0;i<8;i+=1){const copy=list.firstElementChild.cloneNode(true);list.append(copy);extra.push(copy);}
       dock.scrollTop=dock.scrollHeight;const d=dock.getBoundingClientRect(),h=document.querySelector('#hand-result .hand-result-head').getBoundingClientRect();
       const out={scrolls:dock.scrollHeight>dock.clientHeight+1,scrolled:dock.scrollTop>0,headInside:h.top>=d.top-1&&h.bottom<=d.bottom+1,table:JSON.stringify(document.querySelector('.table').getBoundingClientRect())};
       for(const node of extra)node.remove();dock.scrollTop=0;return out;})()`);
-    assert.deepEqual(sticky,{scrolls:true,scrolled:true,headInside:true,table:turnTable},JSON.stringify(sticky));
+    assert.deepEqual(sticky,{scrolls:true,scrolled:true,headInside:true,table:beforeResult[0]},JSON.stringify(sticky));
     checks.push('state-matrix');
     // The result card: the reason, every winner's collected amount and best five,
     // and the board by street.

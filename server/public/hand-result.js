@@ -23,6 +23,11 @@ function handSegment(rows, start) {
   return out;
 }
 const lastStartOf = (rows, handNo) => rows.findLastIndex(event => event?.type === 'hand_start' && event.handNo === handNo);
+// Which hand_start a baseline belongs to: its number alone may be reused.
+const startIdentity = (rows, handNo) => {
+  const start = lastStartOf(rows, handNo);
+  return start < 0 ? null : fingerprint(JSON.stringify(rows[start]));
+};
 function handTail(log, handNo) {
   const rows = Array.isArray(log) ? log : [];
   const start = rows.findLastIndex(event => event?.type === 'hand_start');
@@ -131,10 +136,14 @@ export function summarizeHand(log, handNo, options = {}) {
 
 export function buildHandResult({log, view, viewer, prior}) {
   if (!view || view.handInProgress !== false || view.gameOver) return null;
-  const result = summarizeHand(log, view.handNo, {pots:view.pots, viewer:typeof viewer === 'string' && view.viewer !== null ? viewer : null});
+  const rows = Array.isArray(log) ? log : [];
+  const result = summarizeHand(rows, view.handNo, {pots:view.pots, viewer:typeof viewer === 'string' && view.viewer !== null ? viewer : null});
   if (!result) return null;
   const seat = view.seats?.find(row => row.playerId === viewer);
-  if (typeof viewer === 'string' && view.viewer !== null && seat && seat.kind !== 'ai' && prior?.handNo === view.handNo) {
+  // The net needs this viewer's baseline from this very hand, not one that
+  // only shares its number.
+  if (typeof viewer === 'string' && view.viewer !== null && seat && seat.kind !== 'ai' && prior?.handNo === view.handNo
+    && prior.viewer === viewer && prior.start === startIdentity(rows, view.handNo)) {
     const end = view.mode === 'cash-training' ? view.sessionNet?.[viewer] : seat.stack;
     const start = view.mode === 'cash-training' ? prior.sessionNet?.[viewer] : prior.handStartStack;
     if (Number.isSafeInteger(end) && Number.isSafeInteger(start)) result.myNet = end - start;
@@ -178,9 +187,10 @@ export function updateHandResult(previous, input) {
   if (!view || view.handInProgress !== false || view.gameOver) return null;
   const viewer = typeof input.viewer === 'string' && view.viewer !== null ? input.viewer : null;
   const fresh = buildHandResult(input);
-  // Side frames of the same finished hand keep the same object (and its DOM);
-  // another hand under a reused number, or another viewer, does not.
-  if (previous?.handNo === view.handNo && previous.viewer === viewer && (!fresh || fresh.key === previous.key)) return previous;
+  // Side frames of the same finished hand keep the same object (and its DOM).
+  // A log that no longer yields this hand, another hand under a reused number,
+  // or another viewer replaces it, and an unreadable hand shows nothing.
+  if (fresh && previous?.key === fresh.key && previous.viewer === viewer) return previous;
   return fresh;
 }
 
@@ -207,11 +217,13 @@ export function handResultFrame({result, hold, log, view, now=Date.now(), reduce
 
 export function captureHandPrior(previous, {view, log, viewer}) {
   if (!view || view.handInProgress !== true || viewer == null) return previous?.handNo === view?.handNo ? previous : null;
-  if (previous?.handNo === view.handNo) return previous;
+  const rows = Array.isArray(log) ? log : [];
+  const start = startIdentity(rows, view.handNo);
+  if (previous?.handNo === view.handNo && previous.start === start && previous.viewer === viewer) return previous;
   const seat = view.seats?.find(row => row.playerId === viewer);
-  if (!seat) return null;
-  if (view.mode === 'cash-training') return {handNo:view.handNo, sessionNet:{...view.sessionNet}};
-  const tail = handTail(log,view.handNo);
+  if (!seat || start === null) return null;
+  if (view.mode === 'cash-training') return {handNo:view.handNo, start, viewer, sessionNet:{...view.sessionNet}};
+  const tail = handTail(rows,view.handNo);
   if (view.street !== 'preflop' || !tail.some(row=>row.type==='blinds_posted') || tail.some(row=>row.type==='action')) return null;
-  return {handNo:view.handNo, handStartStack:seat.stack+seat.bet};
+  return {handNo:view.handNo, start, viewer, handStartStack:seat.stack+seat.bet};
 }
