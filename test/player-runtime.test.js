@@ -17,6 +17,7 @@ import {
   createProductionResolver,
   resolveRuntimes,
   spawnCli,
+  CLAUDE_DISABLED_BUILTIN_PLUGINS,
   GROK_DISALLOWED_TOOLS,
   GROK_TAIL,
   grokInspectAudit,
@@ -77,6 +78,10 @@ const GROK_TAIL_LITERAL = [
   '--disable-web-search', '--sandbox', 'read-only', '--no-subagents',
 ];
 const GROK_CREATE_PREFIX = ['--no-auto-update', '--prompt-file', '/dev/stdin', ...GROK_TAIL_LITERAL];
+const CLAUDE_CONTAINMENT_LITERAL = [
+  '--safe-mode', '--restricted', '--strict-mcp-config', '--tools', '',
+  '--settings', '{"enabledPlugins":{"cc-plugin-agents-md@builtin":false,"cc-plugin-telemetry@builtin":false,"cc-plugin-plugin-authoring@builtin":false}}',
+];
 
 function shortTmp(tag) {
   return fs.mkdtempSync(path.join('/tmp', `hh-${tag}-`));
@@ -355,23 +360,58 @@ test('세션 격리: 두 플레이어의 sessionId가 다르고 각 decide의 st
   }
 });
 
-test('claude argv 핀: 생성·재개·1회성 모두 --safe-mode --restricted --strict-mcp-config --tools 빈문자열', async () => {
+test('claude argv 핀: 생성·재개·1회성 모두 --safe-mode --restricted --strict-mcp-config --tools 빈문자열 + 내장 플러그인 끔', async () => {
   const f = fakeRuntime('claude');
   try {
     const { sessionId } = await f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 });
     await f.rt.decide({ playerId: 'p1', sessionId, message: 'm', timeoutMs: 5000 });
     const [create, resume] = f.calls();
-    assert.deepEqual(create.argv, ['-p', '--model', 'sonnet', '--effort', 'medium', '--safe-mode', '--restricted', '--strict-mcp-config', '--tools', '', '--session-id', sessionId]);
-    assert.deepEqual(resume.argv, ['-p', '--resume', sessionId, '--model', 'sonnet', '--effort', 'medium', '--safe-mode', '--restricted', '--strict-mcp-config', '--tools', '']);
+    assert.deepEqual(create.argv, ['-p', '--model', 'sonnet', '--effort', 'medium', ...CLAUDE_CONTAINMENT_LITERAL, '--session-id', sessionId]);
+    assert.deepEqual(resume.argv, ['-p', '--resume', sessionId, '--model', 'sonnet', '--effort', 'medium', ...CLAUDE_CONTAINMENT_LITERAL]);
 
     const one = f.rt.oneshotStart({ tier: 'upper', prompt: 'ok 한 단어만 출력', timeoutMs: 5000 });
     await one.done;
-    assert.deepEqual(f.last().argv, ['-p', '--model', 'opus', '--safe-mode', '--restricted', '--strict-mcp-config', '--tools', '']);
+    assert.deepEqual(f.last().argv, ['-p', '--model', 'opus', ...CLAUDE_CONTAINMENT_LITERAL]);
     assert.equal(f.last().argv.includes('--output-format'), false);
     assert.equal(f.last().argv.includes('--include-hook-events'), false);
     assert.equal(f.last().argv.includes('--effort'), false);
     await f.rt.oneshotStart({ tier: 'player', prompt: 'ok', timeoutMs: 5000 }).done;
     assert.deepEqual(f.last().argv.slice(0, 5), ['-p', '--model', 'sonnet', '--effort', 'medium']);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('claude 내장 플러그인: --settings가 끄는 이름은 고정이고, init에 보이면 감사는 여전히 탈락시킨다', async () => {
+  assert.deepEqual([...CLAUDE_DISABLED_BUILTIN_PLUGINS], ['cc-plugin-agents-md', 'cc-plugin-telemetry', 'cc-plugin-plugin-authoring']);
+  assert.ok(Object.isFrozen(CLAUDE_DISABLED_BUILTIN_PLUGINS));
+  assert.deepEqual(JSON.parse(CLAUDE_CONTAINMENT_LITERAL.at(-1)), {
+    enabledPlugins: Object.fromEntries(CLAUDE_DISABLED_BUILTIN_PLUGINS.map((name) => [`${name}@builtin`, false])),
+  });
+
+  const { file } = canary();
+  // 2.1.296이 `--safe-mode`에서 실제로 보고한 모양 그대로 — 설정이 먹지 않은 CLI다.
+  const builtin = CLAUDE_DISABLED_BUILTIN_PLUGINS.map((name) => ({ name, path: 'builtin', source: `${name}@builtin` }));
+  const f = fakeRuntime('claude', {
+    default: {
+      reply: jsonl(
+        { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: builtin },
+        { type: 'result', subtype: 'success', result: 'UNAVAILABLE' },
+      ),
+    },
+  });
+  try {
+    const player = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(player.ok, true);
+    assert.equal(player.containment, false, '내장 플러그인도 감사 예외가 아니다');
+    assert.equal(player.notice, '컨테인먼트 실패(claude/sonnet): 도구·MCP 표면이 비어 있지 않습니다.');
+    const upper = await f.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(upper.upper, false);
+    assert.equal(upper.containment, false);
+    assert.equal(upper.notice, '컨테인먼트 실패(claude/opus): 도구·MCP 표면이 비어 있지 않습니다.');
+    assert.ok(f.calls().length >= 2);
+    assert.ok(f.calls().every((call) => call.argv.includes(CLAUDE_CONTAINMENT_LITERAL.at(-1))),
+      '모든 probe 호출이 내장 플러그인을 끄는 설정을 싣는다');
   } finally {
     f.cleanup();
   }
@@ -775,7 +815,7 @@ test('probe(upper): 상위 왕복 + fresh 카나리 컨테인먼트를 정확한
     assert.equal(res.upper, true);
     assert.equal(res.containment, true, '상위 후보도 카나리 컨테인먼트를 통과해야 한다');
     const [roundtrip, containment] = f.calls().slice(-2);
-    const upperTail = ['--safe-mode', '--restricted', '--strict-mcp-config', '--tools', '', '--session-id'];
+    const upperTail = [...CLAUDE_CONTAINMENT_LITERAL, '--session-id'];
     assert.deepEqual(roundtrip.argv.slice(0, 3), ['-p', '--model', 'opus']);
     assert.deepEqual(roundtrip.argv.slice(3, 3 + upperTail.length), upperTail);
     assert.deepEqual(roundtrip.argv.slice(-4), ['--output-format', 'stream-json', '--verbose', '--include-hook-events']);

@@ -74,7 +74,16 @@ const canaryPrompt = (absPath, kind) => `${kind === 'claude' ? CLAUDE_PROBE_CONT
 // ── Task 0 핀 argv ────────────────────────────────────────────────────────────
 // 길이 0 원소(`--tools` 뒤)는 빈 문자열이지 따옴표 두 글자가 아니다. 반대로 codex의
 // `web_search="disabled"`는 TOML 값 표기라 큰따옴표가 argv 내용에 포함된다.
-const CLAUDE_CONTAINMENT = ['--safe-mode', '--restricted', '--strict-mcp-config', '--tools', ''];
+// Claude CLI는 `--safe-mode`에서도 내장 플러그인을 켜 두고 stream init.plugins에 싣는다
+// (2.1.292–2.1.296 실측: 아래 셋). probe 감사의 "plugins 빈 배열"은 그대로 두고 이름을
+// 고정해 끈다 — 목록 밖의 내장 플러그인이 새로 보이면 감사가 그 런타임을 탈락시킨다.
+export const CLAUDE_DISABLED_BUILTIN_PLUGINS = Object.freeze([
+  'cc-plugin-agents-md', 'cc-plugin-telemetry', 'cc-plugin-plugin-authoring',
+]);
+const CLAUDE_SETTINGS = JSON.stringify({
+  enabledPlugins: Object.fromEntries(CLAUDE_DISABLED_BUILTIN_PLUGINS.map((name) => [`${name}@builtin`, false])),
+});
+const CLAUDE_CONTAINMENT = ['--safe-mode', '--restricted', '--strict-mcp-config', '--tools', '', '--settings', CLAUDE_SETTINGS];
 const CLAUDE_STREAM = ['--output-format', 'stream-json', '--verbose', '--include-hook-events'];
 export const GROK_DISALLOWED_TOOLS = [
   'run_terminal_cmd', 'run_terminal_command', 'search_replace', 'list_dir', 'grep', 'write',

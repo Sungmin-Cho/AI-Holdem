@@ -64,7 +64,7 @@ legacy 정지 게임의 명시 종료는 `node tools/game-loop.js --game-dir /ab
 
 | 런타임 | 격리 수단 | 한계 |
 |---|---|---|
-| `claude` | `--safe-mode --restricted` + probe stream 감사(`init.plugins` 빈 배열, hook 이벤트 0) | managed/`--settings` SessionEnd hook은 스트림에 없어 탐지하지 못한다 |
+| `claude` | `--safe-mode --restricted` + `--settings`로 CLI 내장 플러그인 끔(`CLAUDE_DISABLED_BUILTIN_PLUGINS`) + probe stream 감사(`init.plugins` 빈 배열, hook 이벤트 0) | managed/`--settings` SessionEnd hook은 스트림에 없어 탐지하지 못한다. 끄는 내장 플러그인 목록은 이름 고정이라, CLI가 새 내장 플러그인을 켜면 표면 감사로 탈락하고 codex로 폴백한다 |
 | `codex` | `exec --ignore-user-config` + `--disable hooks` | 실행 중 감사 스트림이 없다. 플래그 의미 변경은 자동으로 알 수 없다 |
 | `grok` | 스토어별 격리 홈 + `inspect --json`·세션 기록 감사 + `--disallowed-tools`/`--deny`(도구 표면 `[read_file]`, 호출은 전부 거부) | Windows 미지원(fail-closed). 격리 홈은 스토어별 약 14 MB(`~/.ai-holdem/runtime-home/`, 지워도 다음 기동에서 재생성). 도구 목록은 이름 기반이라 새 기본 도구가 생기면 표면 감사로 탈락한다. 읽기 차단은 권한 계층이지 OS 샌드박스가 아니다. 부트 1–2분(카나리 거부 왕복 각 25–50 s). 같은 uid 프로세스의 홈 변조는 위협 모델 밖. API 키 env 인증은 미지원 |
 
@@ -76,7 +76,7 @@ legacy 정지 게임의 명시 종료는 `node tools/game-loop.js --game-dir /ab
 
 플레이어 예산은 `--player-soft-ms`·`--player-hard-ms` 또는 로비 setup의 `playerSoftMs`·`playerHardMs`로 설정한다. soft는 대기 안내 기준이며, hard가 결정 세대의 전체 호출 예산이다. `RUNTIME_TABLE.watchdog`의 `t1Ms`·`t2Ms`는 테스트 주입 호환 값이며 실제 기본 예산 표가 아니다.
 
-Claude CLI는 `--safe-mode`와 `--effort`를 지원하는 2.1.278 이상을 사용한다(2.1.278 실측).
+Claude CLI는 `--safe-mode`와 `--effort`를 지원하는 2.1.278 이상을 사용한다(2.1.278 실측). 2.1.292 이후의 CLI는 `--safe-mode`에서도 내장 플러그인(`cc-plugin-agents-md`·`cc-plugin-telemetry`·`cc-plugin-plugin-authoring`)을 켜 두고 probe stream의 `init.plugins`에 싣는다. 그래서 claude 자식은 `--settings '{"enabledPlugins":{"<이름>@builtin":false,…}}'`로 이 셋을 끈다(2.1.292·2.1.293·2.1.296 실측). AI 연결 확인 알림이 "claude를 안전하게 쓸 수 없어 제외"이고 loop-state notice가 `컨테인먼트 실패(claude/…): 도구·MCP 표면이 비어 있지 않습니다.`라면, 같은 argv로 `claude -p … --output-format stream-json --verbose`를 한 번 돌려 `init.plugins`에 새 이름이 생겼는지 먼저 본다.
 
 LLM 모드 진행 중 게임은 업그레이드 전에 끝낼 것. 새 Claude 플레이어는 sonnet medium으로 실행하며, 턴 요약의 판단 보조를 사용합니다.
 
