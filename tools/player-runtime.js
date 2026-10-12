@@ -772,6 +772,10 @@ export function createPlayerRuntime(kind, opts = {}) {
   const table = RUNTIME_TABLE[kind];
   const runtime = RUNTIMES[kind];
   if (!table || !runtime) throw runtimeError('UNKNOWN_RUNTIME', `UNKNOWN_RUNTIME: ${kind}`);
+  // 폴백 고정값도 argv에 실리므로 같은 허용 형식을 지켜야 한다. 값은 메시지에 싣지 않는다.
+  if (!isArgvSafeModelId(kind, table.player) || !isArgvSafeModelId(kind, table.upper)) {
+    throw runtimeError('UNSAFE_MODEL_ID', `UNSAFE_MODEL_ID: ${kind} 고정 모델 id가 허용 형식이 아닙니다.`);
+  }
 
   const exec = opts.exec ?? spawnCli;
   const command = opts.command ?? runtime.command;
@@ -812,6 +816,7 @@ export function createPlayerRuntime(kind, opts = {}) {
   // 카탈로그 자식의 종료를 확인하지 못하면(CHILD_*) 그 어댑터는 더 부르지 않는다 — 살아 있을 수 있는
   // 자식과 다음 호출이 겹치게 두지 않는다. 남은 자식은 dispose가 다시 확인한다.
   let catalogUnsettled = null;
+  let keptCatalogHome = null;
 
   // 레포·game/ 밖의 빈 디렉터리 하나를 런타임당 한 번 만든다. 레포 안이면 CLI가
   // 지침 파일·게임 상태를 컨텍스트로 빨아들일 수 있으므로 여기서 거부한다.
@@ -910,6 +915,9 @@ export function createPlayerRuntime(kind, opts = {}) {
     }
     if (disposePromise) {
       throw runtimeError('RUNTIME_DISPOSING', `RUNTIME_DISPOSING: ${kind} runtime을 정리 중입니다.`);
+    }
+    if (catalogUnsettled && purpose !== 'catalog') {
+      throw runtimeError('RUNTIME_NOT_VERIFIED', `RUNTIME_NOT_VERIFIED: ${kind} 카탈로그 자식의 종료를 확인하지 못했습니다.`);
     }
     // argv에 모델 id를 싣는 모든 호출의 마지막 관문. 값 자체는 메시지에 싣지 않는다.
     if (purpose !== 'catalog' && purpose !== 'inspect' && !isArgvSafeModelId(kind, model)) {
@@ -1132,7 +1140,8 @@ export function createPlayerRuntime(kind, opts = {}) {
       catalogStatus = `error:${code}`;
       if (code.startsWith('CHILD_')) {
         catalogUnsettled = code;
-        keepHome = true; // 아직 살아 있을 수 있는 자식의 HOME을 지우지 않는다
+        keepHome = true; // 아직 살아 있을 수 있는 자식의 HOME을 지우지 않는다 — dispose가 종료 확인 뒤 지운다
+        keptCatalogHome = catalogHome;
       }
       return;
     } finally {
@@ -1156,13 +1165,14 @@ export function createPlayerRuntime(kind, opts = {}) {
   }
 
   // 카탈로그로 고른 id의 왕복이 실패하면 그 tier를 폴백 고정값으로 바꾼다. 같은 id를 쓰는 다른 tier는
-  // 아직 검증되지 않았을 때만 함께 바꾼다 — 이미 probe를 통과한 tier의 모델을 검증 없이 바꾸지 않는다.
+  // 아직 probe하지 않았을 때만 함께 바꾼다 — probe를 통과한 tier의 모델을 검증 없이 바꾸지 않고,
+  // 자기 이유로 탈락한 tier의 기록을 남의 실패로 덮지 않는다.
   function useFallbackModel(tier) {
     const fallback = table[tier];
     if (modelSource[tier] !== 'catalog' || models[tier] === fallback) return false;
     const failed = models[tier];
     for (const each of ['player', 'upper']) {
-      if (each !== tier && verification[each] === true) continue;
+      if (each !== tier && verification[each] !== null) continue;
       if (modelSource[each] === 'catalog' && models[each] === failed) {
         replacedModels[each] = failed;
         models[each] = table[each];
@@ -1181,9 +1191,10 @@ export function createPlayerRuntime(kind, opts = {}) {
     };
   }
 
-  // grok이 모르는 모델 id는 턴을 시작하기 전에 exit 1로 끝나고, 세션 디렉터리에 빈 events.jsonl만
-  // 남긴다(1.0.46 실측). 기록이 이렇게 비어 있을 때만 "모델이 응답하지 못함"으로 본다 — 무엇이든 기록됐다면
-  // 감사 결과(컨테인먼트)가 우선이다.
+  // grok이 모르는 모델 id는 턴을 시작하기 전에 exit 1로 끝난다(1.0.46 실측: 세션 디렉터리에
+  // chat_history.jsonl·0바이트 events.jsonl·prompt_context.json·summary.json·system_prompt.txt만 남고
+  // updates.jsonl·tool_definitions.json은 없다). 기록이 이렇게 비어 있을 때만 "모델이 응답하지 못함"으로
+  // 본다 — 무엇이든 기록됐다면 감사 결과(컨테인먼트)가 우선이다.
   function grokTurnAbsent(sessionId) {
     if (typeof sessionId !== 'string' || sessionId === '') return false;
     const dir = grokSessionDir(grokHome, ensureCwd(), sessionId);
@@ -1297,6 +1308,14 @@ export function createPlayerRuntime(kind, opts = {}) {
         const audit = auditGrokSession(spawnedId, 1);
         if (!audit.ok) {
           verification.upper = false;
+          const leakedEarly = String(result.stdout).includes(canary.sentinel) || String(result.stderr).includes(canary.sentinel);
+          // 첫 왕복과 같은 규칙: 턴이 아예 없던 실패만 모델 귀속 실패다.
+          if (audit.code === 'GROK_SESSION_RECORD_MISSING' && result.code !== 0 && !leakedEarly && grokTurnAbsent(spawnedId)) {
+            return {
+              ok: true, containment: false, upper: false, elapsedMs: Date.now() - started,
+              notice: `상위 컨테인먼트 probe 실패(${kind}/${model}): 정상 응답 없음`, modelFailure: true,
+            };
+          }
           return grokSessionFail(kind, model, audit, { ok: true, upper: false, started });
         }
       }
@@ -1661,6 +1680,10 @@ export function createPlayerRuntime(kind, opts = {}) {
         if (failed) throw failed.reason;
         if (activeHandles.size !== 0) {
           throw runtimeError('CHILD_CLOSE_UNCONFIRMED', `CHILD_CLOSE_UNCONFIRMED: ${kind} runtime 자식이 registry에 남았습니다.`);
+        }
+        if (keptCatalogHome) {
+          try { fs.rmSync(keptCatalogHome, { recursive: true, force: true }); } catch { /* tmp 정리 실패는 종료와 무관하다 */ }
+          keptCatalogHome = null;
         }
         if (!cwd) return;
         try { fs.rmdirSync(cwd); } catch { /* 비어 있지 않거나 이미 없다 */ }

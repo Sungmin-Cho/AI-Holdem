@@ -2965,20 +2965,20 @@ test('grok: 카탈로그 모델로 턴이 시작되지 않은 player 실패는 �
   }
 });
 
-test('start: 허용 형식이 아닌 모델 id는 자식을 띄우기 전에 UNSAFE_MODEL_ID로 거부한다', async () => {
-  const original = RUNTIME_TABLE.codex.player;
-  RUNTIME_TABLE.codex.player = 'gpt-6-luna --sandbox danger-full-access';
-  let rt;
-  try {
-    const spawned = [];
-    rt = createPlayerRuntime('codex', { exec: (spec) => { spawned.push(spec.args); throw new Error('spawn은 일어나면 안 된다'); } });
-    await assert.rejects(rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 1000 }), (error) => (
-      error.code === 'UNSAFE_MODEL_ID' && !error.message.includes('danger')
-    ));
-    assert.throws(() => rt.oneshotStart({ tier: 'player', prompt: 'x' }), { code: 'UNSAFE_MODEL_ID' });
-    assert.deepEqual(spawned, []);
-  } finally {
-    RUNTIME_TABLE.codex.player = original;
+test('고정 모델 id가 허용 형식이 아니면 어댑터를 만들지 않는다(UNSAFE_MODEL_ID, 값은 메시지에 없음)', () => {
+  for (const tier of ['player', 'upper']) {
+    const original = RUNTIME_TABLE.codex[tier];
+    RUNTIME_TABLE.codex[tier] = 'gpt-6-luna --sandbox danger-full-access';
+    try {
+      const spawned = [];
+      assert.throws(
+        () => createPlayerRuntime('codex', { exec: (spec) => { spawned.push(spec.args); throw new Error('spawn 금지'); } }),
+        (error) => error.code === 'UNSAFE_MODEL_ID' && !error.message.includes('danger'),
+      );
+      assert.deepEqual(spawned, []);
+    } finally {
+      RUNTIME_TABLE.codex[tier] = original;
+    }
   }
 });
 
@@ -3025,6 +3025,130 @@ test('grok: resume 왕복이 깨끗한 기록으로 정상 응답만 못 주면 
     const models = f.calls().filter((c) => c.argv.includes('-m')).map((c) => c.argv[c.argv.indexOf('-m') + 1]);
     assert.deepEqual(models, ['grok-4.9', 'grok-4.9', 'grok-4.7', 'grok-4.7']);
     assert.equal(f.rt.models.replaced.player, 'grok-4.9');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('grok: upper 카나리 호출이 턴 시작 전에 실패하면 첫 왕복과 같은 규칙으로 폴백한다', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const f = verifiedGrokRuntime({
+    matchers: [
+      { argvIncludes: 'models', reply: GROK_MODELS_TEXT.replace('- grok-4.6', '- grok-4.9') },
+      // 세션 기록 없이 exit 1 — 턴이 시작되지 않은 실패.
+      { includes: '다음 파일을 읽어', argvIncludes: 'grok-4.9', reply: '', exitCode: 1 },
+    ],
+  });
+  try {
+    const res = await f.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(res.upper, true);
+    const models = f.calls().filter((c) => c.argv.includes('-m')).map((c) => c.argv[c.argv.indexOf('-m') + 1]);
+    assert.deepEqual(models, ['grok-4.9', 'grok-4.9', 'grok-4.7', 'grok-4.7']);
+    assert.equal(f.rt.models.replaced.upper, 'grok-4.9');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('grok: resume 무응답이라도 기록이 오염됐으면 폴백하지 않는다', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const f = verifiedGrokRuntime({
+    matchers: [
+      { argvIncludes: 'models', reply: GROK_MODELS_TEXT.replace('- grok-4.6', '- grok-4.9') },
+      { argvIncludes: '--resume', reply: '', exitCode: 1, grokSession: { tools: [{ type: 'function', function: { name: 'write' } }] } },
+    ],
+  });
+  try {
+    const res = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, false);
+    const models = f.calls().filter((c) => c.argv.includes('-m')).map((c) => c.argv[c.argv.indexOf('-m') + 1]);
+    assert.deepEqual(models, ['grok-4.9', 'grok-4.9'], '오염된 기록이면 폴백 모델로 재시도하지 않는다');
+    assert.equal(f.rt.models.source.player, 'catalog');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('grok: 카탈로그 자식의 종료를 확인하지 못하면 일회용 HOME을 남기고 모델을 부르지 않는다', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  let catalogHome = null;
+  let kills = 0;
+  let close;
+  const closed = new Promise((resolve) => { close = resolve; });
+  const f = verifiedGrokRuntime({}, {
+    terminateKillWaitMs: 20,
+    exec: (spec) => {
+      if (spec.args.includes('models')) {
+        catalogHome = spec.env.HOME;
+        // 첫 kill(타임아웃)은 전달되지 않고, dispose의 kill은 전달돼 close가 확인된다.
+        return { pid: 4343, kill: () => { kills += 1; if (kills === 1) return false; setTimeout(close, 5); return true; }, closed, done: new Promise(() => {}) };
+      }
+      return spawnCli({ ...spec, command: process.execPath, args: [FAKE_CLI, ...spec.args] });
+    },
+  });
+  try {
+    const res = await f.rt.probe({ canaryAbsPath: file, timeoutMs: 2000 });
+    assert.equal(res.ok, false);
+    assert.match(res.notice, /CHILD_SIGNAL_FAILED/);
+    assert.ok(catalogHome && fs.existsSync(catalogHome), '살아 있을 수 있는 자식의 HOME은 지우지 않는다');
+    assert.equal(f.calls().some((c) => c.argv.includes('-m')), false);
+    await assert.rejects(f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 1000 }), { code: 'RUNTIME_NOT_VERIFIED' });
+    await f.rt.dispose();
+    assert.equal(fs.existsSync(catalogHome), false, 'dispose가 종료를 확인한 뒤 HOME을 지운다');
+  } finally {
+    if (catalogHome) fs.rmSync(catalogHome, { recursive: true, force: true });
+    f.cleanup();
+  }
+});
+
+test('grok: 실측 형태(디렉터리 + 0바이트 events.jsonl)만 턴 없음으로 보고, 무엇이든 기록됐으면 폴백하지 않는다', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const run = async (raw) => {
+    const f = verifiedGrokRuntime({
+      matchers: [
+        { argvIncludes: 'models', reply: GROK_MODELS_TEXT.replace('- grok-4.6', '- grok-4.9') },
+        { argvIncludes: 'grok-4.9', reply: '', exitCode: 1, grokSessionRaw: raw },
+      ],
+    });
+    try {
+      const res = await f.rt.probe({ canaryAbsPath: file });
+      const models = f.calls().filter((c) => c.argv.includes('-m')).map((c) => c.argv[c.argv.indexOf('-m') + 1]);
+      return { res, models, source: f.rt.models.source.player };
+    } finally {
+      f.cleanup();
+    }
+  };
+  // grok 1.0.46 unknown model id: 0바이트 events.jsonl만, updates·tool_definitions 없음.
+  const measured = await run({ 'events.jsonl': '' });
+  assert.equal(measured.res.containment, true);
+  assert.deepEqual(measured.models.slice(0, 2), ['grok-4.9', 'grok-4.7']);
+  assert.equal(measured.source, 'fallback');
+  for (const raw of [{ 'events.jsonl': '\n' }, { 'events.jsonl': '', 'tool_definitions.json': '[]' }, { 'events.jsonl': '', 'updates.jsonl': '{}\n' }]) {
+    const out = await run(raw);
+    assert.equal(out.res.containment, false, JSON.stringify(raw));
+    assert.deepEqual(out.models, ['grok-4.9'], `기록이 있으면 폴백하지 않는다: ${JSON.stringify(raw)}`);
+    assert.equal(out.source, 'catalog');
+  }
+});
+
+test('claude player 서빙 id는 컨테인먼트를 통과했을 때만 기록한다', async () => {
+  const { file } = canary();
+  const f = fakeRuntime('claude', {
+    default: {
+      reply: jsonl(
+        { type: 'system', subtype: 'init', tools: [], mcp_servers: [{ name: 'x' }], plugins: [], model: 'claude-sonnet-5-5' },
+        { type: 'result', subtype: 'success', result: '거부합니다' },
+      ),
+    },
+  });
+  try {
+    const res = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.containment, false);
+    assert.equal(f.rt.models.player, 'sonnet');
   } finally {
     f.cleanup();
   }
