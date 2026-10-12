@@ -68,17 +68,19 @@ legacy 정지 게임의 명시 종료는 `node tools/game-loop.js --game-dir /ab
 | `codex` | `exec --ignore-user-config` + `--disable hooks` | 실행 중 감사 스트림이 없다. 플래그 의미 변경은 자동으로 알 수 없다 |
 | `grok` | 스토어별 격리 홈 + `inspect --json`·세션 기록 감사 + `--disallowed-tools`/`--deny`(도구 표면 `[read_file]`, 호출은 전부 거부) | Windows 미지원(fail-closed). 격리 홈은 스토어별 약 14 MB(`~/.ai-holdem/runtime-home/`, 지워도 다음 기동에서 재생성). 도구 목록은 이름 기반이라 새 기본 도구가 생기면 표면 감사로 탈락한다. 읽기 차단은 권한 계층이지 OS 샌드박스가 아니다. 부트 1–2분(카나리 거부 왕복 각 25–50 s). 같은 uid 프로세스의 홈 변조는 위협 모델 밖. API 키 env 인증은 미지원 |
 
-| 런타임 | 플레이어 모델 | 상위 모델(코치·evaluator·종합자) | 플레이어 예산 soft / hard |
-|---|---|---|---|
-| `claude` | `sonnet --effort medium` | `opus` | 25s / 300s |
-| `codex` | `gpt-5.6-luna` | `gpt-5.6-sol` | 25s / 300s |
-| `grok` | `grok-4.6` | `grok-4.6` | 25s / 300s |
+| 런타임 | 플레이어 모델 | 상위 모델(코치·evaluator·종합자) | 최신을 찾는 방법 · 폴백 고정값 | 플레이어 예산 soft / hard |
+|---|---|---|---|---|
+| `claude` | `sonnet --effort medium` | `opus` | 별칭을 CLI가 매번 최신으로 해석(카탈로그 호출 없음) | 25s / 300s |
+| `codex` | luna 계열 최신 | sol 계열 최신 | `codex debug models`의 `visibility: list`인 `gpt-<버전>-luna`·`gpt-<버전>-sol` 중 최신 · `gpt-6-luna`/`gpt-6.1-sol` | 25s / 300s |
+| `grok` | 기본 계열 최신 | 기본 계열 최신 | 격리 홈에서 `grok --no-auto-update models` 목록의 `grok-<버전>` 중 최신(`-build-fast` 같은 변형 제외) · `grok-4.7` | 25s / 300s |
+
+모델은 기동(새 게임·재개·종료 단계의 상위 모델 재해석)마다 첫 probe 직전에 런타임당 한 번 해석한다. 카탈로그 명령이 실패하거나 형식(`gpt-<숫자>[.<숫자>]-luna|sol`, `grok-<숫자>[.<숫자>]`)에 맞는 id가 없으면 폴백 고정값을 쓰고, 카탈로그로 고른 모델이 probe에서 정상 응답을 주지 못하면 그 런타임 안에서 폴백 고정값으로 한 번 더 probe한다. 카나리 유출·도구 표면 같은 컨테인먼트 실패는 모델을 바꿔 재시도하지 않는다. 실제로 쓴 모델은 게임 로그의 `runtime-models`·`upper-resolved` 이벤트(`model`·`source: catalog|fallback|alias`·`catalog` 상태)와 `player-call`·`player-attempt`의 `model`에 남는다. claude는 probe 스트림 `init.model`로 확인한 서빙 id(예: `claude-sonnet-5-5`)를 기록한다. 카탈로그는 계정 범위라, 인증이 깨진 grok은 번들 목록(더 오래된 모델)을 내놓을 수 있다.
 
 플레이어 예산은 `--player-soft-ms`·`--player-hard-ms` 또는 로비 setup의 `playerSoftMs`·`playerHardMs`로 설정한다. soft는 대기 안내 기준이며, hard가 결정 세대의 전체 호출 예산이다. `RUNTIME_TABLE.watchdog`의 `t1Ms`·`t2Ms`는 테스트 주입 호환 값이며 실제 기본 예산 표가 아니다.
 
 Claude CLI는 `--safe-mode`와 `--effort`를 지원하는 2.1.278 이상을 사용한다(2.1.278 실측). 이 CLI는 `--safe-mode`에서도 내장 플러그인을 켜 두고 probe stream의 `init.plugins`에 싣는다. 이름과 개수는 버전마다 다르다(2.1.278 `plugin-authoring`, 2.1.287 `cc-plugin-agents-md`·`cc-plugin-telemetry`, 2.1.292·2.1.293·2.1.296 여기에 `cc-plugin-plugin-authoring`까지 셋). 그래서 claude 자식은 `--settings '{"enabledPlugins":{"<이름>@builtin":false,…}}'`로 이 셋을 끈다. 2.1.278·2.1.287·2.1.292·2.1.293·2.1.296에서 `init.plugins`가 빈 배열이 되는 것을 실측했다. 다만 2.1.278의 `plugin-authoring`은 끄는 목록에 없는 이름인데도 함께 사라진다(`--settings '{}'`만 주면 남는다). 이름 일치가 아닌 다른 기전으로 보이며 확인하지 않았다. 새 내장 플러그인이 보여 목록에 이름을 더할 때는 모든 지원 버전에서 빈 배열이 되는지 다시 실측한다. AI 연결 확인 알림이 "claude를 안전하게 쓸 수 없어 제외"이고 loop-state notice가 `컨테인먼트 실패(claude/…): 도구·MCP·플러그인 표면이 비어 있지 않습니다.`(이전 기록은 `도구·MCP 표면`)라면, 같은 argv로 `claude -p … --output-format stream-json --verbose`를 한 번 돌려 `init.plugins`에 새 이름이 생겼는지 먼저 본다.
 
-LLM 모드 진행 중 게임은 업그레이드 전에 끝낼 것. 새 Claude 플레이어는 sonnet medium으로 실행하며, 턴 요약의 판단 보조를 사용합니다.
+LLM 모드 게임을 재개하면 그 시점의 최신 모델로 다시 해석한다. 기존 플레이어 세션은 새 모델로 이어진다(세 CLI 모두 다른 모델로 세션을 이어 가도 대화 기억이 유지된다). 그래서 진행 중 게임에서도 재개 전후로 플레이어 모델이 달라질 수 있다. Claude 플레이어는 sonnet medium으로 실행하며, 턴 요약의 판단 보조를 사용합니다.
 
 기본 런타임은 `/start-game`을 실행한 호스트이고, 딜러가 `--player-runtime`으로 명시한다. policy 모드는 상위 모델만 검사하고 LLM 플레이어 probe·세션을 만들지 않는다. llm 모드에서는 플레이어 모델 왕복이나 컨테인먼트 검증에 실패하면 폴백 사다리(claude → codex → grok)가 돌며, 모두 부적격일 때 `NO_PLAYER_RUNTIME`으로 기동을 중단한다. 상위 모델만 없으면 LLM 설명을 제공할 수 없음을 알린다.
 

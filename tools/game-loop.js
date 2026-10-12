@@ -201,6 +201,20 @@ const RESTORED_SESSION_REJECTION_CODES = new Set([
   'SESSION_NOT_FOUND',
 ]);
 
+// 로그용 모델 id: 어댑터가 argv에 실은(claude는 서빙이 확인된) id. models가 없는 스텁은 폴백 고정값.
+function adapterModel(adapter, tier = 'player') {
+  return adapter?.models?.[tier] ?? RUNTIME_TABLE[adapter?.kind]?.[tier] ?? null;
+}
+
+function adapterModelLog(adapter, tier) {
+  if (!adapter) return null;
+  const models = adapter.models ?? {};
+  return {
+    runtime: adapter.kind, model: adapterModel(adapter, tier), source: models.source?.[tier] ?? null,
+    replaced: models.replaced?.[tier] ?? null, catalog: models.catalog ?? null,
+  };
+}
+
 function isFatalRuntimeFailure(error) {
   const code = typeof error?.code === 'string' ? error.code : '';
   return FATAL_RUNTIME_CODES.has(code)
@@ -2165,7 +2179,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (!notices.includes(notice)) notices.push(notice);
       }
       writeLoopState({ notices, upperRuntime: upperAdapter?.kind ?? null });
-      log('upper-resolved', { upperRuntime: upperAdapter?.kind ?? null });
+      log('upper-resolved', { upperRuntime: upperAdapter?.kind ?? null, upper: adapterModelLog(upperAdapter, 'upper') });
     })();
     const tracked = owned.finally(() => {
       if (resolverPromise === tracked) resolverPromise = null;
@@ -2187,6 +2201,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     upperResolved = true;
     registerAdapter(playerAdapter);
     registerAdapter(upperAdapter);
+    // 기동(시작·재개)마다 다시 푼 모델이다 — 재개 전후로 id가 달라질 수 있다.
+    log('runtime-models', { player: adapterModelLog(playerAdapter, 'player'), upper: adapterModelLog(upperAdapter, 'upper') });
   };
 
   const haltNoPlayer = async (notices) => {
@@ -2220,7 +2236,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if(deadlineAt!==null) log('player-call',{purpose,
         decisionId:readLoopState()?.pendingDecision?.decisionId??null,
         generation:readLoopState()?.pendingDecision?.generation??null,
-        runtime:playerAdapter.kind,model:RUNTIME_TABLE[playerAdapter.kind]?.player??null,
+        runtime:playerAdapter.kind,model:adapterModel(playerAdapter),
         timeoutMs,elapsedMs:Math.max(0,monotonicNow()-started),code,
         category:code==='RESPONSE_RECEIVED'?'response':playerFailureCategory(code),censored:code==='TIMEOUT'});
     }
@@ -2510,7 +2526,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     } finally {
       log('player-call', { purpose:'decision', decisionId: readLoopState()?.pendingDecision?.decisionId ?? null,
         generation: readLoopState()?.pendingDecision?.generation ?? null,
-        runtime: playerAdapter.kind, model: RUNTIME_TABLE[playerAdapter.kind]?.player ?? null,
+        runtime: playerAdapter.kind, model: adapterModel(playerAdapter),
         callNo, timeoutMs, elapsedMs: Math.max(0, monotonicNow() - started), code,
         category: code === 'RESPONSE_RECEIVED' ? 'response' : playerFailureCategory(code),
         censored: code === 'TIMEOUT' });
@@ -2950,7 +2966,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       failureCode = round.error?.code ?? 'INVALID_DECISION';
       log('player-attempt', { callNo, decisionId: next.decisionId, generation: record.generation,
-        runtime: playerAdapter.kind, model: RUNTIME_TABLE[playerAdapter.kind]?.player ?? null,
+        runtime: playerAdapter.kind, model: adapterModel(playerAdapter),
         budget: watchdog, elapsedMs: round.modelMs, code: round.ok ? 'RESPONSE_RECEIVED' : failureCode,
         category: round.ok ? 'response' : playerFailureCategory(failureCode),
         closeConfirmed: round.ok || !isFatalRuntimeFailure(round.error), censored: failureCode === 'TIMEOUT' });
