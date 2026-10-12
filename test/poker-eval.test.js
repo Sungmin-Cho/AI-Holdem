@@ -207,3 +207,23 @@ test('describeTiebreak names the first deciding rank within one category', async
   assert.deepEqual(describeTiebreak(bestFiveOf(['Qh', '3c', ...boatBoard]), bestFiveOf(['5s', '3d', ...boatBoard])),
     { tie: false, text: '풀하우스 트리플 Q > 5' });
 });
+
+test('describeTiebreak names every deciding position', async () => {
+  const { bestFiveOf, describeTiebreak } = await import('../shared/poker-eval.js');
+  const vs = (a, b, board) => describeTiebreak(bestFiveOf([...a, ...board]), bestFiveOf([...b, ...board]))?.text;
+  const dry = ['9s', '8h', '6d', '4c', '2s'];
+  assert.equal(vs(['Ad', '3c'], ['Kd', 'Qc'], dry), '하이 카드 A > K');
+  assert.equal(vs(['Ad', 'Jc'], ['Ah', 'Tc'], dry), '키커 J > 10');
+  assert.equal(vs(['Ks', 'Kd'], ['Qs', 'Qd'], dry), '페어 K > Q');
+  assert.equal(vs(['Ad', 'Ac'], ['Kd', 'Kc'], ['9s', '9h', '6d', '4c', '2s']), '높은 페어 A > K');
+  assert.equal(vs(['Kh', 'Ac'], ['Kc', 'Qc'], ['Ks', '9h', '9d', '4c', '2s']), '키커 A > Q', 'two pair kicker');
+  assert.equal(vs(['7h', 'Kc'], ['7c', 'Qc'], ['7s', '7d', '9d', '4c', '2s']), '키커 K > Q', 'trips kicker');
+  assert.equal(vs(['Ts', '2c'], ['5h', '3c'], ['9s', '8h', '7d', '6c', 'Ks']), '스트레이트 10 하이 > 9 하이');
+  assert.equal(vs(['Ah', '3h'], ['Kh', '2h'], ['Qh', 'Jh', '9h', '4c', '2s']), '플러시 최고 카드 A > K');
+  assert.equal(vs(['9h', '7h'], ['8h', '6h'], ['Ah', 'Kh', 'Qh', '4c', '2s']), '플러시 네 번째 카드 9 > 8');
+  assert.equal(vs(['7h', '2c'], ['6h', '3c'], ['Ah', 'Kh', 'Qh', 'Jh', '2s']), '플러시 다섯 번째 카드 7 > 6');
+  assert.equal(vs(['Qs', '2c'], ['Js', 'Jc'], ['Qd', 'Qh', 'Jh', '4c', '4s']), '풀하우스 트리플 Q > J');
+  assert.equal(vs(['Ks', '2c'], ['4h', '3c'], ['Qd', 'Qh', 'Qs', 'Kc', '4s']), '풀하우스 페어 K > 4');
+  assert.equal(vs(['Ah', '2c'], ['Kh', '3c'], ['9s', '9h', '9d', '9c', '4s']), '키커 A > K', 'quads kicker');
+  assert.equal(vs(['Kh', 'Qd'], ['Ks', 'Jc'], ['Ah', 'Ad', 'Ac', 'As', '2s']), '같은 족보로 분할', 'the same kicker splits');
+});

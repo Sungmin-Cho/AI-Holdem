@@ -3,19 +3,30 @@ import {bestFiveOf, describeTiebreak} from '../../shared/poker-eval.js';
 /** Public hand events only. The result carries no cards except the public
  * board and the showdown reveals of that hand; never hole cards, mucks,
  * private actions, or opaque records. */
-function handStartAt(rows, handNo) {
-  return rows.findLastIndex(event => event.type === 'hand_start' && event.handNo === handNo);
+// Events that belong to a hand's play. After a hand's awards none may follow
+// before the next hand_start; if one does, that hand_start is missing and the
+// two hands' public cards must not be mixed.
+const HAND_BODY = new Set(['action', 'street', 'showdown', 'blinds_posted']);
+
+/** The events of the hand starting at rows[start], up to the next hand_start;
+ * null when its awards are followed by more play (a missing boundary). */
+function handSegment(rows, start) {
+  const out = [];
+  let awarded = false;
+  for (let at = start + 1; at < rows.length; at += 1) {
+    const event = rows[at];
+    if (event?.type === 'hand_start') break;
+    if (event?.type === 'pot_award') awarded = true;
+    else if (awarded && HAND_BODY.has(event?.type)) return null;
+    out.push(event);
+  }
+  return out;
 }
-function handEvents(log, handNo) {
-  const rows = Array.isArray(log) ? log : [];
-  const index = handStartAt(rows, handNo);
-  if (index < 0) return [];
-  const end = rows.findIndex((event, at) => at > index && event.type === 'hand_start');
-  return rows.slice(index + 1, end < 0 ? rows.length : end);
-}
+const lastStartOf = (rows, handNo) => rows.findLastIndex(event => event?.type === 'hand_start' && event.handNo === handNo);
 function handTail(log, handNo) {
   const rows = Array.isArray(log) ? log : [];
-  return rows.findLast(event => event.type === 'hand_start')?.handNo === handNo ? handEvents(rows, handNo) : [];
+  const start = rows.findLastIndex(event => event?.type === 'hand_start');
+  return start >= 0 && rows[start].handNo === handNo ? handSegment(rows, start) ?? [] : [];
 }
 
 const STREETS = ['flop', 'turn', 'river'];
@@ -24,15 +35,16 @@ function bestFiveSafe(cards) {
   try { return bestFiveOf(cards); } catch { return null; }
 }
 
-/** One finished hand from its public events: awards, reveals, board by street. */
-export function summarizeHand(log, handNo, {pots: potFacts = null} = {}) {
-  const tail = handEvents(log, handNo);
-  const awards = tail.filter(event => event.type === 'pot_award');
+/** One finished hand, the one starting at rows[start], from its public events:
+ * awards, reveals, board by street. */
+function summarizeAt(rows, start, {pots: potFacts = null, viewer = null} = {}) {
+  const tail = start >= 0 ? handSegment(rows, start) : null;
+  const awards = tail?.filter(event => event.type === 'pot_award') ?? [];
   if (!awards.length) return null;
+  const handNo = rows[start].handNo;
   // The hand's own blinds: a later level must not rescale this hand's amounts.
-  const start = log[handStartAt(log, handNo)];
-  const blinds = Array.isArray(start?.blinds) && start.blinds.length === 2 && start.blinds.every(Number.isSafeInteger)
-    ? [...start.blinds] : null;
+  const blinds = Array.isArray(rows[start].blinds) && rows[start].blinds.length === 2 && rows[start].blinds.every(Number.isSafeInteger)
+    ? [...rows[start].blinds] : null;
   const showdown = tail.findLast(event => event.type === 'showdown');
   const streets = tail.filter(event => event.type === 'street');
   const finalBoard = validCards(streets.at(-1)?.board) ? streets.at(-1).board.slice(0, 5) : [];
@@ -84,6 +96,10 @@ export function summarizeHand(log, handNo, {pots: potFacts = null} = {}) {
   }
   return {
     handNo,
+    // Same hand number, same events: the identity a cached result is checked against.
+    key:JSON.stringify([handNo, awards.map(row => [row.potIndex, row.amount, row.winners]), finalBoard,
+      (showdown?.reveals ?? []).map(row => [row?.playerId, row?.cards])]),
+    viewer,
     kind:showdown ? 'showdown' : 'uncontested',
     pots,
     winners:[...totals].map(([playerId,total]) => ({playerId,total,
@@ -95,9 +111,15 @@ export function summarizeHand(log, handNo, {pots: potFacts = null} = {}) {
   };
 }
 
+/** The last hand numbered `handNo`, when it has finished. */
+export function summarizeHand(log, handNo, options = {}) {
+  const rows = Array.isArray(log) ? log : [];
+  return summarizeAt(rows, lastStartOf(rows, handNo), options);
+}
+
 export function buildHandResult({log, view, viewer, prior}) {
   if (!view || view.handInProgress !== false || view.gameOver) return null;
-  const result = summarizeHand(log, view.handNo, {pots:view.pots});
+  const result = summarizeHand(log, view.handNo, {pots:view.pots, viewer:typeof viewer === 'string' && view.viewer !== null ? viewer : null});
   if (!result) return null;
   const seat = view.seats?.find(row => row.playerId === viewer);
   if (typeof viewer === 'string' && view.viewer !== null && seat && seat.kind !== 'ai' && prior?.handNo === view.handNo) {
@@ -108,39 +130,42 @@ export function buildHandResult({log, view, viewer, prior}) {
   return result;
 }
 
-function latestFinishedHandNo(rows) {
-  const award = rows.findLastIndex(event => event.type === 'pot_award');
-  if (award < 0) return null;
-  return rows.findLast((event, index) => index < award && event.type === 'hand_start')?.handNo ?? null;
+// Where the latest finished hand starts: the hand_start before the last award.
+function latestFinishedStart(rows) {
+  const award = rows.findLastIndex(event => event?.type === 'pot_award');
+  return award < 0 ? -1 : rows.findLastIndex((event, index) => index < award && event?.type === 'hand_start');
 }
 
 /** The latest finished hand in the log (reconnect / next hand), without the viewer's net. */
 export function latestFinishedHand(log) {
   const rows = Array.isArray(log) ? log : [];
-  const handNo = latestFinishedHandNo(rows);
-  return handNo === null ? null : summarizeHand(rows, handNo);
+  return summarizeAt(rows, latestFinishedStart(rows));
 }
 
 /** "직전 결과": the latest finished hand, kept through the next hand and rebuilt
- * whenever the log has moved past it (missed frames, reconnect, game over).
- * Built from that hand's end view when it is the current view, so it keeps the
- * viewer's net and the pots' contenders; otherwise from the log alone. */
+ * whenever the log has moved past it (missed frames, reconnect, game over) or
+ * the viewer changed. Built from that hand's end view when it is the current
+ * view, so it keeps the viewer's net and the pots' contenders; otherwise from
+ * the log alone. */
 export function trackLatestResult(previous, {log, view, viewer, prior}) {
   const rows = Array.isArray(log) ? log : [];
-  const handNo = latestFinishedHandNo(rows);
-  if (handNo === null) return null;
-  const atEnd = view?.handNo === handNo && view.handInProgress === false;
-  if (previous?.handNo === handNo && (previous.fromView || !atEnd)) return previous;
-  const result = atEnd ? buildHandResult({log:rows, view:{...view, gameOver:false}, viewer, prior}) : summarizeHand(rows, handNo);
-  if (!result) return previous?.handNo === handNo ? previous : null;
-  if (atEnd) result.fromView = true;
-  return result;
+  const start = latestFinishedStart(rows);
+  const latest = summarizeAt(rows, start);
+  if (!latest) return null;
+  const who = typeof viewer === 'string' && view?.viewer !== null ? viewer : null;
+  const atEnd = start === rows.findLastIndex(event => event?.type === 'hand_start')
+    && view?.handNo === latest.handNo && view.handInProgress === false;
+  if (previous?.key === latest.key && previous.viewer === who && (previous.fromView || !atEnd)) return previous;
+  const built = atEnd ? buildHandResult({log:rows, view:{...view, gameOver:false}, viewer, prior}) : null;
+  if (built?.key === latest.key) return {...built, fromView:true};
+  return {...latest, viewer:who};
 }
 
 export function updateHandResult(previous, input) {
   const view = input.view;
   if (!view || view.handInProgress !== false || view.gameOver) return null;
-  if (previous?.handNo === view.handNo) return previous;
+  const viewer = typeof input.viewer === 'string' && view.viewer !== null ? input.viewer : null;
+  if (previous?.handNo === view.handNo && previous.viewer === viewer) return previous;
   return buildHandResult(input);
 }
 

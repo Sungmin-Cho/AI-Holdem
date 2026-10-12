@@ -1408,7 +1408,9 @@ main {display:grid;grid-template-columns:minmax(0,1fr) 340px;grid-template-rows:
 .table-context {display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;color:var(--muted);}
 .table-context label {display:flex;align-items:center;gap:8px;font-size:12px;}
 .table-context-tools {display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
-.last-result-body {max-height:min(70vh,560px);overflow:auto;}
+/* The recap fits short screens: the card is capped and only its body scrolls. */
+.review-card.last-result-card {max-height:calc(100dvh - 48px);}
+.last-result-body {flex:1 1 auto;min-height:0;overflow:auto;}
 select {border:1px solid var(--c-control-border);background:var(--c-surface-2);color:var(--ink);border-radius:10px;padding:8px;}
 .table-wrap {container-type:inline-size;display:block;padding:40px 0 65px;flex:none;}
 .table {--tw:min(960px,100cqw);width:var(--tw);margin:auto;aspect-ratio:1.65;height:auto;max-height:none;}
@@ -1570,6 +1572,8 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
      than growing it, so the table never shrinks or moves for a long result. */
   .action-area:has(.hand-result:not([hidden])) {max-height:138px;}
   .action-area > .result-dock {flex-shrink:1;min-height:0;overflow:auto;}
+  /* Countdown and skip stay in view while a long result scrolls. */
+  .result-dock .hand-result-head {position:sticky;top:-8px;z-index:1;margin:-8px -14px 0;padding:8px 14px 2px;background:var(--c-surface-1);}
   .table-context .last-result-open {min-height:26px;height:26px;padding:0 10px;font-size:12px;}
   main {min-height:0;height:100%;grid-template-rows:minmax(0,1fr);grid-template-columns:minmax(0,1fr) 280px;}
   .stage {min-height:0;gap:4px;padding:6px 12px;}

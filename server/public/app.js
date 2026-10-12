@@ -746,7 +746,7 @@ function paintLastResultControl() {
 function paintLastResult() {
   const result=lastResultShown,body=$('last-result-body');
   if(!result)return;
-  const key=`${result.handNo}:${displayUnit}:${result.myNet}`;
+  const key=`${result.key}:${displayUnit}:${result.myNet}`;
   if(body.dataset.key!==key){
     body.dataset.key=key;body.replaceChildren();
     const card=el('div','hand-result is-recap');renderHandResultCard(card,result,{playerName,unit:displayUnit});body.append(card);
@@ -1564,7 +1564,7 @@ function paintReview(view) {
   result.textContent=title+(Number.isSafeInteger(finalSummary?.handCount)?` · 완료 ${finalSummary.handCount}핸드`:'');
   result.classList.toggle('is-win',view?.result==='win');result.classList.toggle('is-lose',view?.result==='lose');
   const spectator=isSpectating(view),viewer=spectator?null:viewerId(view);
-  const key=JSON.stringify([summaryVersion,view?.handNo,view?.seats,view?.sessionNet,viewer,ui.log.length,Object.keys(ui.handReplays),ui.lastHandResult?.handNo,ui.lastHandResult?.myNet]);
+  const key=JSON.stringify([summaryVersion,view?.handNo,view?.seats,view?.sessionNet,viewer,ui.log.length,Object.keys(ui.handReplays),ui.lastHandResult?.key,ui.lastHandResult?.myNet,displayUnit]);
   if(key!==finalPanelKey){
     finalPanelKey=key;
     paintFinalPanel($('final-summary'),{summary:finalSummary,view,viewer,
@@ -1574,10 +1574,9 @@ function paintReview(view) {
     const hand=ui.lastHandResult;
     last.hidden=!hand;
     if(hand){
-      // Cash games read in the fixed big blind; tournaments (rising blinds) in chips, like the summary.
-      const cash=view?.mode==='cash-training';
+      // The hand's own blinds and the chosen unit, as on the live strip and the recap.
       const card=el('div','hand-result is-recap');
-      renderHandResultCard(card,hand,{playerName,unit:'bb',bb:cash?hand.blinds?.[1]??null:null});
+      renderHandResultCard(card,hand,{playerName,unit:displayUnit});
       last.append(el('h2','','마지막 핸드'),card);
     }
   }

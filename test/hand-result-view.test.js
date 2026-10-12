@@ -62,3 +62,13 @@ test('a single pot shows its deciding rank; a fold win shows only the dealt boar
   assert.deepEqual(texts(preflop, '.hand-result-won'), ['팟 150 칩 획득'], 'no recorded blinds: chips, never the current BB');
   assert.deepEqual(texts(render(sidePots, { unit: 'chips' }), '.hand-result-won')[0], '팟 975 칩 획득');
 });
+
+test('four winners over four pots are all listed, never folded into "외 N명"', () => {
+  const ids = ['user', 'p2', 'p4', 'p5'];
+  const box = render({ ...sidePots, myNet: null, runout: [],
+    winners: ids.map((playerId, index) => ({ playerId, total: 100 * (index + 1), handName: '원페어', cards: null })),
+    pots: ids.map((playerId, index) => ({ potIndex: index, amount: 100 * (index + 1), winners: [{ playerId, share: 100 * (index + 1) }], note: null, versus: null })) });
+  assert.equal(box.querySelectorAll('.hand-result-winner').length, 4);
+  assert.deepEqual(texts(box, '.hand-result-pot').map(text => text.split(' · ')[0]), ['메인 팟 2 BB', '사이드 팟 1 4 BB', '사이드 팟 2 6 BB', '사이드 팟 3 8 BB']);
+  assert.equal(box.textContent.includes('외 '), false);
+});

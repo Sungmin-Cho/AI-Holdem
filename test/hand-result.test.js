@@ -12,8 +12,9 @@ const fixture=()=>({
 
 test('hand result selects only public awards and revealed hand names, with cash net',async()=>{
   const {buildHandResult}=await import('../server/public/hand-result.js');
-  const result=buildHandResult(fixture());
-  assert.deepEqual(result,{handNo:3,kind:'showdown',pots:[{potIndex:0,amount:300,winners:[{playerId:'user',share:300}],note:null,versus:null}],
+  const {key,...result}=buildHandResult(fixture());
+  assert.equal(typeof key,'string');
+  assert.deepEqual(result,{handNo:3,viewer:'user',kind:'showdown',pots:[{potIndex:0,amount:300,winners:[{playerId:'user',share:300}],note:null,versus:null}],
     winners:[{playerId:'user',total:300,handName:'원페어',cards:null}],board:{flop:[],turn:[],river:[]},runout:[],blinds:null,myNet:100});
   const text=JSON.stringify(result);
   for(const privateValue of ['As','Ah','Kh','9s','holeCardsByPlayerId','myCards','mucks'])assert.equal(text.includes(privateValue),false);
@@ -201,4 +202,60 @@ test('the latest result follows the log across missed hands and game over, and k
   assert.equal(logOnly.myNet,null);
   assert.equal(trackLatestResult(logOnly,input).myNet,100);
   assert.equal(trackLatestResult(null,{...input,log:[{type:'hand_start',handNo:1}]}),null);
+});
+
+test('a hand never borrows another hand\u2019s events: missing boundaries refuse, reused numbers stay apart',async()=>{
+  const {summarizeHand,latestFinishedHand,trackLatestResult}=await import('../server/public/hand-result.js');
+  const handA=[{type:'hand_start',handNo:7,blinds:[10,20]},{type:'street',street:'flop',board:['Ks','7d','2c']},
+    {type:'action',playerId:'p1',action:'raise',amount:60},{type:'action',playerId:'p2',action:'fold'},
+    {type:'pot_award',potIndex:0,amount:100,winners:[{playerId:'p1',share:100}]},{type:'bust',playerId:'p2'},{type:'narration',text:'x'}];
+  const handB=[{type:'street',street:'flop',board:['Ah','9d','7c']},{type:'action',playerId:'p3',action:'check'},
+    {type:'showdown',reveals:[{playerId:'p3',cards:['As','Kd'],handName:'원페어'}],mucks:[]},
+    {type:'pot_award',potIndex:0,amount:400,winners:[{playerId:'p3',share:400}]}];
+  assert.equal(summarizeHand(handA,7).pots[0].amount,100,'bust and narration may follow the awards');
+  // B's hand_start is missing: A's awards are followed by more play.
+  const broken=[...handA,...handB];
+  assert.equal(summarizeHand(broken,7),null);
+  assert.equal(latestFinishedHand(broken),null);
+  assert.equal(trackLatestResult(null,{log:broken,view:null,viewer:'user',prior:null}),null);
+  // A reused number: the finished first 7 stays readable while the second 7 plays.
+  const reused=[...handA,{type:'hand_start',handNo:7,blinds:[25,50]},{type:'action',playerId:'p3',action:'call',amount:50}];
+  assert.equal(latestFinishedHand(reused).pots[0].amount,100);
+  assert.equal(summarizeHand(reused,7),null,'the current 7 has not finished');
+  const first=trackLatestResult(null,{log:reused,view:{handNo:7,handInProgress:true,viewer:'user'},viewer:'user',prior:null});
+  assert.equal(first.pots[0].amount,100);
+  // When the second 7 finishes, the cache moves to it.
+  const second=[...reused,...handB.slice(2)];
+  const moved=trackLatestResult(first,{log:second,view:{handNo:7,handInProgress:false,viewer:'user',seats:[]},viewer:'user',prior:null});
+  assert.equal(moved.pots[0].amount,400);assert.notEqual(moved.key,first.key);assert.deepEqual(moved.blinds,[25,50]);
+});
+
+test('a viewer change rebuilds the cached results without the previous viewer\u2019s net',async()=>{
+  const {trackLatestResult,updateHandResult}=await import('../server/public/hand-result.js');
+  const input=fixture();
+  const mine=trackLatestResult(null,input);assert.equal(mine.myNet,100);
+  const watching={...input,view:{...input.view,viewer:null},viewer:null};
+  const spectator=trackLatestResult(mine,watching);
+  assert.notEqual(spectator,mine);assert.equal(spectator.myNet,null);assert.equal(spectator.viewer,null);
+  const live=updateHandResult(null,input);assert.equal(live.myNet,100);
+  assert.equal(updateHandResult(live,watching).myNet,null);
+});
+
+test('a side pot\u2019s reason compares only that pot\u2019s contenders',async()=>{
+  const {buildHandResult,summarizeHand}=await import('../server/public/hand-result.js');
+  // p2 (short, trips) wins the main pot; the side pot is between the user and p4 only.
+  const board=['Ah','9d','7c','4s','2h'];
+  const log=[{type:'hand_start',handNo:61,blinds:[25,50]},{type:'action',playerId:'user',action:'raise',amount:5000,allIn:true},
+    {type:'action',playerId:'p2',action:'call',amount:300,allIn:true},{type:'action',playerId:'p4',action:'call',amount:700,allIn:true},
+    {type:'street',street:'flop',board:board.slice(0,3)},{type:'street',street:'turn',board:board.slice(0,4)},{type:'street',street:'river',board},
+    {type:'showdown',reveals:[{playerId:'user',cards:['As','Kd'],handName:'원페어'},{playerId:'p2',cards:['9h','9c'],handName:'트리플'},{playerId:'p4',cards:['Ac','Qd'],handName:'원페어'}],mucks:[]},
+    {type:'pot_award',potIndex:0,amount:975,winners:[{playerId:'p2',share:975}]},{type:'pot_award',potIndex:1,amount:800,winners:[{playerId:'user',share:800}]}];
+  const view={handNo:61,handInProgress:false,gameOver:false,mode:'tournament',viewer:'user',board,
+    seats:[{playerId:'user',kind:'human',stack:5100},{playerId:'p2',kind:'ai',stack:975},{playerId:'p4',kind:'ai',stack:0}],
+    pots:[{potIndex:0,amount:975,eligible:['user','p2','p4']},{potIndex:1,amount:800,eligible:['user','p4']}]};
+  const result=buildHandResult({log,view,viewer:'user',prior:null});
+  assert.deepEqual(result.pots.map(pot=>[pot.note,pot.versus]),[[null,null],['키커 K > Q','p4']],
+    'the main pot is decided by category; the side pot ignores p2, who is not in it');
+  assert.deepEqual(result.runout,['flop','turn','river']);
+  assert.deepEqual(summarizeHand(log,61).pots.map(pot=>pot.note),[null,null],'from the log alone the side pot\u2019s contenders are unknown');
 });
