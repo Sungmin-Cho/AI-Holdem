@@ -1432,7 +1432,6 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 .spectator-mode .action-feedback, .spectator-mode #pre-action-hint {display:none;}
 .spectator-mode .seat.is-folded .seat-cards {opacity:1;}
 .seat.is-out .plate {border-style:dashed;background:var(--panel);}
-.seat.is-out .avatar {filter:grayscale(1);}
 .seat.is-folded .plate {border-style:dashed;}
 .seat.is-to-act .plate {border-color:var(--c-info);box-shadow:0 0 0 3px var(--c-info-soft);}
 .pots {border-radius:16px;flex-wrap:wrap;justify-content:center;max-width:100%;white-space:normal;gap:6px;padding:10px;background:var(--c-pot-bg);}
@@ -1738,6 +1737,18 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 .plate-status {display:flex;flex-direction:column;align-items:center;gap:2px;min-width:0;flex:1 0 100%;}
 .plate-status:empty {display:none;}
 @media (min-width:1024px) and (min-height:550px) {.table .plate-status {flex:0 1 auto;}}
+
+/* Seat states at a glance (#276): in the hand (solid plate), all-in (amber tag),
+   folded (see-through dashed plate, dashed "폴드" tag) and eliminated (a compact
+   name-and-status plate, red "탈락" tag). Text keeps its contrast; only the plate,
+   avatar and cards fade. A fold stays marked until the next hand starts. */
+.seat.is-folded .plate,.seat.is-out .plate {background:color-mix(in srgb, var(--c-plate) 55%, transparent);box-shadow:none;}
+.seat.is-folded .avatar {filter:grayscale(1);}
+.plate .plate-tag.is-fold {background:transparent;border:1px dashed var(--c-plate-text-2);color:var(--c-plate-text-2);}
+.plate .plate-tag.is-out {background:var(--c-danger-soft);border:1px solid var(--c-danger-border);color:var(--c-danger);}
+.table .seat.is-out .plate {min-width:0;width:auto;padding:3px 8px;gap:4px;}
+.seat.is-out .plate-name {color:var(--c-plate-text-2);}
+.seat.is-out .plate-tag {white-space:nowrap;}
 #action-options-toggle {display:none;}
 @media(max-width:600px) {
   .action-bar {position:sticky;bottom:0;z-index:12;background:var(--panel);padding:8px;padding-bottom:max(8px,env(safe-area-inset-bottom));gap:6px;}
@@ -1759,7 +1770,11 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .table-wrap {padding:12px 0 52px;}
   .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .seat:not(.is-hero) .seat-cards {display:none;}
   .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .plate {padding:3px 4px;gap:1px;}
-  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .plate-tag {display:none;}
+  /* The collapsed bar keeps fold, all-in and elimination readable: those seats
+     show their status in the stack's row (two rows, like every other plate). */
+  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .plate-tag:not(.is-fold,.is-out,.is-allin) {display:none;}
+  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .seat:is(.is-folded,.is-allin) .plate-stack {display:none;}
+  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .plate-tag {padding:0 4px;line-height:1.25;}
   .action-feedback,#action-status,#action-notice,.idle-hint,.thinking {margin:0;}
 }
 

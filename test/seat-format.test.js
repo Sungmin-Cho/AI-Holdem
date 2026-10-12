@@ -11,6 +11,19 @@ test('elimination comes from explicit engine state, never a zero stack', () => {
   assert.equal(seatPresentation({street:'preflop'},{isButton:true}).showButton,true);
   assert.equal(seatPresentation({handInProgress:false},{isButton:true}).showButton,false);
 });
+test('a fold stays marked through the result and clears with the next hand; all-in does not linger', () => {
+  for (const mode of ['tournament','cash-training']) {
+    const ended={handNo:4,handInProgress:false,mode};
+    const folded=seatPresentation(ended,{playerId:'p1',out:false,folded:true});
+    assert.equal(folded.status,'폴드');assert.equal(folded.folded,true);assert.equal(folded.showBacks,false);
+    assert.equal(seatPresentation({...ended,gameOver:true},{playerId:'p1',out:false,folded:true}).status,'폴드');
+    const allIn=seatPresentation(ended,{playerId:'p1',out:false,allIn:true,stack:0});
+    assert.equal(allIn.status,'플레이 중');assert.equal(allIn.allIn,false);
+    assert.equal(seatPresentation({handNo:5,handInProgress:true,street:'preflop',mode},{playerId:'p1',out:false,folded:false}).status,'플레이 중');
+  }
+  assert.equal(seatPresentation({handNo:4,handInProgress:false,mode:'tournament'},{playerId:'p1',out:true,folded:true}).status,'탈락');
+  assert.equal(seatPresentation({handNo:0,handInProgress:false},{playerId:'p1',out:false,folded:true}).folded,false);
+});
 test('cash and legacy participant counts do not guess tournament survival', () => {
   const seats=[{out:false},{out:true}];
   assert.equal(participantSummary({seats}),'남은 인원 1 / 2');
@@ -92,4 +105,26 @@ test('last action badges track current street bets, raises and all-in, never bli
   log.push({type:'action',playerId:'user',action:'fold',street:'flop'});
   assert.deepEqual(lastActionsBySeat(log).user,{label:'폴드',amount:null});
   log.push({type:'hand_start',handNo:2});assert.deepEqual(lastActionsBySeat(log),{});
+});
+
+test('engine views keep a fold marked through the result for host, seat and spectator, and clear it next hand', async () => {
+  const {createGame,startHand,applyAction,legalFor}=await import('../engine/hand.js');
+  const {userView,viewFor,spectatorView}=await import('../engine/views.js');
+  for (const mode of ['tournament','cash-training']) {
+    let state=createGame({aiCount:3,mode,...(mode==='cash-training'?{levelEvery:null}:{})});
+    state=startHand(state).state;
+    const folder=legalFor(state).toAct;
+    state=applyAction(state,folder,'fold').state;
+    while(!legalFor(state).handOver){const legal=legalFor(state);state=applyAction(state,legal.toAct,legal.canCheck?'check':'call').state;}
+    const finished=[userView(state),viewFor(state,state.seats[1].playerId),spectatorView(state)];
+    for(const view of finished){
+      assert.equal(view.handInProgress,false);
+      const seat=view.seats.find(row=>row.playerId===folder);
+      assert.equal(seatPresentation(view,seat).status,'폴드',`${mode} ${view.viewer}: the fold shows through the result`);
+      for(const other of view.seats.filter(row=>row.playerId!==folder))assert.notEqual(seatPresentation(view,other).status,'폴드');
+    }
+    state=startHand(state).state;
+    for(const view of [userView(state),viewFor(state,state.seats[1].playerId),spectatorView(state)])
+      assert.notEqual(seatPresentation(view,view.seats.find(row=>row.playerId===folder)).status,'폴드','the next hand clears it');
+  }
 });

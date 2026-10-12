@@ -6,7 +6,8 @@ export function seatPresentation(view, seat) {
   const out = view?.mode !== 'cash-training' && seat.out === true;
   const playing = view?.handInProgress !== false;
   const active = !out && playing && !view?.gameOver && view?.toAct === seat.playerId;
-  const folded = !out && playing && Boolean(seat.folded);
+  // A fold stays marked through the hand's result until the next hand's view.
+  const folded = !out && (playing || view?.handNo > 0) && Boolean(seat.folded);
   const allIn = !out && playing && Boolean(seat.allIn);
   const status = out ? '탈락' : allIn ? '올인' : folded ? '폴드' : active ? (seat.playerId === viewerId(view) ? '내 차례' : '행동 중')
     : view?.mode !== 'cash-training' && typeof seat.out !== 'boolean' ? '상태 확인 불가' : '플레이 중';

@@ -577,6 +577,7 @@ function paintSeats(view) {
     node.className = 'seat';
     if (isHero) node.classList.add('is-hero');
     if (state.folded) node.classList.add('is-folded');
+    if (state.allIn) node.classList.add('is-allin');
     if (state.out) node.classList.add('is-out');
     if (active) node.classList.add('is-to-act');
     // Leave room for rotated hero cards beside the lower seats on dense tables.
@@ -597,23 +598,24 @@ function paintSeats(view) {
     plate.setAttribute('aria-label', `${seat.name ?? seat.playerId}, ${positions[seat.playerId] ?? ''}, ${state.status}, 스택 ${amountText(seat.stack)}, 이번 스트리트 베팅 ${amountText(seat.bet)}. 좌석 상세`);
     plate.onclick = () => openSeatDetails(seat.playerId);
     plate.replaceChildren();
-    const avatarWrap = el('span', 'avatar-wrap');
-    avatarWrap.append(el('span', 'avatar', (seat.name ?? '?').slice(0, 1)));
-    if (active) avatarWrap.append(avatarRing());
-
     const info = el('span', 'plate-info');
-    info.append(
-      el('span', 'plate-name', isHero ? '나' : (seat.name ?? seat.playerId)),
-      amountNode(seat.stack, view.blinds?.[1], 'plate-stack'),
-    );
-    plate.append(avatarWrap, info);
+    info.append(el('span', 'plate-name', isHero ? '나' : (seat.name ?? seat.playerId)));
+    // An eliminated seat keeps its place but shrinks to its name and status.
+    if (state.out) plate.append(info);
+    else {
+      const avatarWrap = el('span', 'avatar-wrap');
+      avatarWrap.append(el('span', 'avatar', (seat.name ?? '?').slice(0, 1)));
+      if (active) avatarWrap.append(avatarRing());
+      info.append(amountNode(seat.stack, view.blinds?.[1], 'plate-stack'));
+      plate.append(avatarWrap, info);
+    }
 
     // One status line per plate: out > all-in > fold > turn > last action > nothing.
     const statusGroup=el('span','plate-status');
     const lastAction = lastActions[seat.playerId];
     if (lastAction) plate.setAttribute('aria-label',`${plate.getAttribute('aria-label')}, 마지막 액션 ${lastAction.label}${lastAction.amount==null?'':` ${amountText(lastAction.amount)}`}`);
     if (state.out || state.allIn || state.folded) {
-      statusGroup.append(el('span', `plate-tag${state.allIn ? ' is-allin' : ''}`, state.status));
+      statusGroup.append(el('span', `plate-tag ${state.out ? 'is-out' : state.allIn ? 'is-allin' : 'is-fold'}`, state.status));
     } else if (active) {
       const thinking = !isHero && seat.kind === 'ai';
       statusGroup.append(el('span', `plate-tag is-turn${thinking ? ' plate-thinking' : ''}`, thinking ? plateThinkingText() : state.status));
