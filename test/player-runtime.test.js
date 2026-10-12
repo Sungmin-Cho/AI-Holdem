@@ -409,7 +409,7 @@ test('claude 내장 플러그인: --settings가 끄는 이름은 고정이고, i
     assert.equal(upper.upper, false);
     assert.equal(upper.containment, false);
     assert.equal(upper.notice, '컨테인먼트 실패(claude/opus): 도구·MCP·플러그인 표면이 비어 있지 않습니다.');
-    assert.ok(f.calls().length >= 2);
+    assert.equal(f.calls().length, 2, '플레이어 probe 1회 + 왕복에서 탈락한 상위 probe 1회 — 카나리 호출은 건너뛴다');
     assert.ok(f.calls().every((call) => call.argv.includes(CLAUDE_CONTAINMENT_LITERAL.at(-1))),
       '모든 probe 호출이 내장 플러그인을 끄는 설정을 싣는다');
   } finally {
