@@ -11,6 +11,7 @@ import {userView} from '../../engine/views.js';
 import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures,defaultPlayers} from '../helpers/security-fixtures.js';
 import {parseCard,cardLabel} from '../../server/public/card-render.js';
+import {formatSignedAmount} from '../../server/public/chip-format.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
 export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','help-over-replay','help-touch-targets','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-detail','last-result-recap','final-last-hand','seat-status-collapsed','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','embedded-state-matrix','state-matrix','onboarding-timed-turn','final-geometry','plate-status-row','computed-contrast','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
@@ -838,6 +839,9 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     const shown=await evaluate("({names:[...document.querySelectorAll('#hand-result .hand-result-name')].map(n=>n.textContent).sort(),labels:[...document.querySelectorAll('#hand-result .hand-result-cards .mini-card')].map(n=>n.getAttribute('aria-label'))})");
     const publicLabels=new Set([...settled.board,...settled.showdown.reveals.flatMap(row=>row.cards)].map(code=>cardLabel(parseCard(code))));
     assert.deepEqual(shown.names,expectedNames);
+    // The user played this hand from its start: the net is exact, never omitted.
+    const unit=await evaluate("document.querySelector('#display-unit').value");
+    assert.equal(detail.net,`내 순손익 ${formatSignedAmount(settled.endStacks.user-settled.startStacks.user,settled.blinds[1],unit).primary}`);
     assert.ok(shown.labels.length>0&&shown.labels.every(label=>publicLabels.has(label)),JSON.stringify({shown,publicLabels:[...publicLabels]}));
     checks.push('hand-result-detail');
     // The next hand: the strip goes, "직전 결과" reopens that hand in a dialog;
