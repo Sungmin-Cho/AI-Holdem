@@ -705,10 +705,12 @@ function paintHandResult(handNo = ui.handResult?.handNo) {
     playAwardSoon(result.winners.map(row=>row.playerId));
   resultStaging=!!result && !frame.visible;
   paintLastResultControl();
-  if(!result) {box.replaceChildren(cashResetNote);delete box.dataset.handNo;return;}
+  if(!result) {box.replaceChildren(cashResetNote);delete box.dataset.handNo;delete box.dataset.signature;return;}
   if(!frame.visible)return;
-  if(box.dataset.handNo!==String(result.handNo) || box.dataset.unit!==displayUnit) {
-    box.dataset.handNo=String(result.handNo);box.dataset.unit=displayUnit;box.replaceChildren();
+  // Rebuilt only for another hand, viewer, net or unit, so side frames keep the node.
+  const signature=JSON.stringify([result.key,result.viewer,result.myNet,displayUnit]);
+  if(box.dataset.signature!==signature) {
+    box.dataset.signature=signature;box.dataset.handNo=String(result.handNo);box.replaceChildren();
     const {head,body}=renderHandResultCard(box,result,{playerName,unit:displayUnit});
     body.append(cashResetNote);
     const live=el('span','hand-result-live');head.append(live);

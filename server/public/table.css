@@ -1573,7 +1573,7 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   .action-area:has(.hand-result:not([hidden])) {max-height:138px;}
   .action-area > .result-dock {flex-shrink:1;min-height:0;overflow:auto;}
   /* Countdown and skip stay in view while a long result scrolls. */
-  .result-dock .hand-result-head {position:sticky;top:-8px;z-index:1;margin:-8px -14px 0;padding:8px 14px 2px;background:var(--c-surface-1);}
+  .result-dock .hand-result-head {position:sticky;top:0;z-index:1;margin:-8px -14px 0;padding:8px 14px 2px;background:var(--c-surface-1);}
   .table-context .last-result-open {min-height:26px;height:26px;padding:0 10px;font-size:12px;}
   main {min-height:0;height:100%;grid-template-rows:minmax(0,1fr);grid-template-columns:minmax(0,1fr) 280px;}
   .stage {min-height:0;gap:4px;padding:6px 12px;}
@@ -1715,7 +1715,7 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
    fitted desktop it sits in the reserved action area (the table does not move); on
    scrolling layouts it follows the table in the page flow. A bottom-sticky strip
    would cover the lowest seats of the fixed-height phone table. */
-.result-dock {display:flex;justify-content:center;}
+.result-dock {display:flex;justify-content:center;align-items:flex-start;}
 .hand-result {display:flex;flex-direction:column;gap:4px;width:100%;max-width:760px;padding:8px 14px;border:1px solid var(--c-line-strong);border-radius:12px;background:var(--c-surface-1);color:var(--c-text);font-size:13px;line-height:1.45;text-align:left;box-shadow:0 8px 24px rgb(0 0 0 / .45);}
 /* The result card (#277): who collected how much first, then with what, what
    decided it, the board street by street, every pot, and the viewer's net. */

@@ -29,6 +29,18 @@ function handTail(log, handNo) {
   return start >= 0 && rows[start].handNo === handNo ? handSegment(rows, start) ?? [] : [];
 }
 
+// A compact identity for a hand's events (two FNV-1a passes), so a result
+// object never carries the event text itself.
+function fingerprint(text) {
+  let a = 0x811c9dc5, b = 0x01000193 ^ 0x5bd1e995;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    a = Math.imul(a ^ code, 0x01000193) >>> 0;
+    b = Math.imul(b ^ code, 0x5bd1e995) >>> 0;
+  }
+  return `${a.toString(16).padStart(8, '0')}${b.toString(16).padStart(8, '0')}:${text.length}`;
+}
+
 const STREETS = ['flop', 'turn', 'river'];
 const validCards = cards => Array.isArray(cards) && cards.every(code => typeof code === 'string' && code.length === 2);
 function bestFiveSafe(cards) {
@@ -96,9 +108,9 @@ function summarizeAt(rows, start, {pots: potFacts = null, viewer = null} = {}) {
   }
   return {
     handNo,
-    // Same hand number, same events: the identity a cached result is checked against.
-    key:JSON.stringify([handNo, awards.map(row => [row.potIndex, row.amount, row.winners]), finalBoard,
-      (showdown?.reveals ?? []).map(row => [row?.playerId, row?.cards])]),
+    // The hand's start and every public event through its awards: two hands
+    // share this identity only if everything a result shows is the same.
+    key:fingerprint(JSON.stringify([rows[start], tail.slice(0, tail.findLastIndex(event => event.type === 'pot_award') + 1)])),
     viewer,
     kind:showdown ? 'showdown' : 'uncontested',
     pots,
@@ -165,8 +177,11 @@ export function updateHandResult(previous, input) {
   const view = input.view;
   if (!view || view.handInProgress !== false || view.gameOver) return null;
   const viewer = typeof input.viewer === 'string' && view.viewer !== null ? input.viewer : null;
-  if (previous?.handNo === view.handNo && previous.viewer === viewer) return previous;
-  return buildHandResult(input);
+  const fresh = buildHandResult(input);
+  // Side frames of the same finished hand keep the same object (and its DOM);
+  // another hand under a reused number, or another viewer, does not.
+  if (previous?.handNo === view.handNo && previous.viewer === viewer && (!fresh || fresh.key === previous.key)) return previous;
+  return fresh;
 }
 
 /** A late/reconnecting viewer sees the stage at now, rather than replaying it. */

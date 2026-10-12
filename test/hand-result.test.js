@@ -259,3 +259,22 @@ test('a side pot\u2019s reason compares only that pot\u2019s contenders',async()
   assert.deepEqual(result.runout,['flop','turn','river']);
   assert.deepEqual(summarizeHand(log,61).pots.map(pot=>pot.note),[null,null],'from the log alone the side pot\u2019s contenders are unknown');
 });
+
+test('the live result follows a reused hand number to its new hand, and blinds alone tell two hands apart',async()=>{
+  const {updateHandResult,trackLatestResult}=await import('../server/public/hand-result.js');
+  const input=fixture();
+  const first=updateHandResult(null,input);
+  assert.equal(updateHandResult(first,{...input}),first,'a side frame of the same hand keeps the object');
+  // Reconnect straight into another finished hand that reuses number 3.
+  const again=[...input.log,{type:'hand_start',handNo:3,blinds:[100,200]},
+    {type:'pot_award',potIndex:0,amount:500,winners:[{playerId:'p2',share:500}]}];
+  const second=updateHandResult(first,{...input,log:again});
+  assert.notEqual(second,first);assert.equal(second.pots[0].amount,500);assert.deepEqual(second.blinds,[100,200]);
+  // Identical events except the blinds: still different hands.
+  const foldHand=blinds=>[{type:'hand_start',handNo:9,blinds},{type:'action',playerId:'p2',action:'fold'},
+    {type:'pot_award',potIndex:0,amount:150,winners:[{playerId:'user',share:150}]}];
+  const view={handNo:9,handInProgress:true,viewer:'user'};
+  const low=trackLatestResult(null,{log:foldHand([50,100]),view,viewer:'user',prior:null});
+  const high=trackLatestResult(low,{log:foldHand([100,200]),view,viewer:'user',prior:null});
+  assert.notEqual(high,low);assert.deepEqual(high.blinds,[100,200]);
+});

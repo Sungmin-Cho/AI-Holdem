@@ -778,6 +778,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.deepEqual(timedFocus,{inBar:true,visible:true,enabled:true},'focus moved to a visible action');
     checks.push('onboarding-timed-turn');
     await measureState('turn');
+    const turnTable=await evaluate("JSON.stringify(document.querySelector('.table').getBoundingClientRect())");
     // The user's turn with folded, all-in and eliminated seats: the collapsed phone
     // action bar keeps those three statuses readable, in the stack's row.
     const turnView=view;
@@ -810,6 +811,15 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await browser(['wait','--fn',"document.querySelector('#hand-result')?.hidden===false&&document.querySelectorAll('.seat:not(.is-hero) .seat-cards .card[role=img]').length>=4"]);
     await measureState('showdown-result');
     assert.deepEqual(stateRuns,stateMatrix(),'the state matrix ran exactly the expected states');
+    // The result shares the reserved action area: the table neither moves nor
+    // shrinks, and a long result scrolls under a head that stays in view.
+    assert.equal(await evaluate("JSON.stringify(document.querySelector('.table').getBoundingClientRect())"),turnTable,'turn and result keep the same table box at 1280x800');
+    const sticky=await evaluate(`(()=>{const dock=document.querySelector('#result-dock'),list=document.querySelector('#hand-result .hand-result-winners'),extra=[];
+      for(let i=0;i<8;i+=1){const copy=list.firstElementChild.cloneNode(true);list.append(copy);extra.push(copy);}
+      dock.scrollTop=dock.scrollHeight;const d=dock.getBoundingClientRect(),h=document.querySelector('#hand-result .hand-result-head').getBoundingClientRect();
+      const out={scrolls:dock.scrollHeight>dock.clientHeight+1,scrolled:dock.scrollTop>0,headInside:h.top>=d.top-1&&h.bottom<=d.bottom+1,table:JSON.stringify(document.querySelector('.table').getBoundingClientRect())};
+      for(const node of extra)node.remove();dock.scrollTop=0;return out;})()`);
+    assert.deepEqual(sticky,{scrolls:true,scrolled:true,headInside:true,table:turnTable},JSON.stringify(sticky));
     checks.push('state-matrix');
     // The result card: the reason, every winner's collected amount and best five,
     // and the board by street.

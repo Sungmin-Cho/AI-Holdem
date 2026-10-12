@@ -227,3 +227,14 @@ test('describeTiebreak names every deciding position', async () => {
   assert.equal(vs(['Ah', '2c'], ['Kh', '3c'], ['9s', '9h', '9d', '9c', '4s']), '키커 A > K', 'quads kicker');
   assert.equal(vs(['Kh', 'Qd'], ['Ks', 'Jc'], ['Ah', 'Ad', 'Ac', 'As', '2s']), '같은 족보로 분할', 'the same kicker splits');
 });
+
+test('describeTiebreak reaches the later kickers and the made-hand ranks too', async () => {
+  const { bestFiveOf, describeTiebreak } = await import('../shared/poker-eval.js');
+  const vs = (a, b, board) => describeTiebreak(bestFiveOf([...a, ...board]), bestFiveOf([...b, ...board]))?.text;
+  assert.equal(vs(['Qh', '3h'], ['Jh', '5h'], ['Ah', 'Kh', '4h', 'Tc', '2s']), '플러시 세 번째 카드 Q > J');
+  assert.equal(vs(['Ad', 'Qc'], ['Ac', 'Jc'], ['Ah', 'Kd', '9c', '4s', '2h']), '키커 Q > J', 'a pair\u2019s second kicker');
+  assert.equal(vs(['Ad', '9c'], ['Ac', '8c'], ['Ah', 'Kd', 'Qc', '4s', '2h']), '키커 9 > 8', 'a pair\u2019s third kicker');
+  assert.equal(vs(['7h', 'Qc'], ['7c', 'Jc'], ['7s', '7d', 'Kc', '4c', '2s']), '키커 Q > J', 'trips\u2019 second kicker');
+  assert.equal(vs(['Kd', 'Kc'], ['9d', '9c'], ['9s', '9h', 'Ks', 'Kh', '2c']), '포카드 K > 9');
+  assert.equal(vs(['Th', '3c'], ['5h', '3d'], ['9h', '8h', '7h', '6h', '2c']), '스트레이트 플러시 10 하이 > 9 하이');
+});
