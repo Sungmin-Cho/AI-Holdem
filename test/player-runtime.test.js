@@ -2964,3 +2964,68 @@ test('grok: 카탈로그 모델로 턴이 시작되지 않은 player 실패는 �
     f.cleanup();
   }
 });
+
+test('start: 허용 형식이 아닌 모델 id는 자식을 띄우기 전에 UNSAFE_MODEL_ID로 거부한다', async () => {
+  const original = RUNTIME_TABLE.codex.player;
+  RUNTIME_TABLE.codex.player = 'gpt-6-luna --sandbox danger-full-access';
+  let rt;
+  try {
+    const spawned = [];
+    rt = createPlayerRuntime('codex', { exec: (spec) => { spawned.push(spec.args); throw new Error('spawn은 일어나면 안 된다'); } });
+    await assert.rejects(rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 1000 }), (error) => (
+      error.code === 'UNSAFE_MODEL_ID' && !error.message.includes('danger')
+    ));
+    assert.throws(() => rt.oneshotStart({ tier: 'player', prompt: 'x' }), { code: 'UNSAFE_MODEL_ID' });
+    assert.deepEqual(spawned, []);
+  } finally {
+    RUNTIME_TABLE.codex.player = original;
+  }
+});
+
+test('claude upper 서빙 id는 카나리 컨테인먼트까지 통과했을 때만 기록한다', async () => {
+  const { file } = canary();
+  const stream = jsonl(
+    { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: [], model: 'claude-opus-5-5' },
+    { type: 'result', subtype: 'success', result: 'ok' },
+  );
+  const leaky = fakeRuntime('claude', {
+    matchers: [{ includes: '다음 파일을 읽어', reply: stream, echoCanary: true }],
+    default: { reply: stream },
+  });
+  try {
+    const res = await leaky.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(res.upper, false);
+    assert.equal(leaky.rt.models.upper, 'opus', '탈락한 tier에는 서빙 id를 남기지 않는다');
+  } finally {
+    leaky.cleanup();
+  }
+  const clean = fakeRuntime('claude', { default: { reply: stream } });
+  try {
+    const res = await clean.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(res.upper, true);
+    assert.equal(clean.rt.models.upper, 'claude-opus-5-5');
+  } finally {
+    clean.cleanup();
+  }
+});
+
+test('grok: resume 왕복이 깨끗한 기록으로 정상 응답만 못 주면 폴백 고정값으로 다시 돈다', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const f = verifiedGrokRuntime({
+    matchers: [
+      { argvIncludes: 'models', reply: GROK_MODELS_TEXT.replace('- grok-4.6', '- grok-4.9') },
+      { argvIncludes: '--resume', reply: '', exitCode: 1, grokSession: {} },
+    ],
+  });
+  try {
+    const res = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, false);
+    assert.equal('modelFailure' in res, false);
+    const models = f.calls().filter((c) => c.argv.includes('-m')).map((c) => c.argv[c.argv.indexOf('-m') + 1]);
+    assert.deepEqual(models, ['grok-4.9', 'grok-4.9', 'grok-4.7', 'grok-4.7']);
+    assert.equal(f.rt.models.replaced.player, 'grok-4.9');
+  } finally {
+    f.cleanup();
+  }
+});

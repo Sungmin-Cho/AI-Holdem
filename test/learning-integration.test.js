@@ -220,14 +220,17 @@ test('S8 early: explicit LLM store launch still requires an eligible player runt
   const calls = fs.readFileSync(fake.log, 'utf8').trim().split('\n').map(JSON.parse);
   const grokAuth = path.join(os.homedir(), '.grok', 'auth.json');
   const expectGrokSpawn = process.platform !== 'win32' && fs.existsSync(grokAuth);
+  // codex reads its model catalog (`debug models`) once before its first probe. This fixture
+  // fails that too, so codex probes with its pinned fallback model.
   assert.deepEqual(
     calls.map((call) => call.kind),
-    expectGrokSpawn ? ['claude', 'codex', 'grok'] : ['claude', 'codex'],
+    expectGrokSpawn ? ['claude', 'codex', 'codex', 'grok'] : ['claude', 'codex', 'codex'],
   );
-  for (const call of calls) {
-    // Grok checks containment with `inspect` before attempting any model.
+  for (const [index, call] of calls.entries()) {
+    // Grok checks containment with `inspect` before attempting any model (or its catalog).
     // This fixture fails every invocation, so it never reaches its player.
     if (call.kind === 'grok') assert.deepEqual(call.argv, ['--no-auto-update', 'inspect', '--json']);
+    else if (index === 1) assert.deepEqual(call.argv, ['debug', 'models']);
     else assert.ok(call.argv.includes(RUNTIME_TABLE[call.kind].player));
   }
   const selected = JSON.parse(fs.readFileSync(path.join(store, '.session-store/current.json')));

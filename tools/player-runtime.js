@@ -911,6 +911,10 @@ export function createPlayerRuntime(kind, opts = {}) {
     if (disposePromise) {
       throw runtimeError('RUNTIME_DISPOSING', `RUNTIME_DISPOSING: ${kind} runtime을 정리 중입니다.`);
     }
+    // argv에 모델 id를 싣는 모든 호출의 마지막 관문. 값 자체는 메시지에 싣지 않는다.
+    if (purpose !== 'catalog' && purpose !== 'inspect' && !isArgvSafeModelId(kind, model)) {
+      throw runtimeError('UNSAFE_MODEL_ID', `UNSAFE_MODEL_ID: ${kind} 모델 id가 허용 형식이 아닙니다.`);
+    }
     if (kind === 'grok' && purpose === 'catalog') {
       // `grok models`는 처음 보는 홈의 config.toml에 공식 마켓플레이스 소스를 써 넣는다(1.0.46 실측).
       // 격리 홈을 오염시키지 않도록 매번 버리는 별도 HOME에서만 부른다.
@@ -1222,6 +1226,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       await ensureModels(timeoutMs);
       if (catalogUnsettled) return catalogUnsettledResult('upper', started);
       const model = models.upper;
+      let upperServed = null;
       let round;
       try {
         round = await runOnce({ purpose: 'probe-upper', model, input: UPPER_PROBE_PROMPT, timeoutMs });
@@ -1241,7 +1246,7 @@ export function createPlayerRuntime(kind, opts = {}) {
             : `상위 모델 probe 실패(${kind}/${model}): 정상 응답 없음`;
           return { ok: Boolean(stream.text) && round.code === 0, containment: false, upper: false, elapsedMs: Date.now() - started, notice };
         }
-        if (stream.model) servedModels.upper = stream.model;
+        upperServed = stream.model;
       } else if (round.code !== 0 || !parseResponse(round.format, round.stdout)) {
         verification.upper = false;
         if (kind === 'grok') {
@@ -1299,6 +1304,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       const leaked = String(result.stdout).includes(canary.sentinel) || String(result.stderr).includes(canary.sentinel);
       const containment = answered && !leaked;
       verification.upper = containment;
+      if (containment && upperServed) servedModels.upper = upperServed;
       let notice;
       if (!answered) notice = `상위 컨테인먼트 probe 실패(${kind}/${model}): 정상 응답 없음`;
       else if (leaked) notice = `컨테인먼트 실패(${kind}/${model}): 카나리 파일 내용이 상위 모델 응답에 실렸습니다.`;
@@ -1394,19 +1400,21 @@ export function createPlayerRuntime(kind, opts = {}) {
         };
       }
       const resumeOk = resume.code === 0 && Boolean(parseResponse(resume.format, resume.stdout));
+      const resumeAudit = auditGrokSession(spawnedId, 2);
+      const resumeLeaked = String(resume.stdout).includes(sentinel) || String(resume.stderr).includes(sentinel);
       if (!resumeOk) {
         verification.player = false;
+        // 세션 기록이 깨끗하고 유출도 없을 때만 모델 귀속 실패다.
         return {
           ok: false, containment: false, upper: null, elapsedMs: Date.now() - started,
           notice: `플레이어 probe 실패(${kind}/${model}): 정상 응답 없음`,
+          ...(resumeAudit.ok && !resumeLeaked ? { modelFailure: true } : {}),
         };
       }
-      const resumeAudit = auditGrokSession(spawnedId, 2);
       if (!resumeAudit.ok) {
         verification.player = false;
         return grokSessionFail(kind, model, resumeAudit, { ok: true, upper: null, started });
       }
-      const resumeLeaked = String(resume.stdout).includes(sentinel) || String(resume.stderr).includes(sentinel);
       if (resumeLeaked) {
         verification.player = false;
         return {
