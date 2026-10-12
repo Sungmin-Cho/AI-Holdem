@@ -48,6 +48,8 @@
   --c-plate-line: rgba(170,190,255,0.16);
   --c-plate-text: #E9EEF9;
   --c-plate-text-2: #A0ABC6;
+  --c-plate-dim: rgba(12,18,33,0.5);
+  --c-action-text: #F5A524;
   --c-pot-bg: rgba(4,10,24,0.55);
   --c-pot-text: #E9EEF9;
   --c-card-face: #F7F9FC;
@@ -148,6 +150,8 @@
   --c-plate-line: rgba(239,233,218,0.10);
   --c-plate-text: #EFE9DA;
   --c-plate-text-2: #A9B0A2;
+  --c-plate-dim: rgba(8,12,10,0.48);
+  --c-action-text: #D4B26C;
   --c-pot-bg: rgba(0,0,0,0.36);
   --c-pot-text: #F3E3B5;
   --c-card-face: #FBF8F0;
@@ -207,6 +211,8 @@
   --c-plate-line: rgba(28,27,25,0.14);
   --c-plate-text: #1C1B19;
   --c-plate-text-2: #4F4A42;
+  --c-plate-dim: rgba(251,249,244,0.82);
+  --c-action-text: #9E3521;
   --c-pot-bg: rgba(251,249,244,0.94);
   --c-pot-text: #1C1B19;
   --c-card-face: #FFFFFF;

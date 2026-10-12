@@ -10,9 +10,11 @@ import {newDeck} from '../../engine/cards.js';
 import {userView} from '../../engine/views.js';
 import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures,defaultPlayers} from '../helpers/security-fixtures.js';
+import {parseCard,cardLabel} from '../../server/public/card-render.js';
+import {formatSignedAmount} from '../../server/public/chip-format.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','help-over-replay','help-touch-targets','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','embedded-state-matrix','state-matrix','onboarding-timed-turn','final-geometry','plate-status-row','computed-contrast','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','help-over-replay','help-touch-targets','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-detail','last-result-recap','final-last-hand','seat-status-collapsed','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','embedded-state-matrix','state-matrix','onboarding-timed-turn','final-geometry','plate-status-row','computed-contrast','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 // The geometry matrix (design A5): every width × table size × height the gate
 // runs. The journey records what it measured and fails if that differs.
@@ -54,7 +56,7 @@ const STATE_SCRIPT=`(()=>{
   return {scroll:document.documentElement.scrollWidth,plateOverlaps,tableHits,markerHits,small,result};
 })()`;
 export const STATE_SIZES=[[390,667],[1280,800]];
-export const stateMatrix=()=>['turn','ai-thinking','fold-allin-out','showdown-result'].flatMap(state=>STATE_SIZES.map(([w,h])=>`${state}-${w}x${h}`));
+export const stateMatrix=()=>['turn','turn-fold-allin-out','ai-thinking','fold-allin-out','showdown-result'].flatMap(state=>STATE_SIZES.map(([w,h])=>`${state}-${w}x${h}`));
 export const geometryCounts=({ci=false}={})=>ci?[2,6,9]:[2,6,8,9];
 export function geometryCombos({ci=false}={}) {
   const combos=[];
@@ -580,6 +582,11 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await evaluate("document.querySelector('#review-overlay').hidden"),false);
     assert.equal(await evaluate("document.querySelector('#final-last-hand').hidden"),false);
     checks.push('final-overlay-immediate');
+    // The last hand on the final screen: who collected what, with which five, on which board.
+    const finalHand=await evaluate("(()=>{const box=document.querySelector('#final-last-hand');return {winners:[...box.querySelectorAll('.hand-result-winner')].map(n=>({text:n.textContent,cards:n.querySelectorAll('.hand-result-cards .mini-card').length})),streets:[...box.querySelectorAll('.hand-result-street-label')].map(n=>n.textContent),reason:box.querySelector('.hand-result-reason')?.textContent}})()");
+    assert.ok(finalHand.reason==='쇼다운'&&finalHand.winners.length>0&&finalHand.winners.every(row=>/팟 .+ 획득/.test(row.text)&&row.cards===5)
+      &&finalHand.streets.join()==='플랍,턴,리버',JSON.stringify(finalHand));
+    checks.push('final-last-hand');
     // The final result on a phone and a laptop: no sideways scroll, the card inside the viewport width.
     const finalRuns=[];
     for(const [width,height] of STATE_SIZES){
@@ -638,7 +645,9 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     // This synthetic scenario shares a relay; never reuse a retired decision ID.
     let cash=createGame({mode:'cash-training',aiCount:2,startStack:5000,levelEvery:null,handLimit:102});cash.handNo=100;
     const cashDeal=startHand(cash,{deck:fixedDeck()});cash=cashDeal.state;view=userView(cash);await publish(cashDeal.events);
-    while(!legalFor(cash).handOver){const legal=legalFor(cash);const step=applyAction(cash,legal.toAct,'fold');cash=step.state;view=userView(cash);await publish(step.events);}
+    // The first actor raises and the rest fold: the raiser keeps a last-action
+    // badge after the hand, and the folds stay marked until the next hand.
+    for(let first=true;!legalFor(cash).handOver;first=false){const legal=legalFor(cash);const step=applyAction(cash,legal.toAct,first?'raise':'fold',first?legal.minRaiseTo:undefined);cash=step.state;view=userView(cash);await publish(step.events);}
     assert.equal(await evaluate("document.querySelector('#cash-reset-note').hidden"),false);
     assert.match(await evaluate("document.querySelector('#participants-summary').textContent"),/^참가자 3명$/);
     assert.equal(await evaluate("document.querySelectorAll('.seat.is-out,.seat .dealer-btn,.seat .is-allin,.seat .card--back').length"),0);checks.push('cash-reset');
@@ -665,6 +674,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
     checks.push('hand-result-banner');
     assert.ok(await evaluate("document.querySelectorAll('.plate-action').length>0"));
+    assert.equal(await evaluate("document.querySelectorAll('.seat.is-folded .plate-tag.is-fold').length"),2,'both folds stay marked through the result');
     checks.push('last-action-badge');
     // A short desktop (the lobby or join page iframe at 1280×600): the status line
     // takes its own row, so a name and stack never wrap letter by letter beside it.
@@ -675,7 +685,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     checks.push('plate-status-row');
     // Contrast after the hand: folded plates (opacity), last actions, the result strip.
     await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
-    const resultContrast=await contrastPass('result',['.seat.is-folded .plate-name','.seat.is-folded .plate-stack .amount-primary','.plate-action','.plate-tag','#hand-result','.hand-result-winner','.pot-label','.pot-amount','.log-name','.log-act'],8);
+    const resultContrast=await contrastPass('result',['.seat.is-folded .plate-name','.seat.is-folded .plate-stack .amount-primary','.plate-action','.plate-tag','#hand-result','.hand-result-winner','.hand-result-title','.hand-result-reason','.hand-result-won','.hand-result-board','.hand-result-net','.pot-label','.pot-amount','.log-name','.log-act','.last-result-open'],8);
     assert.deepEqual(resultContrast,[],JSON.stringify(resultContrast));
     checks.push('computed-contrast');
     await browser(['set','viewport','390','667']);await browser(['snapshot','-i']);
@@ -704,7 +714,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     checks.push('award-motion');
     let runout=createGame({mode:'cash-training',aiCount:2,startStack:100,levelEvery:null,handLimit:202});runout.handNo=200;
     const runoutDeal=startHand(runout,{deck:fixedDeck()});runout=runoutDeal.state;view=userView(runout);await publish(runoutDeal.events);
-    await evaluate("window.__stages=[];window.__stageTimer=setInterval(()=>{const r=document.querySelector('#hand-result');window.__stages.push({cards:document.querySelectorAll('#board .card[role=img]').length,visible:!r.hidden});},50)");
+    await evaluate("window.__stages=[];window.__stageTimer=setInterval(()=>{const r=document.querySelector('#hand-result');window.__stages.push({cards:document.querySelectorAll('#board .card[role=img]').length,visible:!r.hidden,recap:document.querySelector('#last-result-open').disabled});},50)");
     let finalEvents;
     while(!legalFor(runout).handOver){
       const legal=legalFor(runout);const action=legal.canRaise?'raise':legal.canCheck?'check':'call';
@@ -723,11 +733,13 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     const afterReload=await evaluate("({cards:document.querySelectorAll('#board .card[role=img]').length,hidden:document.querySelector('#hand-result').hidden})");
     assert.ok(afterReload.cards>=3 && afterReload.cards<5 && afterReload.hidden,'reconnect preserves current runout position');
     checks.push('hand-result-reconnect');
-    await evaluate("window.__stages=[];window.__stageTimer=setInterval(()=>window.__stages.push({cards:document.querySelectorAll('#board .card[role=img]').length,visible:!document.querySelector('#hand-result').hidden}),50)");
+    await evaluate("window.__stages=[];window.__stageTimer=setInterval(()=>window.__stages.push({cards:document.querySelectorAll('#board .card[role=img]').length,visible:!document.querySelector('#hand-result').hidden,recap:document.querySelector('#last-result-open').disabled}),50)");
     await new Promise(resolve=>setTimeout(resolve,Math.max(0,start+count*5000+750-Date.now())));
     const stages=[...beforeReload.stages,...await evaluate("clearInterval(window.__stageTimer);window.__stages")];
     assert.ok(stages.some(row=>row.cards===3&&!row.visible),JSON.stringify(stages));
     assert.ok(stages.some(row=>row.cards===4&&!row.visible),JSON.stringify(stages));
+    // "직전 결과" waits while the runout stages, so it cannot show the result early.
+    assert.ok(stages.filter(row=>!row.visible).every(row=>row.recap===true)&&stages.some(row=>row.visible&&row.recap===false),JSON.stringify(stages));
     assert.ok(stages.some(row=>row.cards===5&&row.visible),JSON.stringify(stages));
     assert.match(await evaluate("document.querySelector('.hand-result-countdown').textContent"),/다음 핸드 [0-9]+초/);
     checks.push('runout-staged');
@@ -767,11 +779,31 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.deepEqual(timedFocus,{inBar:true,visible:true,enabled:true},'focus moved to a visible action');
     checks.push('onboarding-timed-turn');
     await measureState('turn');
+    // The user's turn with folded, all-in and eliminated seats: the collapsed phone
+    // action bar keeps those three statuses readable, in the stack's row.
+    const turnView=view;
+    view={...turnView,seats:turnView.seats.map((seat,index)=>index===2?{...seat,folded:true}:index===3?{...seat,allIn:true,bet:seat.bet+seat.stack,stack:0}:index===4?{...seat,out:true,stack:0}:seat)};
+    await publish();
+    await browser(['wait','--fn',"!!document.querySelector('.seat.is-out')&&!!document.querySelector('.seat.is-allin')&&!!document.querySelector('.seat.is-folded')"]);
+    await measureState('turn-fold-allin-out');
+    for(const [width,height] of [[390,667],[360,640]]){
+    await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
+    const collapsed=await evaluate("(()=>{const vis=n=>n.getClientRects().length>0&&getComputedStyle(n).display!=='none';const bar=document.querySelector('#action-bar');return {collapsed:vis(bar)&&!bar.classList.contains('options-expanded'),tags:[...document.querySelectorAll('.plate-tag')].filter(vis).map(n=>n.className.replace('plate-tag ','')+':'+n.textContent).sort(),outCompact:document.querySelectorAll('.seat.is-out .plate-stack,.seat.is-out .avatar').length,foldStackHidden:[...document.querySelectorAll('.seat.is-folded .plate-stack,.seat.is-allin .plate-stack')].every(n=>!vis(n))}})()");
+    assert.deepEqual(collapsed,{collapsed:true,tags:['is-allin:올인','is-fold:폴드','is-out:탈락'],outCompact:0,foldStackHidden:true},JSON.stringify({width,collapsed}));
+    const crossings=await evaluate(STATE_SCRIPT);
+    assert.ok(crossings.plateOverlaps.length===0&&crossings.tableHits.length===0&&crossings.small.length===0,JSON.stringify({width,crossings}));
+    await browser(['screenshot',path.join(outDir,`seat-status-collapsed-${width}x${height}.png`)]);
+    }
+    checks.push('seat-status-collapsed');
+    view=turnView;await publish();
     let step=applyAction(crowded,'user','call');crowded=step.state;view=userView(crowded);await publish(step.events);
     const aiActor=legalFor(crowded).toAct;
     assert.ok(aiActor&&aiActor!=='user'&&view.seats.find(seat=>seat.playerId===aiActor)?.kind==='ai','an AI seat acts next');
     await browser(['wait','--fn',`(()=>{const tag=document.querySelector('.seat[data-player-id="${aiActor}"] .plate-thinking');return !!tag&&tag.getClientRects().length>0&&document.querySelector('#action-bar').hidden})()`]);
     await measureState('ai-thinking');
+    // The table box just before a result (an AI acting), on the fitted desktops.
+    const FIT_SIZES=[[1280,800],[1440,900],[1094,559]],tableBox="JSON.stringify(document.querySelector('.table').getBoundingClientRect())",beforeResult=[];
+    for(const [width,height] of FIT_SIZES){await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);beforeResult.push(await evaluate(tableBox));}
     const thinkingView=view;
     view={...thinkingView,seats:thinkingView.seats.map((seat,index)=>index===2?{...seat,folded:true}:index===3?{...seat,allIn:true,bet:seat.bet+seat.stack,stack:0}:index===4?{...seat,out:true,stack:0}:seat)};
     await publish();
@@ -782,7 +814,71 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await browser(['wait','--fn',"document.querySelector('#hand-result')?.hidden===false&&document.querySelectorAll('.seat:not(.is-hero) .seat-cards .card[role=img]').length>=4"]);
     await measureState('showdown-result');
     assert.deepEqual(stateRuns,stateMatrix(),'the state matrix ran exactly the expected states');
+    // The result shares the reserved action area: the table neither moves nor
+    // shrinks, and a long result scrolls under a head that stays in view.
+    const withResult=[];
+    for(const [width,height] of FIT_SIZES){await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);withResult.push(await evaluate(tableBox));}
+    assert.deepEqual(withResult,beforeResult,'showing the result never moves or shrinks the table');
+    await browser(['set','viewport','1280','800']);await browser(['snapshot','-i']);
+    const sticky=await evaluate(`(()=>{const dock=document.querySelector('#result-dock'),list=document.querySelector('#hand-result .hand-result-winners'),extra=[];
+      for(let i=0;i<8;i+=1){const copy=list.firstElementChild.cloneNode(true);list.append(copy);extra.push(copy);}
+      dock.scrollTop=dock.scrollHeight;const d=dock.getBoundingClientRect(),h=document.querySelector('#hand-result .hand-result-head').getBoundingClientRect();
+      const out={scrolls:dock.scrollHeight>dock.clientHeight+1,scrolled:dock.scrollTop>0,headInside:h.top>=d.top-1&&h.bottom<=d.bottom+1,table:JSON.stringify(document.querySelector('.table').getBoundingClientRect())};
+      for(const node of extra)node.remove();dock.scrollTop=0;return out;})()`);
+    assert.deepEqual(sticky,{scrolls:true,scrolled:true,headInside:true,table:beforeResult[0]},JSON.stringify(sticky));
     checks.push('state-matrix');
+    // The result card: the reason, every winner's collected amount and best five,
+    // and the board by street.
+    const detail=await evaluate("(()=>{const box=document.querySelector('#hand-result');return {reason:box.querySelector('.hand-result-reason')?.textContent,winners:[...box.querySelectorAll('.hand-result-winner')].map(n=>({text:n.textContent,cards:n.querySelectorAll('.hand-result-cards .mini-card').length})),streets:[...box.querySelectorAll('.hand-result-street-label')].map(n=>n.textContent),net:box.querySelector('.hand-result-net')?.textContent??null}})()");
+    assert.ok(detail.reason==='쇼다운'&&detail.streets.join()==='플랍,턴,리버'&&detail.winners.length>0
+      &&detail.winners.every(row=>/팟 .+ 획득/.test(row.text)&&row.cards===5)&&(detail.net===null||/^내 순손익 /.test(detail.net)),JSON.stringify(detail));
+    // The names are the engine's award recipients; every shown card is public
+    // (that hand's tabled hole cards or its board).
+    const settled=crowded.lastHand;
+    const expectedNames=[...new Set(settled.pots.flatMap(pot=>pot.winners.map(row=>row.playerId)))].map(id=>id==='user'?'나':view.seats.find(seat=>seat.playerId===id)?.name??id).sort();
+    const shown=await evaluate("({names:[...document.querySelectorAll('#hand-result .hand-result-name')].map(n=>n.textContent).sort(),labels:[...document.querySelectorAll('#hand-result .hand-result-cards .mini-card')].map(n=>n.getAttribute('aria-label'))})");
+    const publicLabels=new Set([...settled.board,...settled.showdown.reveals.flatMap(row=>row.cards)].map(code=>cardLabel(parseCard(code))));
+    assert.deepEqual(shown.names,expectedNames);
+    // The user played this hand from its start: the net is exact, never omitted.
+    const unit=await evaluate("document.querySelector('#display-unit').value");
+    assert.equal(detail.net,`내 순손익 ${formatSignedAmount(settled.endStacks.user-settled.startStacks.user,settled.blinds[1],unit).primary}`);
+    assert.ok(shown.labels.length>0&&shown.labels.every(label=>publicLabels.has(label)),JSON.stringify({shown,publicLabels:[...publicLabels]}));
+    checks.push('hand-result-detail');
+    // The next hand: the strip goes, "직전 결과" reopens that hand in a dialog;
+    // Esc returns focus to the button, and the user's next decision closes it.
+    const recapHand=view.handNo;
+    const recapDeal=startHand(crowded,{deck:fixedDeck()});crowded=recapDeal.state;view=userView(crowded);await publish(recapDeal.events);
+    await browser(['wait','--fn',"document.querySelector('#hand-result').hidden===true&&document.querySelector('#last-result-open').disabled===false"]);
+    await click('#last-result-open');
+    const recap=await evaluate("({open:!document.querySelector('#last-result-overlay').hidden,text:document.querySelector('#last-result-body').textContent,inside:document.querySelector('#last-result-overlay').contains(document.activeElement)})");
+    assert.ok(recap.open&&recap.inside&&recap.text.includes(`핸드 ${recapHand} 결과`)&&/팟 .+ 획득/.test(recap.text),JSON.stringify(recap));
+    for(const [width,height] of [[1280,800],[390,667],[1094,500]]){
+      await browser(['set','viewport',String(width),String(height)]);
+      const fit=await evaluate("(()=>{const card=document.querySelector('#last-result-overlay .review-card').getBoundingClientRect(),vis=n=>n.getClientRects().length>0;const small=[...document.querySelectorAll('#last-result-overlay *')].filter(n=>vis(n)&&[...n.childNodes].some(c=>c.nodeType===3&&c.textContent.trim())&&parseFloat(getComputedStyle(n).fontSize)<12).map(n=>n.className||n.tagName);return {inside:card.top>=0&&card.bottom<=innerHeight+1&&card.left>=0&&card.right<=innerWidth+1,small}})()");
+      await browser(['screenshot',path.join(outDir,`last-result-${width}x${height}.png`)]);
+      assert.deepEqual(fit,{inside:true,small:[]},JSON.stringify({width,height,fit}));
+    }
+    await browser(['set','viewport','1280','800']);
+    await browser(['press','Escape']);
+    assert.deepEqual(await evaluate("({hidden:document.querySelector('#last-result-overlay').hidden,focus:document.activeElement?.id})"),{hidden:true,focus:'last-result-open'});
+    if(legalFor(crowded).toAct==='user'){step=applyAction(crowded,'user','call');crowded=step.state;view=userView(crowded);await publish(step.events);}
+    await click('#last-result-open');
+    assert.equal(await evaluate("document.querySelector('#last-result-overlay').hidden"),false);
+    while(!legalFor(crowded).handOver&&legalFor(crowded).toAct!=='user'){const legal=legalFor(crowded);step=applyAction(crowded,legal.toAct,legal.canCheck?'check':'call');crowded=step.state;view=userView(crowded);await publish(step.events);}
+    assert.equal(legalFor(crowded).toAct,'user','the user acts again in this hand');
+    await browser(['wait','--fn',"document.querySelector('#last-result-overlay').hidden===true&&!!document.activeElement?.closest('#action-bar')"]);
+    // The game ends while the recap is open: it closes so the final screen shows;
+    // after the final screen it reopens and stays.
+    await click('#last-result-open');
+    assert.equal(await evaluate("document.querySelector('#last-result-overlay').hidden"),false);
+    const {legal:_legal,...lastView}=view;view={...lastView,toAct:null,gameOver:true,result:"completed"};await publish();
+    await browser(['wait','--fn',"document.querySelector('#last-result-overlay').hidden===true&&document.querySelector('#review-overlay').hidden===false"]);
+    await click('#review-close');
+    await click('#last-result-open');
+    await new Promise(resolve=>setTimeout(resolve,600));
+    assert.equal(await evaluate("document.querySelector('#last-result-overlay').hidden"),false,'after the game the recap stays open');
+    await browser(['press','Escape']);
+    checks.push('last-result-recap');
 
   } catch(error) {failure=error;try{await browser(['screenshot',path.join(outDir,'failure.png')]);}catch{}}
   finally {

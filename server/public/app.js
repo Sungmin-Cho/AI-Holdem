@@ -1,6 +1,5 @@
 import {finalScreen} from './final-summary.js';
 import {paintFinalPanel} from './final-panel.js';
-import {buildHandResult} from './hand-result.js';
 import {appGameId, appEpoch, appFetch, eventStream, recoverFinalSnapshot, participantMode, authToken} from './app-transport.js';
 import { createHintState, formatHint, hintPotPercent } from './hint-format.js';
 import { applyTrainingAnnotation, excludedFromAssessment, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
@@ -20,7 +19,8 @@ import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ov
 import {aggregatePot, showPotBreakdown, logBlindContexts} from './table-presentation.js';
 import {createAmountEditor, parseChipInput} from './amount-editor.js';
 import {createDialogController} from './dialog-controller.js';
-import {captureHandPrior, updateHandResult, handResultFrame} from './hand-result.js';
+import {captureHandPrior, updateHandResult, handResultFrame, trackLatestResult} from './hand-result.js';
+import {renderHandResultCard} from './hand-result-view.js';
 import {createShellEmbed} from './shell-embed.js';
 import {renderCard, renderMiniCard} from './card-render.js';
 import {diffViews, createMotionPlayer} from './motion.js';
@@ -45,7 +45,7 @@ const shellEmbed = createShellEmbed({
 });
 let shellConn = 'retry';
 let shellRetries = 0;
-const ui = { sessionEnded: false, handResult: null, resultHold: null, handPrior: null, turnDeadline: null, hint: null, view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined, handReplays: Object.create(null) };
+const ui = { sessionEnded: false, handResult: null, lastHandResult: null, resultHold: null, handPrior: null, turnDeadline: null, hint: null, view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined, handReplays: Object.create(null) };
 let serverOffsetMs = 0;
 let announcedDeadline = null;
 let renderedDeadlineKey = null;
@@ -577,6 +577,7 @@ function paintSeats(view) {
     node.className = 'seat';
     if (isHero) node.classList.add('is-hero');
     if (state.folded) node.classList.add('is-folded');
+    if (state.allIn) node.classList.add('is-allin');
     if (state.out) node.classList.add('is-out');
     if (active) node.classList.add('is-to-act');
     // Leave room for rotated hero cards beside the lower seats on dense tables.
@@ -597,23 +598,24 @@ function paintSeats(view) {
     plate.setAttribute('aria-label', `${seat.name ?? seat.playerId}, ${positions[seat.playerId] ?? ''}, ${state.status}, 스택 ${amountText(seat.stack)}, 이번 스트리트 베팅 ${amountText(seat.bet)}. 좌석 상세`);
     plate.onclick = () => openSeatDetails(seat.playerId);
     plate.replaceChildren();
-    const avatarWrap = el('span', 'avatar-wrap');
-    avatarWrap.append(el('span', 'avatar', (seat.name ?? '?').slice(0, 1)));
-    if (active) avatarWrap.append(avatarRing());
-
     const info = el('span', 'plate-info');
-    info.append(
-      el('span', 'plate-name', isHero ? '나' : (seat.name ?? seat.playerId)),
-      amountNode(seat.stack, view.blinds?.[1], 'plate-stack'),
-    );
-    plate.append(avatarWrap, info);
+    info.append(el('span', 'plate-name', isHero ? '나' : (seat.name ?? seat.playerId)));
+    // An eliminated seat keeps its place but shrinks to its name and status.
+    if (state.out) plate.append(info);
+    else {
+      const avatarWrap = el('span', 'avatar-wrap');
+      avatarWrap.append(el('span', 'avatar', (seat.name ?? '?').slice(0, 1)));
+      if (active) avatarWrap.append(avatarRing());
+      info.append(amountNode(seat.stack, view.blinds?.[1], 'plate-stack'));
+      plate.append(avatarWrap, info);
+    }
 
     // One status line per plate: out > all-in > fold > turn > last action > nothing.
     const statusGroup=el('span','plate-status');
     const lastAction = lastActions[seat.playerId];
     if (lastAction) plate.setAttribute('aria-label',`${plate.getAttribute('aria-label')}, 마지막 액션 ${lastAction.label}${lastAction.amount==null?'':` ${amountText(lastAction.amount)}`}`);
     if (state.out || state.allIn || state.folded) {
-      statusGroup.append(el('span', `plate-tag${state.allIn ? ' is-allin' : ''}`, state.status));
+      statusGroup.append(el('span', `plate-tag ${state.out ? 'is-out' : state.allIn ? 'is-allin' : 'is-fold'}`, state.status));
     } else if (active) {
       const thinking = !isHero && seat.kind === 'ai';
       statusGroup.append(el('span', `plate-tag is-turn${thinking ? ' plate-thinking' : ''}`, thinking ? plateThinkingText() : state.status));
@@ -701,24 +703,18 @@ function paintHandResult(handNo = ui.handResult?.handNo) {
   if(result && baseline && frame.visible && ui.resultHold?.handNo===result.handNo && !(baseline.handNo===result.handNo && baseline.visible)
     && motionInput.source==='live' && motionInput.contiguous)
     playAwardSoon(result.winners.map(row=>row.playerId));
-  if(!result) {box.replaceChildren(cashResetNote);delete box.dataset.handNo;return;}
+  resultStaging=!!result && !frame.visible;
+  paintLastResultControl();
+  if(!result) {box.replaceChildren(cashResetNote);delete box.dataset.handNo;delete box.dataset.signature;return;}
   if(!frame.visible)return;
-  if(box.dataset.handNo!==String(result.handNo) || box.dataset.unit!==displayUnit) {
-    box.dataset.handNo=String(result.handNo);box.dataset.unit=displayUnit;box.replaceChildren();
-    const bb=view.blinds?.[1],short=(value)=>formatAmount(value,bb,displayUnit).primary;
-    box.append(el('strong','hand-result-title','핸드 '+result.handNo+' 결과'));
-    // "팟 N 획득" is what a winner collected, never their profit; profit is the viewer's own line.
-    const winnerLines=result.winners.map(winner=>`${playerName(winner.playerId)} 승리 · ${winner.handName ?? (result.kind==='uncontested'?'상대 전원 폴드':'쇼다운')} · 팟 ${short(winner.total)} 획득`);
-    for(const line of winnerLines.slice(0,3))box.append(el('div','hand-result-winner',line));
-    if(winnerLines.length>3)box.append(el('div','hand-result-pot',`외 ${winnerLines.length-3}명`));
-    if(result.pots.length>1) {
-      const potLines=result.pots.map(pot=>`${pot.potIndex===0?'메인 팟':`사이드 팟 ${pot.potIndex}`} · ${pot.winners.map(row=>`${playerName(row.playerId)} ${short(row.share)}`).join(', ')}`);
-      for(const line of potLines.slice(0,3))box.append(el('div','hand-result-pot',line));
-      if(potLines.length>3)box.append(el('div','hand-result-pot',`외 ${potLines.length-3}개 팟`));
-    }
-    if(result.myNet!==null)box.append(el('div',`hand-result-net ${result.myNet>0?'is-pos':result.myNet<0?'is-neg':''}`,`내 손익 ${formatSignedAmount(result.myNet,bb,displayUnit).primary}`));
-    box.append(cashResetNote);
-    const counter=el('span','hand-result-countdown');counter.setAttribute('aria-hidden','true');box.append(counter);
+  // Rebuilt only for another hand, viewer, net or unit, so side frames keep the node.
+  const signature=JSON.stringify([result.key,result.viewer,result.myNet,displayUnit]);
+  if(box.dataset.signature!==signature) {
+    box.dataset.signature=signature;box.dataset.handNo=String(result.handNo);box.replaceChildren();
+    const {head,body}=renderHandResultCard(box,result,{playerName,unit:displayUnit});
+    body.append(cashResetNote);
+    const live=el('span','hand-result-live');head.append(live);
+    const counter=el('span','hand-result-countdown');counter.setAttribute('aria-hidden','true');live.append(counter);
     const skip=el('button','btn btn-ghost hand-result-skip','건너뛰기');skip.type='button';
     skip.onclick=async()=>{
       const captured=result.handNo;const hadFocus=document.activeElement===skip;skip.disabled=true;
@@ -729,7 +725,7 @@ function paintHandResult(handNo = ui.handResult?.handNo) {
       } catch { /* Both rejection and success hide this hand's skip control. */ }
       finally {if(ui.handResult?.handNo===captured){skip.hidden=true;skipHiddenForHand=captured;if(hadFocus)$('tab-log').focus();}}
     };
-    box.append(skip);
+    live.append(skip);
   }
   const countdown=box.querySelector('.hand-result-countdown');
   const text=frame.remainingSeconds===null?'':`다음 핸드 ${frame.remainingSeconds}초`;
@@ -738,6 +734,53 @@ function paintHandResult(handNo = ui.handResult?.handNo) {
     && view.seats.filter(seat=>seat.kind==='human').length===1 && frame.remainingSeconds!==null && skipHiddenForHand!==result.handNo);
 }
 setInterval(()=>{const handNo=ui.handResult?.handNo;if(handNo!=null)paintHandResult(handNo);},250);
+
+// "직전 결과": the latest finished hand stays one click away through the next
+// hand and after the game. It waits while this hand's result is still staging,
+// so an all-in runout is never shown early.
+let resultStaging=false,lastResultShown=null,lastResultOpenedAt=null;
+function paintLastResultControl() {
+  const button=$('last-result-open'),result=ui.lastHandResult;
+  button.disabled=!result||resultStaging;
+  const label=result?`직전 결과 보기 · 핸드 ${result.handNo}`:'직전 결과 없음';
+  if(button.getAttribute('aria-label')!==label){button.setAttribute('aria-label',label);button.title=label;}
+}
+function paintLastResult() {
+  const result=lastResultShown,body=$('last-result-body');
+  if(!result)return;
+  const key=`${result.key}:${displayUnit}:${result.myNet}`;
+  if(body.dataset.key!==key){
+    body.dataset.key=key;body.replaceChildren();
+    const card=el('div','hand-result is-recap');renderHandResultCard(card,result,{playerName,unit:displayUnit});body.append(card);
+  }
+  $('last-result-replay').hidden=participantMode||isSpectating(ui.view)||!ui.handReplays?.[result.handNo];
+}
+function openLastResult() {
+  if(!ui.lastHandResult||resultStaging)return;
+  // The dialog keeps the hand it opened on, even if another hand finishes.
+  lastResultShown=ui.lastHandResult;
+  lastResultOpenedAt={decision:ui.view?.legal?.decisionId??null,ended:!!ui.view?.gameOver||ui.sessionEnded,watching:isSpectating(ui.view)};
+  paintLastResult();
+  dialogs.open($('last-result-overlay'),closeLastResult);
+}
+function closeLastResult({toAction=false}={}) {
+  const overlay=$('last-result-overlay');
+  lastResultShown=null;lastResultOpenedAt=null;
+  if(dialogs.active===overlay)dialogs.close();else overlay.hidden=true;
+  const trigger=$('last-result-open');
+  const action=toAction?[...$('action-bar').querySelectorAll('button')].find(node=>!node.disabled&&!node.hidden&&node.getClientRects().length):null;
+  if(action)action.focus();
+  else if(document.activeElement===document.body||trigger.disabled)(trigger.disabled?$('tab-log'):trigger).focus();
+}
+// A new turn, the game ending or a switch to watching (since it opened) closes
+// the recap: the action bar and the final screen must not wait behind it.
+function settleLastResult(view) {
+  if(dialogs.active!==$('last-result-overlay')||!lastResultOpenedAt)return;
+  const turn=!!view?.legal && !isSpectating(view) && view.legal.decisionId!==lastResultOpenedAt.decision;
+  const ended=(!!view?.gameOver||ui.sessionEnded)&&!lastResultOpenedAt.ended;
+  if(turn||ended||isSpectating(view)!==lastResultOpenedAt.watching)closeLastResult({toAction:turn});
+  else paintLastResult();
+}
 
 
 function writeAmountField(value) {
@@ -1523,18 +1566,21 @@ function paintReview(view) {
   result.textContent=title+(Number.isSafeInteger(finalSummary?.handCount)?` · 완료 ${finalSummary.handCount}핸드`:'');
   result.classList.toggle('is-win',view?.result==='win');result.classList.toggle('is-lose',view?.result==='lose');
   const spectator=isSpectating(view),viewer=spectator?null:viewerId(view);
-  const key=JSON.stringify([summaryVersion,view?.handNo,view?.seats,view?.sessionNet,viewer,ui.log.length,Object.keys(ui.handReplays)]);
+  const key=JSON.stringify([summaryVersion,view?.handNo,view?.seats,view?.sessionNet,viewer,ui.log.length,Object.keys(ui.handReplays),ui.lastHandResult?.key,ui.lastHandResult?.myNet,displayUnit]);
   if(key!==finalPanelKey){
     finalPanelKey=key;
     paintFinalPanel($('final-summary'),{summary:finalSummary,view,viewer,
       onReplay:participantMode||spectator?null:handNo=>{if(!ui.handReplays[handNo])return;overlay.dataset.dismissed='true';dialogs.close();openReplay(handNo);},
       canReplay:handNo=>!!ui.handReplays[handNo]});
     const last=$('final-last-hand');last.replaceChildren();
-    const hand=buildHandResult({log:ui.log,view:view?{...view,gameOver:false}:view,viewer,prior:null});
+    const hand=ui.lastHandResult;
     last.hidden=!hand;
-    if(hand){const heading=document.createElement('h2');heading.textContent='마지막 핸드';last.append(heading);
-      const bb=view?.mode==='cash-training'?view.blinds?.[1]:null;
-      for(const winner of hand.winners){const row=document.createElement('p');row.textContent=`${view.seats?.find(seat=>seat.playerId===winner.playerId)?.name??winner.playerId} 승리${winner.handName?' · '+winner.handName:''} · 팟 ${formatAmount(winner.total,bb,'bb').primary} 획득`;last.append(row);}}
+    if(hand){
+      // The hand's own blinds and the chosen unit, as on the live strip and the recap.
+      const card=el('div','hand-result is-recap');
+      renderHandResultCard(card,hand,{playerName,unit:displayUnit});
+      last.append(el('h2','','마지막 핸드'),card);
+    }
   }
   const section=$('final-review-section');section.hidden=participantMode||spectator;
   if(ui.review)void loadReveal();
@@ -1571,6 +1617,7 @@ function paintFrame() {
   void loadInsights(view);
   ui.handPrior=captureHandPrior(ui.handPrior,{view,log:ui.log,viewer:viewerId(view)});
   ui.handResult=updateHandResult(ui.handResult,{view,log:ui.log,viewer:viewerId(view),prior:ui.handPrior});
+  ui.lastHandResult=trackLatestResult(ui.lastHandResult,{log:ui.log,view,viewer:viewerId(view),prior:ui.handPrior});
   const spectator = isSpectating(view);
   document.body.classList.toggle('spectator-mode', spectator);
   const banner = $('spectator-banner');
@@ -1589,6 +1636,7 @@ function paintFrame() {
   paintThinking(view);
   paintPlateThinking();
   paintActionBar(view);
+  settleLastResult(view);
   paintHint();
   paintLog();
   const coachScroll = $('panel-coach').scrollTop;
@@ -1912,6 +1960,10 @@ $('display-unit').addEventListener('change',ev=>{
   paintTop(ui.view);paintPots(ui.view);paintSeats(ui.view);paintHandResult();paintActionBar(ui.view);paintLog();if(openReplayHandNo!==null)paintReplay();
 });
 $('seat-close').addEventListener('click',()=>dialogs.close());
+$('last-result-open').addEventListener('click',openLastResult);
+$('last-result-close').addEventListener('click',()=>closeLastResult());
+$('last-result-overlay').addEventListener('click',ev=>{if(ev.target===$('last-result-overlay'))closeLastResult();});
+$('last-result-replay').addEventListener('click',()=>{const handNo=lastResultShown?.handNo;closeLastResult();if(handNo!=null&&ui.handReplays[handNo])openReplay(handNo);});
 $('log-new').addEventListener('click',()=>{$('log-list').scrollTop=$('log-list').scrollHeight;$('log-list')._unread=0;$('log-new').hidden=true;});
 
 // ←/→/Home/End step through the replay; Space plays or pauses unless a

@@ -154,3 +154,87 @@ test('the river nuts exclude a split with the board but keep a rare tie', async 
   assert.equal(isSoleRiverNuts(['Jc', 'Th'], ['9c', '8d', '7h', '2s', 'Kd']), true, 'the nut straight ties only another J-T');
   assert.equal(isSoleRiverNuts(['Qc', 'Jh'], ['9c', '8d', '7h', '2s', 'Kd']), false, 'J-T beats it');
 });
+
+test('bestFiveOf plays the engine-best five, made cards first, with the engine hand name', async () => {
+  const { bestFiveOf } = await import('../shared/poker-eval.js');
+  const next = xorshift32(seedFrom('best-five-cross-check'));
+  for (let n = 0; n < 5_000; n += 1) {
+    const deck = Array.from({ length: 52 }, (_, i) => i);
+    for (let i = 0; i < 7; i += 1) {
+      const j = i + (next() % (52 - i));
+      [deck[i], deck[j]] = [deck[j], deck[i]];
+    }
+    const seven = deck.slice(0, 7).map(cardStr);
+    const best = bestFiveOf(seven);
+    assert.equal(best.score, score(seven), seven.join(' '));
+    assert.equal(score(best.cards), best.score);
+    assert.equal(new Set(best.cards).size, 5);
+    assert.ok(best.cards.every(card => seven.includes(card)));
+    assert.equal(best.name, evaluate7(seven).name);
+  }
+  const full = bestFiveOf(['Ks', 'Kd', '7h', '7c', '7d', 'Kh', '2s']);
+  assert.deepEqual(full.cards, ['Ks', 'Kh', 'Kd', '7h', '7c']);
+  assert.deepEqual(full.ranks, [11, 5], 'two trips: the higher plays as trips, the other as the pair');
+  const wheel = bestFiveOf(['As', '2d', '3h', '4c', '5s', 'Kd', 'Qh']);
+  assert.deepEqual(wheel.cards, ['5s', '4c', '3h', '2d', 'As']);
+  assert.deepEqual(wheel.ranks, [3]);
+  assert.equal(bestFiveOf(['As', 'Ks', 'Qs', 'Js', 'Ts', '2d', '3c']).name, '로열 스트레이트 플러시');
+  const twoPair = bestFiveOf(['As', 'Ad', 'Kh', 'Kc', 'Qs', 'Qd', '2c']);
+  assert.deepEqual(twoPair.cards, ['As', 'Ad', 'Kh', 'Kc', 'Qs']);
+  assert.deepEqual(twoPair.ranks, [12, 11, 10], 'the third pair can only be the kicker');
+  assert.deepEqual(bestFiveOf(['9h', '9c', 'Ah', '7d', '4s']).cards, ['9h', '9c', 'Ah', '7d', '4s']);
+  assert.throws(() => bestFiveOf(['As', 'Kd', 'Qh', 'Jc']), /five to seven/);
+});
+
+test('describeTiebreak names the first deciding rank within one category', async () => {
+  const { bestFiveOf, describeTiebreak } = await import('../shared/poker-eval.js');
+  const board = ['Ah', '9d', '7c', '4s', '2h'];
+  const of = hole => bestFiveOf([...hole, ...board]);
+  assert.deepEqual(describeTiebreak(of(['As', 'Kd']), of(['Ac', 'Qd'])), { tie: false, text: '키커 K > Q' });
+  assert.deepEqual(describeTiebreak(of(['9s', '9c']), of(['7s', '7h'])), { tie: false, text: '트리플 9 > 7' });
+  assert.equal(describeTiebreak(of(['7s', '7h']), of(['As', 'Kd'])), null, 'different categories are their own reason');
+  assert.deepEqual(describeTiebreak(of(['Kh', '3c']), of(['Kd', '3s'])), { tie: true, text: '같은 족보로 분할' });
+  const twoPair = ['Kh', 'Kd', '8c', '5s', '2d'];
+  assert.deepEqual(describeTiebreak(bestFiveOf(['8s', '5h', ...twoPair]), bestFiveOf(['5c', '2h', ...twoPair])),
+    { tie: false, text: '두 번째 페어 8 > 5' });
+  const flushBoard = ['Ah', '9h', '7h', '4h', 'Kd'];
+  assert.deepEqual(describeTiebreak(bestFiveOf(['Qh', '2c', ...flushBoard]), bestFiveOf(['Th', '3h', ...flushBoard])),
+    { tie: false, text: '플러시 두 번째 카드 Q > 10' });
+  const runBoard = ['6d', '5c', '4h', '3s', 'Kd'];
+  assert.deepEqual(describeTiebreak(bestFiveOf(['8c', '7d', ...runBoard]), bestFiveOf(['As', '2c', ...runBoard])),
+    { tie: false, text: '스트레이트 8 하이 > 6 하이' }, 'the wheel ace is low');
+  const boatBoard = ['Qs', 'Qd', '5c', '5h', '2d'];
+  assert.deepEqual(describeTiebreak(bestFiveOf(['Qh', '3c', ...boatBoard]), bestFiveOf(['5s', '3d', ...boatBoard])),
+    { tie: false, text: '풀하우스 트리플 Q > 5' });
+});
+
+test('describeTiebreak names every deciding position', async () => {
+  const { bestFiveOf, describeTiebreak } = await import('../shared/poker-eval.js');
+  const vs = (a, b, board) => describeTiebreak(bestFiveOf([...a, ...board]), bestFiveOf([...b, ...board]))?.text;
+  const dry = ['9s', '8h', '6d', '4c', '2s'];
+  assert.equal(vs(['Ad', '3c'], ['Kd', 'Qc'], dry), '하이 카드 A > K');
+  assert.equal(vs(['Ad', 'Jc'], ['Ah', 'Tc'], dry), '키커 J > 10');
+  assert.equal(vs(['Ks', 'Kd'], ['Qs', 'Qd'], dry), '페어 K > Q');
+  assert.equal(vs(['Ad', 'Ac'], ['Kd', 'Kc'], ['9s', '9h', '6d', '4c', '2s']), '높은 페어 A > K');
+  assert.equal(vs(['Kh', 'Ac'], ['Kc', 'Qc'], ['Ks', '9h', '9d', '4c', '2s']), '키커 A > Q', 'two pair kicker');
+  assert.equal(vs(['7h', 'Kc'], ['7c', 'Qc'], ['7s', '7d', '9d', '4c', '2s']), '키커 K > Q', 'trips kicker');
+  assert.equal(vs(['Ts', '2c'], ['5h', '3c'], ['9s', '8h', '7d', '6c', 'Ks']), '스트레이트 10 하이 > 9 하이');
+  assert.equal(vs(['Ah', '3h'], ['Kh', '2h'], ['Qh', 'Jh', '9h', '4c', '2s']), '플러시 최고 카드 A > K');
+  assert.equal(vs(['9h', '7h'], ['8h', '6h'], ['Ah', 'Kh', 'Qh', '4c', '2s']), '플러시 네 번째 카드 9 > 8');
+  assert.equal(vs(['7h', '2c'], ['6h', '3c'], ['Ah', 'Kh', 'Qh', 'Jh', '2s']), '플러시 다섯 번째 카드 7 > 6');
+  assert.equal(vs(['Qs', '2c'], ['Js', 'Jc'], ['Qd', 'Qh', 'Jh', '4c', '4s']), '풀하우스 트리플 Q > J');
+  assert.equal(vs(['Ks', '2c'], ['4h', '3c'], ['Qd', 'Qh', 'Qs', 'Kc', '4s']), '풀하우스 페어 K > 4');
+  assert.equal(vs(['Ah', '2c'], ['Kh', '3c'], ['9s', '9h', '9d', '9c', '4s']), '키커 A > K', 'quads kicker');
+  assert.equal(vs(['Kh', 'Qd'], ['Ks', 'Jc'], ['Ah', 'Ad', 'Ac', 'As', '2s']), '같은 족보로 분할', 'the same kicker splits');
+});
+
+test('describeTiebreak reaches the later kickers and the made-hand ranks too', async () => {
+  const { bestFiveOf, describeTiebreak } = await import('../shared/poker-eval.js');
+  const vs = (a, b, board) => describeTiebreak(bestFiveOf([...a, ...board]), bestFiveOf([...b, ...board]))?.text;
+  assert.equal(vs(['Qh', '3h'], ['Jh', '5h'], ['Ah', 'Kh', '4h', 'Tc', '2s']), '플러시 세 번째 카드 Q > J');
+  assert.equal(vs(['Ad', 'Qc'], ['Ac', 'Jc'], ['Ah', 'Kd', '9c', '4s', '2h']), '키커 Q > J', 'a pair\u2019s second kicker');
+  assert.equal(vs(['Ad', '9c'], ['Ac', '8c'], ['Ah', 'Kd', 'Qc', '4s', '2h']), '키커 9 > 8', 'a pair\u2019s third kicker');
+  assert.equal(vs(['7h', 'Qc'], ['7c', 'Jc'], ['7s', '7d', 'Kc', '4c', '2s']), '키커 Q > J', 'trips\u2019 second kicker');
+  assert.equal(vs(['Kd', 'Kc'], ['9d', '9c'], ['9s', '9h', 'Ks', 'Kh', '2c']), '포카드 K > 9');
+  assert.equal(vs(['Th', '3c'], ['5h', '3d'], ['9h', '8h', '7h', '6h', '2c']), '스트레이트 플러시 10 하이 > 9 하이');
+});

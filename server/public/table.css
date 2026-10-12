@@ -710,7 +710,7 @@ main {
 .log-act.is-fold { background: var(--c-surface-2); color: var(--c-text-2); }
 .log-act.is-check { background: color-mix(in srgb, var(--c-pos) 14%, transparent); color: var(--pos-ink); }
 .log-act.is-call { background: var(--c-info-soft); color: var(--info-ink); }
-.log-act.is-bet, .log-act.is-raise { background: color-mix(in srgb, var(--c-action) 16%, transparent); color: var(--c-action); }
+.log-act.is-bet, .log-act.is-raise { background: color-mix(in srgb, var(--c-action) 16%, transparent); color: var(--c-action-text); }
 .log-act.is-allin { background: var(--c-danger-soft); color: var(--danger-ink); }
 
 .log-amount {
@@ -1407,6 +1407,10 @@ main {display:grid;grid-template-columns:minmax(0,1fr) 340px;grid-template-rows:
 .stage {display:flex;flex-direction:column;gap:12px;padding:20px;min-width:0;}
 .table-context {display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;color:var(--muted);}
 .table-context label {display:flex;align-items:center;gap:8px;font-size:12px;}
+.table-context-tools {display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+/* The recap fits short screens: the card is capped and only its body scrolls. */
+.review-card.last-result-card {max-height:calc(100dvh - 48px);}
+.last-result-body {flex:1 1 auto;min-height:0;overflow:auto;}
 select {border:1px solid var(--c-control-border);background:var(--c-surface-2);color:var(--ink);border-radius:10px;padding:8px;}
 .table-wrap {container-type:inline-size;display:block;padding:40px 0 65px;flex:none;}
 .table {--tw:min(960px,100cqw);width:var(--tw);margin:auto;aspect-ratio:1.65;height:auto;max-height:none;}
@@ -1432,7 +1436,6 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 .spectator-mode .action-feedback, .spectator-mode #pre-action-hint {display:none;}
 .spectator-mode .seat.is-folded .seat-cards {opacity:1;}
 .seat.is-out .plate {border-style:dashed;background:var(--panel);}
-.seat.is-out .avatar {filter:grayscale(1);}
 .seat.is-folded .plate {border-style:dashed;}
 .seat.is-to-act .plate {border-color:var(--c-info);box-shadow:0 0 0 3px var(--c-info-soft);}
 .pots {border-radius:16px;flex-wrap:wrap;justify-content:center;max-width:100%;white-space:normal;gap:6px;padding:10px;background:var(--c-pot-bg);}
@@ -1565,6 +1568,13 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   /* Pointer-sized log controls keep the side panel dense on desktop. */
   .log-divider-text .replay-open,.log-hand-toggle,.coach-replay {min-height:28px;height:28px;}
   .hand-result .hand-result-skip {min-height:28px;height:28px;padding:0 10px;font-size:12px;}
+  /* The result shares the reserved action area and scrolls inside it rather
+     than growing it, so the table never shrinks or moves for a long result. */
+  .action-area:has(.hand-result:not([hidden])) {max-height:138px;}
+  .action-area > .result-dock {flex-shrink:1;min-height:0;overflow:auto;}
+  /* Countdown and skip stay in view while a long result scrolls. */
+  .result-dock .hand-result-head {position:sticky;top:0;z-index:1;margin:-8px -14px 0;padding:8px 14px 2px;background:var(--c-surface-1);}
+  .table-context .last-result-open {min-height:26px;height:26px;padding:0 10px;font-size:12px;}
   main {min-height:0;height:100%;grid-template-rows:minmax(0,1fr);grid-template-columns:minmax(0,1fr) 280px;}
   .stage {min-height:0;gap:4px;padding:6px 12px;}
   .stage > :not(.table-wrap) {flex-shrink:0;}
@@ -1705,11 +1715,36 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
    fitted desktop it sits in the reserved action area (the table does not move); on
    scrolling layouts it follows the table in the page flow. A bottom-sticky strip
    would cover the lowest seats of the fixed-height phone table. */
-.result-dock {display:flex;justify-content:center;}
-.hand-result {display:flex;flex-wrap:wrap;justify-content:center;align-items:baseline;gap:2px 12px;width:100%;max-width:760px;padding:8px 14px;border:1px solid var(--c-line-strong);border-radius:12px;background:var(--c-surface-1);color:var(--c-text);font-size:13px;line-height:1.45;text-align:center;box-shadow:0 8px 24px rgb(0 0 0 / .45);}
-.hand-result-title {display:block;font-size:12px;color:var(--c-text-2);}
-.hand-result-winner {font-weight:600;}
-.hand-result-net {font-family:var(--f-num);font-variant-numeric:tabular-nums;font-weight:700;}
+.result-dock {display:flex;justify-content:center;align-items:flex-start;}
+.hand-result {display:flex;flex-direction:column;gap:4px;width:100%;max-width:760px;padding:8px 14px;border:1px solid var(--c-line-strong);border-radius:12px;background:var(--c-surface-1);color:var(--c-text);font-size:13px;line-height:1.45;text-align:left;box-shadow:0 8px 24px rgb(0 0 0 / .45);}
+/* The result card (#277): who collected how much first, then with what, what
+   decided it, the board street by street, every pot, and the viewer's net. */
+.hand-result-head {display:flex;flex-wrap:wrap;align-items:center;gap:2px 10px;}
+.hand-result-title {font-size:12px;color:var(--c-text-2);}
+.hand-result-reason {font-size:12px;font-weight:700;color:var(--c-info-text);}
+.hand-result-live {display:flex;align-items:center;gap:8px;margin-left:auto;}
+.hand-result-body {display:grid;grid-template-columns:minmax(0,1fr);gap:3px 16px;min-width:0;}
+.hand-result-winners,.hand-result-pots {display:flex;flex-direction:column;gap:2px;margin:0;padding:0;list-style:none;}
+.hand-result-winner {display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;font-weight:600;}
+.hand-result-name {font-weight:700;}
+.hand-result-won {font-family:var(--f-num);font-variant-numeric:tabular-nums;font-size:14px;font-weight:700;}
+.hand-result-cards,.hand-result-street-cards {display:inline-flex;gap:2px;}
+.hand-result-note,.hand-result-pot {margin:0;font-size:12px;color:var(--c-text-2);}
+.hand-result-board {display:flex;flex-wrap:wrap;align-items:center;gap:2px 10px;font-size:12px;color:var(--c-text-2);}
+.hand-result-board-label,.hand-result-street-label {font-weight:700;}
+.hand-result-street {display:inline-flex;align-items:center;gap:4px;}
+.hand-result-street.is-runout .hand-result-street-label,.hand-result-runout {color:var(--c-info-text);}
+.hand-result-runout {font-weight:700;}
+@container stage (min-width:700px) {
+  /* Wide stages: winners, reasons and pots on the left; the board (one row)
+     and the viewer's net on the right, so a common result stays short. */
+  .hand-result-body {grid-template-columns:minmax(0,1fr) auto;grid-auto-flow:row dense;}
+  .hand-result-body > * {grid-column:1;}
+  .hand-result-body > :is(.hand-result-board,.hand-result-net,.cash-reset-note) {grid-column:2;justify-self:end;text-align:right;}
+  .hand-result-board {justify-content:flex-end;max-width:340px;}
+}
+.hand-result.is-recap {max-width:none;padding:0;border:0;background:none;box-shadow:none;}
+.hand-result-net {margin:0;font-family:var(--f-num);font-variant-numeric:tabular-nums;font-weight:700;}
 .hand-result-net.is-pos {color:var(--c-pos);}
 .hand-result-net.is-neg {color:var(--c-neg);}
 .hand-result .cash-reset-note {margin:0;}
@@ -1717,8 +1752,7 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 .motion-chip {position:absolute;z-index:9;width:14px;height:14px;border-radius:50%;background:var(--c-chip);box-shadow:inset 0 0 0 2px var(--c-chip-ring);translate:-50% -50%;pointer-events:none;}
 .hand-result[hidden] {display:none;}
 .hand-result button {margin:0;}
-.hand-result-countdown {display:block;font-variant-numeric:tabular-nums;}
-.hand-result-pot {font-size:12px;}
+.hand-result-countdown {font-size:12px;color:var(--c-text-2);font-variant-numeric:tabular-nums;}
 .seat.is-winner .plate {outline:2px solid var(--c-action);box-shadow:0 0 14px color-mix(in srgb, var(--c-action) 50%, transparent);}
 .plate-action {display:block;font-size:12px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--c-plate-text-2);}
 .result-dock:has(> .hand-result[hidden]) {display:none;}
@@ -1738,6 +1772,18 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 .plate-status {display:flex;flex-direction:column;align-items:center;gap:2px;min-width:0;flex:1 0 100%;}
 .plate-status:empty {display:none;}
 @media (min-width:1024px) and (min-height:550px) {.table .plate-status {flex:0 1 auto;}}
+
+/* Seat states at a glance (#276): in the hand (solid plate), all-in (amber tag),
+   folded (see-through dashed plate, dashed "폴드" tag) and eliminated (a compact
+   name-and-status plate, red "탈락" tag). Text keeps its contrast; only the plate,
+   avatar and cards fade. A fold stays marked until the next hand starts. */
+.seat.is-folded .plate,.seat.is-out .plate {background:var(--c-plate-dim);box-shadow:none;}
+.seat.is-folded .avatar {filter:grayscale(1);}
+.plate .plate-tag.is-fold {background:transparent;border:1px dashed var(--c-plate-text-2);color:var(--c-plate-text-2);}
+.plate .plate-tag.is-out {background:var(--c-danger-soft);border:1px solid var(--c-danger-border);color:var(--c-danger);}
+.table .seat.is-out .plate {min-width:0;width:auto;padding:3px 8px;gap:4px;}
+.seat.is-out .plate-name {color:var(--c-plate-text-2);}
+.seat.is-out .plate-tag {white-space:nowrap;}
 #action-options-toggle {display:none;}
 @media(max-width:600px) {
   .action-bar {position:sticky;bottom:0;z-index:12;background:var(--panel);padding:8px;padding-bottom:max(8px,env(safe-area-inset-bottom));gap:6px;}
@@ -1759,7 +1805,11 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .table-wrap {padding:12px 0 52px;}
   .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .seat:not(.is-hero) .seat-cards {display:none;}
   .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .plate {padding:3px 4px;gap:1px;}
-  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .plate-tag {display:none;}
+  /* The collapsed bar keeps fold, all-in and elimination readable: those seats
+     show their status in the stack's row (two rows, like every other plate). */
+  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .plate-tag:not(.is-fold,.is-out,.is-allin) {display:none;}
+  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .seat:is(.is-folded,.is-allin) .plate-stack {display:none;}
+  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .plate-tag {padding:0 4px;line-height:1.25;}
   .action-feedback,#action-status,#action-notice,.idle-hint,.thinking {margin:0;}
 }
 

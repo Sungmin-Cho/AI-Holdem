@@ -203,6 +203,78 @@ export function describeMadeHand(holeCards, boardCards) {
     label: playsBoard ? `${CATEGORY_NAMES[category]}(보드 플레이)` : detail ? `${CATEGORY_NAMES[category]} · ${detail}` : CATEGORY_NAMES[category] };
 }
 
+// ---- best five and what decided a showdown ------------------------------
+
+const RANK_LABELS = '23456789TJQKA'.split('').map(rank => (rank === 'T' ? '10' : rank));
+
+// The five cards a 5–7 card hand plays, made-hand cards first (the pair before
+// its kickers, trips before the pair of a full house) and a wheel as 5-4-3-2-A.
+// `ranks` is the comparison vector within the category, highest first.
+export function bestFiveOf(cards) {
+  const all = toCardInts(cards);
+  if (all.length < 5 || all.length > 7) throw new TypeError('five to seven cards required');
+  let best = null;
+  for (let a = 0; a < all.length - 4; a += 1) {
+    for (let b = a + 1; b < all.length - 3; b += 1) {
+      for (let c = b + 1; c < all.length - 2; c += 1) {
+        for (let d = c + 1; d < all.length - 1; d += 1) {
+          for (let e = d + 1; e < all.length; e += 1) {
+            const five = [all[a], all[b], all[c], all[d], all[e]];
+            const value = scoreCards(five);
+            if (!best || value > best.score) best = { score: value, five };
+          }
+        }
+      }
+    }
+  }
+  const category = categoryOfScore(best.score);
+  const count = new Map();
+  for (const card of best.five) count.set(card >> 2, (count.get(card >> 2) ?? 0) + 1);
+  const straight = category === 4 || category === 8 ? straightHigh(rankMaskOf(best.five)) : -1;
+  // A wheel's ace plays low.
+  const playRank = card => (straight === 3 && (card >> 2) === 12 ? -1 : card >> 2);
+  const ordered = [...best.five].sort((x, y) => (count.get(y >> 2) - count.get(x >> 2))
+    || (playRank(y) - playRank(x)) || ((x & 3) - (y & 3)));
+  const ranks = straight >= 0 ? [straight] : [...new Set(ordered.map(card => card >> 2))];
+  return {
+    cards: ordered.map(cardStr),
+    category,
+    name: category === 8 && straight === 12 ? '로열 스트레이트 플러시' : CATEGORY_NAMES[category],
+    ranks,
+    score: best.score,
+  };
+}
+
+const TIEBREAK_PARTS = Object.freeze([
+  ['하이 카드', '키커'],
+  ['페어', '키커'],
+  ['높은 페어', '두 번째 페어', '키커'],
+  ['트리플', '키커'],
+  ['스트레이트'],
+  ['플러시 최고 카드', '플러시 두 번째 카드', '플러시 세 번째 카드', '플러시 네 번째 카드', '플러시 다섯 번째 카드'],
+  ['풀하우스 트리플', '풀하우스 페어'],
+  ['포카드', '키커'],
+  ['스트레이트 플러시'],
+]);
+
+// Why `winner` (a bestFiveOf result) beat or split with `other` inside the same
+// category: the first differing rank, named. A different category is its own
+// reason (the hand names), so it returns null.
+export function describeTiebreak(winner, other) {
+  if (!winner || !other || winner.category !== other.category) return null;
+  const parts = TIEBREAK_PARTS[winner.category];
+  for (let index = 0; index < winner.ranks.length; index += 1) {
+    const ours = winner.ranks[index];
+    const theirs = other.ranks[index];
+    if (ours === theirs) continue;
+    const straight = winner.category === 4 || winner.category === 8;
+    const label = parts[Math.min(index, parts.length - 1)];
+    const rank = value => `${RANK_LABELS[value]}${straight ? ' 하이' : ''}`;
+    return { tie: false, text: `${label} ${rank(ours)} > ${rank(theirs)}` };
+  }
+  return { tie: true, text: '같은 족보로 분할' };
+}
+
 // Flush and straight draws and the cards that complete them ("outs" here means
 // completing cards, not guaranteed winners). Straight and flush completion are
 // judged separately, so a combo draw keeps both its straight type and its

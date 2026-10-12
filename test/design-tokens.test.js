@@ -60,6 +60,10 @@ const CHECKS = [
   ['--c-focus-on-felt', '--c-felt-mid', 3],
   ['--c-plate-text', '--c-plate', 4.5, '--c-felt-mid'],
   ['--c-plate-text-2', '--c-plate', 4.5, '--c-felt-mid'],
+  // Folded and eliminated plates let the felt through; their text stays readable.
+  ['--c-plate-text', '--c-plate-dim', 4.5, '--c-felt-mid'],
+  ['--c-plate-text-2', '--c-plate-dim', 4.5, '--c-felt-mid'],
+  ...SURFACES.slice(0, 3).map((bg) => ['--c-action-text', bg, 4.5]),
   ['--c-pot-text', '--c-pot-bg', 4.5, '--c-felt-mid'],
   ...['--c-suit-s', '--c-suit-h', '--c-suit-d', '--c-suit-c'].map((fg) => [fg, '--c-card-face', 4.5]),
   ['--c-badge-d-ink', '--c-badge-d-bg', 4.5],
