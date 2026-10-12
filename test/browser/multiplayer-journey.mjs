@@ -22,6 +22,7 @@ export const requiredJourneyChecks = [
   "two-guests-start",
   "guest-table-booted",
   "skip-hidden-multi",
+  "guest-hand-result-detail",
   "guest-table-viewport",
   "guest-single-header",
   "guest-embed-fit",
@@ -294,7 +295,10 @@ export async function runMultiplayerJourney(outDir) {
     for(const browser of [host,guestA,guestB])await evaluate(browser)(`window.__handDriver=setInterval(()=>{
       const doc=document.querySelector('#table')?.contentDocument;
       if(doc?.querySelector('#hand-result')?.hidden===false){
-        window.__handResultCheck={skipHidden:doc.querySelector('.hand-result-skip')?.hidden===true};
+        const box=doc.querySelector('#hand-result');
+        window.__handResultCheck={skipHidden:doc.querySelector('.hand-result-skip')?.hidden===true,
+          detail:{reason:box.querySelector('.hand-result-reason')?.textContent??null,won:[...box.querySelectorAll('.hand-result-won')].map(n=>n.textContent),
+            board:!!box.querySelector('.hand-result-board'),handNo:box.dataset.handNo,recap:doc.querySelector('#last-result-open')?.disabled===false}};
         if(${JSON.stringify(browser===guestA)}){const w=doc.defaultView,t=w.Date.now();w.__realNow=w.Date.now;w.Date.now=()=>t;}
         if(${JSON.stringify(browser===host)}){const menu=document.querySelector('#menu');if(menu&&!menu.disabled&&!menu.hidden)menu.click();}
         clearInterval(window.__handDriver);return;
@@ -309,6 +313,19 @@ export async function runMultiplayerJourney(outDir) {
       assert.equal(await evaluate(browser)('window.__handResultCheck.skipHidden'),true);
     }
     check('skip-hidden-multi');
+    // Host and both participants read the same result card: the reason, each
+    // winner's collected amount and the board; "직전 결과" reopens it in the iframe.
+    for(const browser of [host,guestA,guestB]){
+      const detail=await evaluate(browser)('window.__handResultCheck.detail');
+      assert.ok(['쇼다운','상대 전원 폴드'].includes(detail.reason)&&detail.won.length>0&&detail.won.every(text=>/^팟 .+ 획득$/.test(text))
+        &&detail.board&&detail.recap,JSON.stringify(detail));
+    }
+    const recapHand=(await evaluate(guestA)('window.__handResultCheck.detail')).handNo;
+    const recap=await evaluate(guestA)(`(()=>{const doc=document.querySelector('#table').contentDocument;doc.querySelector('#last-result-open').click();
+      const overlay=doc.querySelector('#last-result-overlay'),result={open:!overlay.hidden,text:doc.querySelector('#last-result-body').textContent};
+      doc.querySelector('#last-result-close').click();result.closed=overlay.hidden;return result;})()`);
+    assert.ok(recap.open&&recap.closed&&recap.text.includes(`핸드 ${recapHand} 결과`)&&/팟 .+ 획득/.test(recap.text),JSON.stringify(recap));
+    check('guest-hand-result-detail');
 
 
     if (app.manager.snapshot().state === "playing") await click(host, "#menu");

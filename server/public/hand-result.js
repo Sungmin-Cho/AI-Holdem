@@ -108,15 +108,33 @@ export function buildHandResult({log, view, viewer, prior}) {
   return result;
 }
 
+function latestFinishedHandNo(rows) {
+  const award = rows.findLastIndex(event => event.type === 'pot_award');
+  if (award < 0) return null;
+  return rows.findLast((event, index) => index < award && event.type === 'hand_start')?.handNo ?? null;
+}
+
 /** The latest finished hand in the log (reconnect / next hand), without the viewer's net. */
 export function latestFinishedHand(log) {
   const rows = Array.isArray(log) ? log : [];
-  for (let at = rows.length - 1; at >= 0; at -= 1) {
-    if (rows[at].type !== 'pot_award') continue;
-    const start = rows.findLast((event, index) => index < at && event.type === 'hand_start');
-    return start ? summarizeHand(rows, start.handNo) : null;
-  }
-  return null;
+  const handNo = latestFinishedHandNo(rows);
+  return handNo === null ? null : summarizeHand(rows, handNo);
+}
+
+/** "직전 결과": the latest finished hand, kept through the next hand and rebuilt
+ * whenever the log has moved past it (missed frames, reconnect, game over).
+ * Built from that hand's end view when it is the current view, so it keeps the
+ * viewer's net and the pots' contenders; otherwise from the log alone. */
+export function trackLatestResult(previous, {log, view, viewer, prior}) {
+  const rows = Array.isArray(log) ? log : [];
+  const handNo = latestFinishedHandNo(rows);
+  if (handNo === null) return null;
+  const atEnd = view?.handNo === handNo && view.handInProgress === false;
+  if (previous?.handNo === handNo && (previous.fromView || !atEnd)) return previous;
+  const result = atEnd ? buildHandResult({log:rows, view:{...view, gameOver:false}, viewer, prior}) : summarizeHand(rows, handNo);
+  if (!result) return previous?.handNo === handNo ? previous : null;
+  if (atEnd) result.fromView = true;
+  return result;
 }
 
 export function updateHandResult(previous, input) {

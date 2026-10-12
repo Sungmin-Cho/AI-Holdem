@@ -178,3 +178,27 @@ test('board scope, runout streets and the latest finished hand come from that ha
   assert.deepEqual(summarizeHand(posted,10).runout,['flop','turn','river']);
   assert.equal(latestFinishedHand([{type:'hand_start',handNo:1}]),null);
 });
+
+test('the latest result follows the log across missed hands and game over, and keeps the viewer’s net from the hand-end view',async()=>{
+  const {trackLatestResult}=await import('../server/public/hand-result.js');
+  const input=fixture();
+  const end=trackLatestResult(null,input);
+  assert.equal(end.handNo,3);assert.equal(end.myNet,100);assert.equal(end.fromView,true);
+  const next={...input.view,handNo:4,handInProgress:true};
+  const log=[...input.log,{type:'hand_start',handNo:4,blinds:[50,100]}];
+  assert.equal(trackLatestResult(end,{...input,log,view:next}),end,'the next hand keeps the same object');
+  // Reconnect two hands later with a stale cache: rebuilt from the log, no net.
+  const later=[...log,{type:'pot_award',potIndex:0,amount:200,winners:[{playerId:'p2',share:200}]},{type:'hand_start',handNo:5}];
+  const rebuilt=trackLatestResult(end,{...input,log:later,view:{...input.view,handNo:5,handInProgress:true}});
+  assert.equal(rebuilt.handNo,4);assert.equal(rebuilt.myNet,null);assert.deepEqual(rebuilt.blinds,[50,100]);
+  // The final hand: game over still yields that hand's complete result.
+  const over=trackLatestResult(end,{...input,view:{...input.view,gameOver:true}});
+  assert.equal(over,end,'the same hand-end result');
+  const fresh=trackLatestResult(null,{...input,view:{...input.view,gameOver:true}});
+  assert.equal(fresh.myNet,100,'game over keeps the viewer’s net for the last hand');
+  // A log-only result is upgraded once the hand-end view arrives.
+  const logOnly=trackLatestResult(null,{...input,view:{...input.view,handNo:2}});
+  assert.equal(logOnly.myNet,null);
+  assert.equal(trackLatestResult(logOnly,input).myNet,100);
+  assert.equal(trackLatestResult(null,{...input,log:[{type:'hand_start',handNo:1}]}),null);
+});
