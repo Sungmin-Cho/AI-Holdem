@@ -13,5 +13,5 @@ test('release wires real browser and Windows lifecycle checks',()=>{
  const studyA=shardFiles('study-a',fileURLToPath(new URL('.',import.meta.url)));
  assert.ok(studyA.some(file=>file.endsWith('app-command-store.test.js')));
  assert.match(fs.readFileSync(new URL('../.github/workflows/test.yml',import.meta.url),'utf8'),/run: npm run test:ci:windows -- \$\{\{ matrix.shard \}\}/);
- for(const name of ['pause-resume','restart-new-id','abort-summary','completed-review-reload','owned-cleanup'])assert.ok(requiredJourneyChecks.includes(name));
+ for(const name of ['pause-resume','restart-new-id','abort-summary','completed-review-reload','finished-landing-lobby','owned-cleanup'])assert.ok(requiredJourneyChecks.includes(name));
 });

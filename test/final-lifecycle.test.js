@@ -337,3 +337,95 @@ test('#274 the result panel explains the recovery outcomes (binding, attempt syn
  assert.doesNotMatch(odd,/서버 응답|As Kh|tok|<b>|\/tmp/);
  assert.match(odd,/처음 멈춘 이유: 다시 보내려던 게시 기록/);
 });
+
+// #286: the actual refresh, render, chooseMode and back handler, run together, so
+// the landing decision is checked on the snapshots a page load really applies.
+function lobbyLanding(){
+ const dom=elements(),source=fs.readFileSync(new URL('../server/public/lobby.js',import.meta.url),'utf8');
+ const answers=[];let opened=0,focused=null;
+ const context={...dom,URLSearchParams,snapshot:null,selecting:false,viewingRecord:false,frameId:null,busy:false,interruptBusy:false,pauseLock:null,rejoinFor:null,labels:{},errorMessages:{},appliedDefaults:true,form:{},
+  api:async()=>{const next=answers.shift();if(next instanceof Error)throw next;return next;}};
+ vm.createContext(context);
+ const between=(from,to)=>source.slice(source.indexOf(from),source.indexOf(to));
+ vm.runInContext(between('function render()','const BOOT_ORDER')+between('function chooseMode()',"$('interrupt-decision').onclick")+between('$("back").onclick','form.onchange = () =>'),context);
+ dom.$('pause-dialog').showModal=()=>{opened+=1;};
+ dom.$('review').focus=()=>{focused='review';};
+ dom.$('ai-count').focus=()=>{};
+ const poll=async(state,extra={})=>{answers.push({state,gameId:'one',gameEpoch:'epoch',allowedCommands:['start','restart'],...extra});await context.refresh();};
+ const view=()=>({setup:!dom.$('setup').hidden,result:!dom.$('result').hidden,game:!dom.$('game').hidden,back:!dom.$('back').hidden,src:dom.$('table').getAttribute('src')});
+ return {dom,context,answers,poll,view,opened:()=>opened,focused:()=>focused};
+}
+test('#286 a page opened on a finished game lands on the lobby with the record detached', async () => {
+ for(const state of ['completed','ended']){
+  const {dom,context,poll,view}=lobbyLanding();
+  await poll(state);
+  assert.equal(context.selecting,true,state);
+  assert.deepEqual(view(),{setup:true,result:false,game:false,back:true,src:null},state);
+  assert.equal(dom.$('back').textContent,'직전 게임 결과 보기',state);
+  assert.equal(dom.classes.has('has-game'),false,state);
+ }
+ // A failed first refresh decides nothing: the next applied snapshot does.
+ const {context,answers,poll,view}=lobbyLanding();
+ answers.push(new Error('offline'));await assert.rejects(context.refresh(),/offline/);
+ assert.equal(context.selecting,false);
+ await poll('completed');assert.equal(context.selecting,true);assert.equal(view().setup,true);
+});
+test('#286 a game that finishes while the page is open still shows its result and keeps the table', async () => {
+ for(const states of [['finalizing','completed'],['stopping','ended']]){
+  const {dom,context,poll,view}=lobbyLanding();
+  await poll('playing');const src=dom.$('table').src;assert.ok(src);
+  for(const state of states){await poll(state);assert.equal(context.selecting,false,state);assert.equal(dom.$('table').src,src,state);}
+  assert.deepEqual(view(),{setup:false,result:true,game:true,back:false,src},states.join());
+ }
+});
+test('#286 a first snapshot in error, external, paused or lobby opens as before, and later endings do not land', async () => {
+ const expected={
+  error:{setup:false,result:true,game:false,back:false,src:null},
+  external:{setup:false,result:true,game:false,back:false,src:null},
+  paused:{setup:false,result:false,game:true,back:false},
+  lobby:{setup:true,result:false,game:false,back:false,src:null},
+ };
+ for(const [state,shown] of Object.entries(expected)){
+  const {dom,context,poll,view}=lobbyLanding();
+  await poll(state,state==='lobby'?{gameId:null,allowedCommands:['start']}:{});
+  assert.equal(context.selecting,false,state);
+  const {src,...rest}=view();
+  assert.deepEqual(state==='paused'?rest:{...rest,src},shown,state);
+  if(state==='paused')assert.match(src,/appGame=one/);
+  // The decision is spent on this first snapshot: a game that ends later shows its result.
+  await poll('completed');
+  assert.equal(context.selecting,false,`${state} then completed`);
+  assert.deepEqual({result:view().result,setup:view().setup},{result:true,setup:false},`${state} then completed`);
+  assert.equal(dom.$('back').hidden,true,`${state} then completed`);
+ }
+});
+test('#286 "직전 게임 결과 보기" returns to the result card and the record, and the next poll keeps it there', async () => {
+ const {dom,context,poll,view,opened,focused}=lobbyLanding();
+ await poll('completed');
+ dom.$('back').onclick();
+ assert.equal(context.selecting,false);
+ const back=view();
+ assert.deepEqual({...back,src:undefined},{setup:false,result:true,game:true,back:false,src:undefined});
+ assert.match(back.src,/appGame=one/);assert.match(back.src,/terminal=1/);
+ assert.equal(dom.classes.has('has-game'),true);
+ assert.equal(opened(),0,'a finished game opens no pause menu');
+ assert.equal(focused(),'review','focus moves to the result card, not to a hidden button');
+ // One decision per page load: the next poll still reads completed and stays on the result.
+ await poll('completed');assert.equal(context.selecting,false);assert.deepEqual(view(),back);
+ // 모드 선택 from the result offers the same way back.
+ context.chooseMode();
+ assert.deepEqual(view(),{setup:true,result:false,game:false,back:true,src:null});
+ assert.equal(dom.$('back').textContent,'직전 게임 결과 보기');
+ dom.$('back').onclick();
+ assert.equal(view().result,true);assert.match(view().src,/terminal=1/);
+});
+test('#286 a paused game keeps its "back" wording and returns to the pause menu', async () => {
+ const {dom,context,poll,view,opened,focused}=lobbyLanding();
+ await poll('paused');
+ context.chooseMode();
+ assert.equal(view().setup,true);assert.equal(view().back,true);
+ assert.equal(dom.$('back').textContent,'일시정지 메뉴로 돌아가기');
+ dom.$('back').onclick();
+ assert.equal(context.selecting,false);assert.equal(opened(),1);assert.equal(focused(),null);
+ assert.deepEqual({setup:view().setup,game:view().game,result:view().result},{setup:false,game:true,result:false});
+});

@@ -223,7 +223,11 @@ function render() {
   $("result-restart").disabled = busy || !snapshot.allowedCommands.includes("restart");
   $("result-end").textContent = snapshot.recoveryExit?.mode === 'finalize' ? '기록을 버리고 결과 정리' : '게임 종료';
   $("result-modes").hidden = !snapshot.allowedCommands.includes("start");
-  $("back").hidden = !(selecting && paused);
+  // #286: "back" leaves the setup screen for what it was opened over: the
+  // pause menu of a paused game, or the result of a finished one.
+  const resultBehind = selecting && terminal && Boolean(snapshot.gameId);
+  $("back").hidden = !(selecting && paused) && !resultBehind;
+  $("back").textContent = resultBehind ? "직전 게임 결과 보기" : "일시정지 메뉴로 돌아가기";
   $("start").disabled =
     busy ||
     !snapshot.allowedCommands.some((c) =>
@@ -317,6 +321,12 @@ let refreshFailures=0;
 // already shown is dropped (it would repaint a stale state).
 let refreshSeq=0;
 let appliedSeq=0;
+// #286: a page opened on a game that had already finished lands on the lobby,
+// its result one click away (#back); a game that finishes while the page is
+// open still shows its result first and keeps the table. Decided once per page
+// load, by the first snapshot applied (a failed refresh decides nothing).
+let landingDecided=false;
+const landsOnLobby = (snap) => ["completed", "ended"].includes(snap.state) && Boolean(snap.gameId);
 async function refresh() {
   const seq = ++refreshSeq;
   const next = await api("/api/app");
@@ -325,6 +335,10 @@ async function refresh() {
   snapshot = next;
   refreshFailures=0;
   if (pauseLock?.settledSeq !== undefined && seq > pauseLock.settledSeq) pauseLock = null;
+  if (!landingDecided) {
+    landingDecided = true;
+    if (landsOnLobby(snapshot)) selecting = true;
+  }
   if (!appliedDefaults && snapshot.defaultSetup) {
     const defaults = snapshot.defaultSetup;
     for (const [key, value] of Object.entries(defaults)) {
@@ -714,7 +728,10 @@ $("close-menu").onclick = () => $("pause-dialog").close();
 $("back").onclick = () => {
   selecting = false;
   render();
-  $("pause-dialog").showModal();
+  // A paused game goes back to its menu; a finished one to its result card,
+  // where render() has attached the record again.
+  if (snapshot.state === "paused") $("pause-dialog").showModal();
+  else if (!$("review").hidden) $("review").focus();
 };
 form.onchange = () => {
   const mode = new FormData(form).get("mode");
