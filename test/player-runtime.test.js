@@ -229,16 +229,19 @@ test('extractJsonLine: 펜스·산문 관용', () => {
   assert.equal(extractJsonLine(null), null);
 });
 
-test('RUNTIME_TABLE은 {player, upper, watchdog}만 갖고 정적 eligible 필드가 없다', () => {
+test('RUNTIME_TABLE은 {player, upper, 각 tier 인자, watchdog}만 갖고 정적 eligible 필드가 없다', () => {
   assert.deepEqual(Object.keys(RUNTIME_TABLE).sort(), ['claude', 'codex', 'grok']);
   for (const [kind, row] of Object.entries(RUNTIME_TABLE)) {
-    assert.deepEqual(Object.keys(row).sort(), ['player', 'playerArgs', 'upper', 'watchdog'], kind);
+    assert.deepEqual(Object.keys(row).sort(), ['player', 'playerArgs', 'upper', 'upperArgs', 'watchdog'], kind);
     assert.deepEqual(Object.keys(row.watchdog).sort(), ['t1Ms', 't2Ms'], kind);
   }
   assert.equal(RUNTIME_TABLE.claude.player, 'sonnet');
   assert.deepEqual(RUNTIME_TABLE.claude.playerArgs, ['--effort', 'medium']);
   assert.deepEqual(RUNTIME_TABLE.codex.playerArgs, []);
   assert.deepEqual(RUNTIME_TABLE.grok.playerArgs, []);
+  assert.deepEqual(RUNTIME_TABLE.claude.upperArgs, []);
+  assert.deepEqual(RUNTIME_TABLE.codex.upperArgs, ['-c', 'model_reasoning_effort="medium"']);
+  assert.deepEqual(RUNTIME_TABLE.grok.upperArgs, []);
   assert.equal(RUNTIME_TABLE.claude.upper, 'opus');
   assert.equal(RUNTIME_TABLE.codex.player, 'gpt-6-luna');
   assert.equal(RUNTIME_TABLE.codex.upper, 'gpt-6.1-sol');
@@ -3213,6 +3216,54 @@ test('grok: upper 카나리 호출이 턴 없이 실패해도 카나리가 새�
     const models = f.calls().filter((c) => c.argv.includes('-m')).map((c) => c.argv[c.argv.indexOf('-m') + 1]);
     assert.deepEqual(models, ['grok-4.9', 'grok-4.9']);
     assert.equal(f.rt.models.source.upper, 'catalog');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('codex 상위 tier(probe-upper·oneshot upper)만 model_reasoning_effort="medium"을 exec 앞에 싣고, 플레이어 호출은 싣지 않는다', async () => {
+  const { file } = canary();
+  const f = fakeRuntime('codex', { matchers: [CODEX_WARMUP], default: { reply: CODEX_REPLY_OK } });
+  try {
+    await f.rt.probe({ canaryAbsPath: file });
+    await f.rt.probe({ upper: true, canaryAbsPath: file });
+    const { sessionId } = await f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 });
+    await f.rt.decide({ playerId: 'p1', sessionId, message: 'm', timeoutMs: 5000 });
+    await f.rt.oneshotStart({ tier: 'upper', prompt: '코치' }).done;
+    await f.rt.oneshotStart({ tier: 'player', prompt: '플레이어 단발' }).done;
+    const effortAt = (argv) => argv.findIndex((a, i) => a === '-c' && argv[i + 1] === 'model_reasoning_effort="medium"');
+    const modelOf = (argv) => argv[argv.indexOf('-m') + 1];
+    const calls = f.calls().filter((c) => !c.argv.includes('debug'));
+    const upper = calls.filter((c) => modelOf(c.argv) === 'gpt-6.1-sol');
+    const player = calls.filter((c) => modelOf(c.argv) === 'gpt-6-luna');
+    assert.equal(upper.length, 3, 'probe-upper 왕복 2회 + 코치 oneshot 1회');
+    assert.equal(player.length, 4, 'probe + warmup + decide(resume) + 플레이어 oneshot');
+    for (const { argv } of upper) {
+      const at = effortAt(argv);
+      assert.ok(at > 0, `상위 호출에 effort가 없다: ${argv.join(' ')}`);
+      assert.ok(at < argv.indexOf('exec'), 'effort는 전역 옵션이라 exec 앞이다');
+      assert.equal(argv.filter((a) => a === 'model_reasoning_effort="medium"').length, 1);
+    }
+    for (const { argv } of player) assert.equal(effortAt(argv), -1, `플레이어 호출에 effort가 실렸다: ${argv.join(' ')}`);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('oneshotStart reasoning: model-default면 상위 tier 인자 없이 모델 기본값으로 부르고, 닫힌 값만 받는다', async () => {
+  const f = fakeRuntime('codex', { default: { reply: CODEX_REPLY_OK } });
+  try {
+    await f.rt.oneshotStart({ tier: 'upper', prompt: '학습 해설', reasoning: 'model-default' }).done;
+    const explain = f.last().argv;
+    assert.equal(explain.includes('model_reasoning_effort="medium"'), false);
+    assert.equal(explain[explain.indexOf('-m') + 1], 'gpt-6.1-sol');
+    await f.rt.oneshotStart({ tier: 'upper', prompt: '코치' }).done;
+    assert.equal(f.last().argv.includes('model_reasoning_effort="medium"'), true, '기본은 tier 인자');
+    const before = f.calls().length;
+    for (const bad of ['high', '', null, 'TIER']) {
+      assert.throws(() => f.rt.oneshotStart({ tier: 'upper', prompt: 'x', reasoning: bad }), { code: 'BAD_REASONING' });
+    }
+    assert.equal(f.calls().length, before, '거부된 값은 자식을 띄우지 않는다');
   } finally {
     f.cleanup();
   }

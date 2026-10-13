@@ -94,9 +94,9 @@ import { coachNotesDigest, decisionFactsLines, detectorLinesKo, processDetectors
 import { preserveReviewFailure, sanitizeReviewDiagnostic } from './review-diagnostics.js';
 import { killGroup as killSolverGroup, readPersistedSolver } from './solver-runtime.js';
 import {
-  buildExplanationPrompt,
   defaultEvaluate,
   defaultSolve,
+  explanationCall,
   flushAnnotationPublish as flushAnnotationEnvelope,
   flushMachinePublish,
   isTrainingEnabled,
@@ -3323,11 +3323,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!upperAdapter || typeof upperAdapter.oneshotStart !== 'function') {
       return { promise: Promise.resolve(null), terminate: async () => ({ confirmed: true }) };
     }
-    const handle = upperAdapter.oneshotStart({
-      tier: 'upper',
-      prompt: buildExplanationPrompt(evaluation),
-      timeoutMs: 20_000,
-    });
+    // 20초 예산이라 모델 기본 추론 강도로 부른다(`explanationCall`).
+    const handle = upperAdapter.oneshotStart(explanationCall(evaluation));
     const wrapped = {
       promise: Promise.resolve(handle.done).then((completed) => {
         try {

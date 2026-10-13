@@ -178,6 +178,14 @@ export function defaultSolve({ sessionDir, decisionId, handNo, adapterId }) {
   ], { timeoutMs: 20_000, failCode: 'SOLVE_FAILED', solverSessionDir: sessionDir });
 }
 
+// 학습 설명 상위 호출의 고정 옵션. 20초 예산이라 상위 tier의 추론 강도(codex medium)를 싣지 않고 모델
+// 기본값으로 부른다 — 2026-10-13 실측: sol 기본값 9.0–9.1초, medium 11.8–18.0초. 코치(120초)와
+// 종합 리뷰(300초)는 tier 인자를 그대로 쓴다.
+export const EXPLANATION_TIMEOUT_MS = 20_000;
+export function explanationCall(evaluation) {
+  return { tier: 'upper', prompt: buildExplanationPrompt(evaluation), timeoutMs: EXPLANATION_TIMEOUT_MS, reasoning: 'model-default' };
+}
+
 export function buildExplanationPrompt(evaluation) {
   return [
     '역할: 학습 해설',

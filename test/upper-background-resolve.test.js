@@ -46,11 +46,13 @@ async function waitFor(predicate, message, timeoutMs = 15_000 * SCALE) {
 function coachUpper({ coachDelayMs = 0, coachGate = null } = {}) {
   const starts = [];
   const coachHands = [];
+  const reasonings = [];
   let disposed = 0;
   return {
     kind: 'coach-fake',
     starts,
     coachHands,
+    reasonings,
     get disposed() { return disposed; },
     disposeConfirmsChildren: true,
     oneshotStart(input) {
@@ -59,6 +61,7 @@ function coachUpper({ coachDelayMs = 0, coachGate = null } = {}) {
         : input.prompt.includes('역할: 학습 해설') ? 'explain' : 'coach';
       const handNo = Number(/hand (\d+) \(redacted\):/.exec(input.prompt)?.[1] ?? 1);
       starts.push(stage);
+      reasonings.push([stage, input.reasoning]);
       if (stage === 'coach') coachHands.push(handNo);
       const raw = stage === 'evaluator' ? '표본 30핸드 미만이므로 참고용입니다. 공개 정보 기준 과정 평가는 안정적이었습니다.'
         : stage === 'synthesizer' ? VALID_REVIEW
@@ -161,6 +164,10 @@ test('R2: the table opens before the probe; coach notes and finalization wait fo
   assert.equal(done.upperRuntime, 'coach-fake');
   assert.match(fs.readFileSync(path.join(gameDir, 'review.md'), 'utf8'), /## 내 성향 통계/);
   assert.ok(events.indexOf('upper-resolved') !== -1);
+  // 코치·평가자·종합자는 상위 tier 인자(codex medium)를 그대로 쓴다 — reasoning을 넘기지 않는다.
+  for (const [stage, reasoning] of upper.reasonings) {
+    assert.equal(reasoning, stage === 'explain' ? 'model-default' : undefined, stage);
+  }
   assert.ok(events.indexOf('upper-resolved') < events.indexOf('finalize-start'));
 });
 
