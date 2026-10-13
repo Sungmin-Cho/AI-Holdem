@@ -1142,8 +1142,12 @@ test('race: a retirement settling behind an ordinary holder while another flush 
     }
   };
   const options = { executePublish: record, trainingControl: tc, relayBinding: () => relayBinding(dir) };
+  // A's queue settlement joins the training lock's in-process queue synchronously inside this
+  // call; the flag says it is now queued (behind the holder), not that it has run.
+  let aQueued = false;
+  const aControl = { ...tc, retireRejectedAnnotations: (...args) => { const settling = tc.retireRejectedAnnotations(...args); aQueued = true; return settling; } };
   // A's retirement: verified, then held at the gate before it resends.
-  const a = pipeline.retireRejectedAnnotationAttempt(dir, { ...options, verifyRelay: async () => { aReady = true; await gateA; } });
+  const a = pipeline.retireRejectedAnnotationAttempt(dir, { ...options, trainingControl: aControl, verifyRelay: async () => { aReady = true; await gateA; } });
   // The other flush: it has built A+B from the still-unsettled queue and is held at its first send.
   const b = pipeline.flushAnnotationPublish(dir, {
     gameEpoch: EPOCH, trainingControl: tc,
@@ -1166,6 +1170,10 @@ test('race: a retirement settling behind an ordinary holder while another flush 
   // now waits behind the holder.
   allowA();
   await until(() => fs.existsSync(evidenceFile) && !fs.existsSync(attemptFile(dir)), 'A retired on evidence');
+  // The files change before A's publisher exits, and that exit can lag (#281): wait until A's
+  // settlement is actually queued, so the other flush's settlement queues behind it. The other
+  // order is a valid interleaving too, pinned by the reversed test below.
+  await until(() => aQueued, 'A settlement queued behind the holder');
   // In that gap the other flush tries to send A+B: refused at the publish lock while A's
   // evidence is outstanding — nothing sent, no attempt recorded, no evidence produced.
   allowB();
@@ -1192,6 +1200,120 @@ test('race: a retirement settling behind an ordinary holder while another flush 
   assert.equal(fs.existsSync(evidenceFile), false, 'the evidence was consumed by A\'s own settlement');
   const audit = fs.readFileSync(rejectionLog(dir), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
   assert.equal(audit.length, 1, 'only A was ever retired on evidence; the refused A+B produced none');
+  assert.deepEqual(audit[0].items.map((row) => row.evaluationId), [first.evaluationId]);
+  const snapshot = readJson(path.join(dir, 'ui-snapshot.json'));
+  assert.deepEqual(Object.keys(snapshot.trainingAnnotations ?? {}), [second.evaluationId], 'the refused explanation never reached the relay');
+});
+
+// #281: the same race in the other order, which CI hit on Node 20. A's publisher exits late (its
+// relay connection keeps it alive until the forced exit), so the other flush's settlement joins
+// the training lock first and consumes A's evidence itself. A then reports its retirement with
+// nothing left to drop; everything else ends exactly as in the order above.
+test('race, reversed: the other flush\'s settlement reaches the training lock first and consumes A\'s evidence — A reports retired with nothing left to drop, and the end state is the same', { timeout: 30_000 }, async (t) => {
+  const dir = relayDir(t);
+  await startRelay(t, dir);
+  const first = q3Evaluation(EPOCH, 'd-1-preflop-0');
+  const second = q3Evaluation(EPOCH, 'd-2-preflop-0');
+  const tc = createTrainingControl();
+  await tc.acceptEvaluations(dir, { gameEpoch: EPOCH, owner: OWNER, handNo: 1, evaluations: [first, second] });
+  await pipeline.flushMachinePublish(dir, { gameEpoch: EPOCH, executePublish: executeAgainst(dir), trainingControl: tc });
+  assert.equal((await tc.sealAnnotation(dir, first.evaluationId, 'explanation', LEAKING_TEXT)).ok, true);
+  await pipeline.flushAnnotationPublish(dir, { gameEpoch: EPOCH, executePublish: executeAgainst(dir), trainingControl: tc })
+    .then(() => assert.fail('A must be refused'), (error) => assert.equal(error.code, 'PUBLISH_REJECTED'));
+  assert.equal((await tc.sealAnnotation(dir, second.evaluationId, 'explanation', SAFE_TEXT)).ok, true);
+  const evidenceFile = path.join(dir, '.publish-retirement.json');
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const until = async (probe, label) => {
+    for (let n = 0; n < 600; n += 1) { if (probe()) return; await sleep(10); }
+    throw new Error(`gate timeout: ${label}`);
+  };
+  let allowA; let allowB; let releaseHold; let settleA;
+  const gateA = new Promise((resolve) => { allowA = resolve; });
+  const gateB = new Promise((resolve) => { allowB = resolve; });
+  const holdGate = new Promise((resolve) => { releaseHold = resolve; });
+  const settleGate = new Promise((resolve) => { settleA = resolve; });
+  t.after(() => { allowA(); allowB(); releaseHold(); settleA(); });
+  let aReady = false; let bReady = false; let holdReady = false; let firstSend = true;
+  let aArrived = false; let aQueued = false; let bSettlements = 0;
+  const posts = [];
+  const record = async (args) => {
+    const from = args.indexOf('--from');
+    const envelope = from >= 0 && fs.existsSync(args[from + 1]) ? readJson(args[from + 1]) : null;
+    const row = { flags: args.filter((arg) => arg.startsWith('--')).join(' '), ids: (envelope?.trainingAnnotations ?? []).map((note) => note.evaluationId) };
+    try {
+      const out = await runPublisher(dir, args);
+      row.result = out.retired ? 'retired' : `published:${out.publishId}`;
+      return out;
+    } catch (error) {
+      row.result = error.code;
+      throw error;
+    } finally {
+      posts.push(row);
+    }
+  };
+  const options = { executePublish: record, trainingControl: tc, relayBinding: () => relayBinding(dir) };
+  // A's queue settlement is held until the other flush's settlement has queued first.
+  const aControl = { ...tc, retireRejectedAnnotations: async (...args) => {
+    aArrived = true;
+    await settleGate;
+    const settling = tc.retireRejectedAnnotations(...args);
+    aQueued = true;
+    return settling;
+  } };
+  // The other flush settles outstanding evidence through reconcileRetiredAnnotations: once when
+  // it starts, then again after the publisher refuses A+B.
+  const bControl = { ...tc, reconcileRetiredAnnotations: (...args) => {
+    const settling = tc.reconcileRetiredAnnotations(...args);
+    bSettlements += 1;
+    return settling;
+  } };
+  const a = pipeline.retireRejectedAnnotationAttempt(dir, { ...options, trainingControl: aControl, verifyRelay: async () => { aReady = true; await gateA; } });
+  const b = pipeline.flushAnnotationPublish(dir, {
+    gameEpoch: EPOCH, trainingControl: bControl,
+    executePublish: async (args) => {
+      if (firstSend) { firstSend = false; bReady = true; await gateB; }
+      return record(args);
+    },
+    retirePending: async () => {
+      const settled = await pipeline.retireRejectedAnnotationAttempt(dir, options);
+      return settled.retired === true || settled.published === true || settled.settledElsewhere === true;
+    },
+  });
+  a.catch(() => {}); b.catch(() => {});
+  await until(() => aReady && bReady, 'both in flight');
+  const holder = tc.withLock(dir, async () => { holdReady = true; await holdGate; });
+  await until(() => holdReady, 'holder');
+  allowA();
+  await until(() => aArrived, 'A retired on evidence, its settlement not yet queued');
+  assert.equal(fs.existsSync(evidenceFile), true);
+  assert.equal(fs.existsSync(attemptFile(dir)), false);
+  const settlementsBefore = bSettlements;
+  allowB();
+  await until(() => posts.some((row) => row.flags === '--from' && row.result === 'REJECTION_EVIDENCE_PENDING'), 'A+B refused at the publish lock');
+  await until(() => bSettlements > settlementsBefore, 'the other flush\'s settlement queued behind the holder');
+  settleA();
+  await until(() => aQueued, 'A settlement queued behind it');
+  releaseHold();
+  await holder;
+  const [ra, rb] = await Promise.allSettled([a, b]);
+
+  assert.equal(ra.status, 'fulfilled', JSON.stringify(ra));
+  assert.deepEqual(ra.value, { retired: true, dropped: 0, isolated: 0, skipped: 1 }, 'A retired on its evidence, already applied by the other flush');
+  assert.equal(rb.status, 'fulfilled', `the flush completes: ${JSON.stringify(rb)}`);
+  assert.deepEqual(posts.map((row) => [row.flags, row.ids.length, row.result]), [
+    ['--from --retire-rejected --expect-attempt-sha256 --expect-game-epoch --relay-pid --relay-start-time --relay-port', 1, 'retired'],
+    ['--from', 2, 'REJECTION_EVIDENCE_PENDING'],
+    ['--from', 1, `published:${readJson(path.join(dir, 'ui-snapshot.json')).publishId}`],
+  ]);
+  assert.deepEqual(posts[2].ids, [second.evaluationId]);
+  const after = tc.loadAuthority(dir);
+  assert.deepEqual(after.annotationQueue, {}, 'B did not stay queued');
+  assert.equal(after.items[first.evaluationId].annotations.explanation.publishFailed, 'rejected');
+  assert.equal(after.items[second.evaluationId].annotations.explanation.published, true);
+  assert.equal(fs.existsSync(attemptFile(dir)), false);
+  assert.equal(fs.existsSync(evidenceFile), false, 'the evidence was consumed once, by the other flush');
+  const audit = fs.readFileSync(rejectionLog(dir), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.equal(audit.length, 1);
   assert.deepEqual(audit[0].items.map((row) => row.evaluationId), [first.evaluationId]);
   const snapshot = readJson(path.join(dir, 'ui-snapshot.json'));
   assert.deepEqual(Object.keys(snapshot.trainingAnnotations ?? {}), [second.evaluationId], 'the refused explanation never reached the relay');

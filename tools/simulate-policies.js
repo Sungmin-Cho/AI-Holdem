@@ -69,8 +69,11 @@ export const DEGENERATE = Object.freeze({
 // `observe(event)` sees every decision with its sampled action.
 export function playTable({ hands, agents, seed, observe }) {
   const ids = Object.keys(agents);
+  // 첫 버튼도 시드로 정한다 — 엔진 기본값(randomInt)이면 같은 시드라도 좌석 순서가 달라진다.
+  // 덱·행동 샘플 스트림(next)과 따로 뽑아 그 스트림의 순서를 바꾸지 않는다.
+  const button = xorshift32(seedFrom(`button:${seed}`))() % ids.length;
   let state = createGame({ aiCount: ids.length - 1, startStack: 100 * BB, blinds0: [BB / 2, BB], mode: 'cash-training',
-    levelEvery: null, startStackBb: 100, handLimit: hands + 1 });
+    levelEvery: null, startStackBb: 100, handLimit: hands + 1, button });
   const next = xorshift32(seedFrom(`table:${seed}`));
   const nets = Object.fromEntries(ids.map((id) => [id, []]));
   for (let hand = 0; hand < hands; hand += 1) {

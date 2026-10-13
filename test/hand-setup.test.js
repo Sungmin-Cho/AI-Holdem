@@ -21,6 +21,15 @@ test('createGame은 user+p1..pN, idle, handNo 0', () => {
   assert.deepEqual(st.config.blinds0, [25, 50]);
 });
 
+test('createGame은 넘긴 button 좌석으로 시작하고, 좌석 번호가 아니면 BAD_CONFIG', () => {
+  for (const button of [0, 1, 2]) assert.equal(createGame({ aiCount: 2, button }).button, button);
+  for (const bad of [-1, 3, 1.5, '1']) {
+    assert.throws(() => createGame({ aiCount: 2, button: bad }), { code: 'BAD_CONFIG' }, JSON.stringify(bad));
+  }
+  const st = createGame({ aiCount: 2, button: null });
+  assert.ok(st.button >= 0 && st.button < 3, 'null은 지정하지 않은 것과 같다');
+});
+
 test('blindsForLevel 기본 스케줄과 ×1.5, blinds0 스케일', () => {
   assert.deepEqual(blindsForLevel(0), [25, 50]);
   assert.deepEqual(blindsForLevel(1), [50, 100]);

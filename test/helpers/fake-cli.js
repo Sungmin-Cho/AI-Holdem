@@ -19,6 +19,8 @@
 //     문자열 `$HOME`은 실제 HOME 값으로 치환한다.
 //   - `grokSession`/`grokSessionRaw`는 `$HOME/.ai-holdem-home.json`이 있을 때만
 //     세션 기록을 쓴다. 없으면 stderr `FAKE_CLI_REFUSES_USER_HOME` + exit 3.
+//     `grokSession.format: '1.0.46'`이면 grok 1.0.46처럼 events.jsonl의 session_id를
+//     turn_started 줄에만 싣고, resume은 updates.jsonl에 빈 background_tasks 줄을 먼저 남긴다.
 // 기록: 매 호출을 `FAKE_CLI_LOG`(JSONL)에 append한다 — argv·stdin·cwd·env **키 목록**·pid.
 //   env는 값이 아니라 키만 남긴다(자격 값은 로그에 절대 쓰지 않는다). `logEnvValues`로
 //   명시한 키만 값을 남긴다. 세션 플래그(`--session-id`/`--resume`)도 argv에 받은 그대로.
@@ -134,12 +136,9 @@ function expandUpdate(item, id, i) {
   return out;
 }
 
-function expandEvent(item, id) {
-  if (typeof item === 'string') {
-    return { type: item, session_id: id };
-  }
-  const out = structuredClone(item);
-  out.session_id = id;
+function expandEvent(item, id, format) {
+  const out = typeof item === 'string' ? { type: item } : structuredClone(item);
+  if (format !== '1.0.46' || out.type === 'turn_started') out.session_id = id;
   return out;
 }
 
@@ -173,7 +172,10 @@ function writeGrokSession() {
   }
 
   const updates = (spec.updates ?? DEFAULT_UPDATES).map((item, i) => expandUpdate(item, id, i));
-  const events = (spec.events ?? DEFAULT_EVENTS).map((item) => expandEvent(item, id));
+  if (spec.format === '1.0.46' && isResume) {
+    updates.unshift(expandUpdate({ method: '_x.ai/session/update', params: { update: { sessionUpdate: 'background_tasks', tasks: [] } } }, id, 0));
+  }
+  const events = (spec.events ?? DEFAULT_EVENTS).map((item) => expandEvent(item, id, spec.format));
   const tools = spec.tools ?? DEFAULT_TOOLS;
   const updatesPath = path.join(dir, 'updates.jsonl');
   const eventsPath = path.join(dir, 'events.jsonl');

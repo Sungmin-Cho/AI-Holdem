@@ -1549,6 +1549,63 @@ test('probe(claude): hook 이벤트·비어 있지 않은 init.hooks·init 부�
   }
 });
 
+test('#280 probe(claude): init이 여럿이면 전부 검사한다 — 뒤 init에만 실린 도구·MCP·플러그인·hook도 플레이어·상위 모두 탈락', async () => {
+  const { file } = canary();
+  const clean = { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: [] };
+  const result = { type: 'result', subtype: 'success', result: '접근할 수 없어 거부합니다.' };
+  const dirty = [
+    ['plugins', { plugins: [{ name: 'x', path: 'builtin' }] }],
+    ['tools', { tools: ['Read'] }],
+    ['mcp_servers', { mcp_servers: [{ name: 'some-mcp' }] }],
+    ['hooks', { hooks: { PreToolUse: [{ command: 'x' }] } }],
+  ];
+  for (const [label, extra] of dirty) {
+    const stream = jsonl(clean, { ...clean, ...extra }, result);
+    const player = fakeRuntime('claude', { default: { reply: stream } });
+    try {
+      const res = await player.rt.probe({ canaryAbsPath: file });
+      assert.equal(res.containment, false, `player: 두 번째 init의 ${label}`);
+    } finally {
+      player.cleanup();
+    }
+    // 상위 probe는 왕복과 카나리 호출을 따로 감사한다 — 어느 쪽 스트림이든 같은 규칙이다.
+    for (const where of ['roundtrip', 'canary']) {
+      const upper = fakeRuntime('claude', {
+        matchers: [{ includes: '다음 파일을 읽어', reply: where === 'canary' ? stream : jsonl(clean, result) }],
+        default: { reply: where === 'roundtrip' ? stream : jsonl(clean, { ...result, result: 'ok' }) },
+      });
+      try {
+        const res = await upper.rt.probe({ upper: true, canaryAbsPath: file });
+        assert.equal(res.upper, false, `upper ${where}: 두 번째 init의 ${label}`);
+        assert.equal(res.containment, false);
+        assert.equal(res.notice, '컨테인먼트 실패(claude/opus): 도구·MCP·플러그인 표면이 비어 있지 않습니다.');
+      } finally {
+        upper.cleanup();
+      }
+    }
+  }
+
+  // 깨끗한 init이 둘이면 표면은 여전히 비어 있다. 다만 init끼리 모델이 다르면 서빙 id를 기록하지 않는다.
+  const twoClean = fakeRuntime('claude', {
+    default: { reply: jsonl({ ...clean, model: 'claude-sonnet-5-5' }, { ...clean, model: 'claude-opus-5-5' }, result) },
+  });
+  try {
+    assert.equal((await twoClean.rt.probe({ canaryAbsPath: file })).containment, true);
+    assert.equal(twoClean.rt.models.player, 'sonnet', '어느 init의 모델이 서빙했는지 모른다');
+  } finally {
+    twoClean.cleanup();
+  }
+  const sameModel = fakeRuntime('claude', {
+    default: { reply: jsonl({ ...clean, model: 'claude-sonnet-5-5' }, { ...clean, model: 'claude-sonnet-5-5' }, result) },
+  });
+  try {
+    assert.equal((await sameModel.rt.probe({ canaryAbsPath: file })).containment, true);
+    assert.equal(sameModel.rt.models.player, 'claude-sonnet-5-5');
+  } finally {
+    sameModel.cleanup();
+  }
+});
+
 test('terminate: done 거부는 종료 증거가 아니다 — close 미확정이면 pid가 살아 있든 죽든 confirmed false', async () => {
   const kills = [];
   const handles = [];
@@ -2334,6 +2391,101 @@ test('#195 S2: 세션 감사 판정 순서와 도구 표면', (t) => {
   ];
   write(cleanUpdates, allowEvents, readFile);
   assert.equal(grokSessionAudit({ home, cwd, sessionId, turns: 1 }).code, 'GROK_SESSION_TOOL');
+});
+
+// grok 1.0.46 실측 기록(2026-10-13, grok-4.7 player probe의 첫 턴 + resume). session_id는 turn_started
+// 줄에만 있고, resume은 updates.jsonl에 빈 background_tasks 줄을 남긴다. 세션 id·경로만 바꿨다.
+const GROK_1046_FIXTURE = fileURLToPath(new URL('./fixtures/grok-1.0.46-session/', import.meta.url));
+
+test('#282: grok 1.0.46 실측 세션 기록은 첫 턴과 resume 모두 감사를 통과하고, 구조로 묶은 세션 일치는 그대로 지킨다', (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const home = shortTmp('sess');
+  const cwd = shortTmp('cwd');
+  const sessionId = '22222222-2222-2222-2222-222222222222';
+  const dir = path.join(home, '.grok', 'sessions', encodeURIComponent(fs.realpathSync(cwd)), sessionId);
+  fs.mkdirSync(dir, { recursive: true });
+  const load = (name) => fs.readFileSync(path.join(GROK_1046_FIXTURE, name), 'utf8').replaceAll('__SESSION_ID__', sessionId)
+    .split('\n').filter((line) => line.trim() !== '').map((line) => JSON.parse(line));
+  const events = load('events.jsonl');
+  const updates = load('updates.jsonl');
+  fs.copyFileSync(path.join(GROK_1046_FIXTURE, 'tool_definitions.json'), path.join(dir, 'tool_definitions.json'));
+  const write = (u, e) => {
+    fs.writeFileSync(path.join(dir, 'updates.jsonl'), u.map((row) => JSON.stringify(row)).join('\n') + '\n');
+    fs.writeFileSync(path.join(dir, 'events.jsonl'), e.map((row) => JSON.stringify(row)).join('\n') + '\n');
+  };
+  const audit = (turns) => grokSessionAudit({ home, cwd, sessionId, turns });
+  // 실측 형태 그 자체를 고정한다: session_id는 turn_started 두 줄에만, background_tasks는 resume 쪽에만.
+  assert.deepEqual(events.filter((row) => Object.hasOwn(row, 'session_id')).map((row) => row.type), ['turn_started', 'turn_started']);
+  assert.ok(events.length > 100);
+  const firstEnded = events.findIndex((row) => row.type === 'turn_ended');
+  const firstCompleted = updates.findIndex((row) => row.params.update.sessionUpdate === 'turn_completed');
+  assert.equal(updates[firstCompleted + 1].params.update.sessionUpdate, 'background_tasks');
+  assert.deepEqual(updates[firstCompleted + 1].params.update.tasks, []);
+
+  write(updates.slice(0, firstCompleted + 1), events.slice(0, firstEnded + 1));
+  assert.deepEqual(audit(1), { ok: true }, '첫 턴(플레이어 probe·상위 probe의 각 호출)');
+  write(updates, events);
+  assert.deepEqual(audit(2), { ok: true }, 'resume까지(플레이어 probe의 두 번째 감사)');
+
+  const mutated = (edit) => { const copy = structuredClone(events); edit(copy); return copy; };
+  const turnStarts = events.flatMap((row, i) => (row.type === 'turn_started' ? [i] : []));
+  const cases = [
+    ['첫 줄이 turn_started가 아니다', mutated((rows) => { rows.unshift({ type: 'loop_started', loop_index: 0 }); })],
+    ['첫 turn_started가 다른 세션', mutated((rows) => { rows[turnStarts[0]].session_id = '33333333-3333-3333-3333-333333333333'; })],
+    ['두 번째 turn_started가 다른 세션', mutated((rows) => { rows[turnStarts[1]].session_id = '33333333-3333-3333-3333-333333333333'; })],
+    ['turn_started에 session_id가 없다', mutated((rows) => { delete rows[turnStarts[1]].session_id; })],
+    ['다른 줄의 session_id가 다른 세션', mutated((rows) => { rows.find((row) => row.type === 'first_token').session_id = '33333333-3333-3333-3333-333333333333'; })],
+    ['다른 줄의 session_id가 null', mutated((rows) => { rows.find((row) => row.type === 'turn_ended').session_id = null; })],
+  ];
+  for (const [label, rows] of cases) {
+    write(updates, rows);
+    assert.equal(audit(2).code, 'GROK_SESSION_INCOMPLETE', label);
+  }
+  write(updates, events);
+  assert.equal(audit(1).code, 'GROK_SESSION_INCOMPLETE', '두 턴 기록을 한 턴으로 감사하면 계수에서 탈락한다');
+  const lastEnded = events.findLastIndex((row) => row.type === 'turn_ended');
+  write(updates, mutated((rows) => { rows.splice(lastEnded, 0, { type: 'tool_completed', tool_name: 'read_file' }); }));
+  assert.equal(audit(2).code, 'GROK_SESSION_TOOL', 'session_id가 없는 줄도 종류로 감사한다');
+  for (const odd of [null, 42, 'turn_started', ['turn_started']]) {
+    write(updates, [...events.slice(0, 3), odd, ...events.slice(3)]);
+    assert.equal(audit(2).code, 'GROK_SESSION_UNKNOWN_EVENT', `events.jsonl의 객체가 아닌 줄 ${JSON.stringify(odd)}`);
+    write([...updates.slice(0, 3), odd, ...updates.slice(3)], events);
+    assert.equal(audit(2).code, 'GROK_SESSION_UNKNOWN_EVENT', `updates.jsonl의 객체가 아닌 줄 ${JSON.stringify(odd)}`);
+  }
+  write(updates, [null, ...events]);
+  assert.equal(audit(2).code, 'GROK_SESSION_UNKNOWN_EVENT', '첫 줄이 객체가 아니면 알 수 없는 이벤트가 불완전보다 먼저다');
+
+  const withTasks = (tasks) => updates.map((row, i) => (i === firstCompleted + 1
+    ? { ...row, params: { ...row.params, update: { ...row.params.update, tasks } } } : row));
+  write(withTasks([{ id: 'bg-1', command: 'sleep 60' }]), events);
+  assert.equal(audit(2).code, 'GROK_SESSION_TOOL', '백그라운드 작업이 하나라도 있으면 도구가 돈 것이다');
+  for (const tasks of [undefined, null, {}, 'none', 0]) {
+    write(withTasks(tasks), events);
+    assert.equal(audit(2).code, 'GROK_SESSION_UNKNOWN_EVENT', `목록 형식을 모르면 판단하지 않는다: ${JSON.stringify(tasks)}`);
+  }
+  // 개수·위치는 따지지 않는다: 빈 목록은 그 자체로 의미가 확정된 값이다(운영 문서와 같은 규칙).
+  write([...updates.slice(0, firstCompleted + 1), updates[firstCompleted + 1]], events.slice(0, firstEnded + 1));
+  assert.deepEqual(audit(1), { ok: true }, '한 턴 기록 뒤의 빈 background_tasks');
+  write([updates[firstCompleted + 1], ...updates, updates[firstCompleted + 1]], events);
+  assert.deepEqual(audit(2), { ok: true }, '빈 background_tasks 여러 줄');
+  write(updates.map((row) => ({ ...row, params: { ...row.params, sessionId: row.params.update.sessionUpdate === 'background_tasks' ? 'x' : sessionId } })), events);
+  assert.equal(audit(2).code, 'GROK_SESSION_INCOMPLETE', 'updates.jsonl은 지금처럼 모든 줄이 세션 id를 싣는다');
+});
+
+test('#282: grok 1.0.46 기록 형식으로도 플레이어 probe(첫 턴 + resume)와 상위 probe가 컨테인먼트를 통과한다', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const f = verifiedGrokRuntime({ default: { reply: '접근할 수 없어 거부합니다.', grokSession: { format: '1.0.46' } } });
+  try {
+    const player = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(player.containment, true, JSON.stringify(player));
+    assert.equal(f.calls().some((c) => c.argv.includes('--resume')), true, 'resume 왕복까지 감사했다');
+    const upper = await f.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(upper.upper, true, JSON.stringify(upper));
+    assert.equal(upper.containment, true);
+  } finally {
+    f.cleanup();
+  }
 });
 
 test('#195 S2: probeUpper 도구 표면 실패 notice 문면', async (t) => {
