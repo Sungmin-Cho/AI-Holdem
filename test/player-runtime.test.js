@@ -2431,6 +2431,7 @@ test('#282: grok 1.0.46 실측 세션 기록은 첫 턴과 resume 모두 감사�
   const turnStarts = events.flatMap((row, i) => (row.type === 'turn_started' ? [i] : []));
   const cases = [
     ['첫 줄이 turn_started가 아니다', mutated((rows) => { rows.unshift({ type: 'loop_started', loop_index: 0 }); })],
+    ['첫 turn_started가 다른 세션', mutated((rows) => { rows[turnStarts[0]].session_id = '33333333-3333-3333-3333-333333333333'; })],
     ['두 번째 turn_started가 다른 세션', mutated((rows) => { rows[turnStarts[1]].session_id = '33333333-3333-3333-3333-333333333333'; })],
     ['turn_started에 session_id가 없다', mutated((rows) => { delete rows[turnStarts[1]].session_id; })],
     ['다른 줄의 session_id가 다른 세션', mutated((rows) => { rows.find((row) => row.type === 'first_token').session_id = '33333333-3333-3333-3333-333333333333'; })],
@@ -2440,13 +2441,29 @@ test('#282: grok 1.0.46 실측 세션 기록은 첫 턴과 resume 모두 감사�
     write(updates, rows);
     assert.equal(audit(2).code, 'GROK_SESSION_INCOMPLETE', label);
   }
+  write(updates, events);
+  assert.equal(audit(1).code, 'GROK_SESSION_INCOMPLETE', '두 턴 기록을 한 턴으로 감사하면 계수에서 탈락한다');
+  const lastEnded = events.findLastIndex((row) => row.type === 'turn_ended');
+  write(updates, mutated((rows) => { rows.splice(lastEnded, 0, { type: 'tool_completed', tool_name: 'read_file' }); }));
+  assert.equal(audit(2).code, 'GROK_SESSION_TOOL', 'session_id가 없는 줄도 종류로 감사한다');
+  for (const odd of [null, 42, 'turn_started', ['turn_started']]) {
+    fs.writeFileSync(path.join(dir, 'events.jsonl'), [...events.slice(0, 3), odd, ...events.slice(3)].map((row) => JSON.stringify(row)).join('\n') + '\n');
+    assert.equal(audit(2).code, 'GROK_SESSION_UNKNOWN_EVENT', `객체가 아닌 줄 ${JSON.stringify(odd)}`);
+  }
 
   const withTasks = (tasks) => updates.map((row, i) => (i === firstCompleted + 1
     ? { ...row, params: { ...row.params, update: { ...row.params.update, tasks } } } : row));
   write(withTasks([{ id: 'bg-1', command: 'sleep 60' }]), events);
   assert.equal(audit(2).code, 'GROK_SESSION_TOOL', '백그라운드 작업이 하나라도 있으면 도구가 돈 것이다');
-  write(withTasks(undefined), events);
-  assert.equal(audit(2).code, 'GROK_SESSION_UNKNOWN_EVENT', '목록 형식을 모르면 판단하지 않는다');
+  for (const tasks of [undefined, null, {}, 'none', 0]) {
+    write(withTasks(tasks), events);
+    assert.equal(audit(2).code, 'GROK_SESSION_UNKNOWN_EVENT', `목록 형식을 모르면 판단하지 않는다: ${JSON.stringify(tasks)}`);
+  }
+  // 개수·위치는 따지지 않는다: 빈 목록은 그 자체로 의미가 확정된 값이다(운영 문서와 같은 규칙).
+  write([...updates.slice(0, firstCompleted + 1), updates[firstCompleted + 1]], events.slice(0, firstEnded + 1));
+  assert.deepEqual(audit(1), { ok: true }, '한 턴 기록 뒤의 빈 background_tasks');
+  write([updates[firstCompleted + 1], ...updates, updates[firstCompleted + 1]], events);
+  assert.deepEqual(audit(2), { ok: true }, '빈 background_tasks 여러 줄');
   write(updates.map((row) => ({ ...row, params: { ...row.params, sessionId: row.params.update.sessionUpdate === 'background_tasks' ? 'x' : sessionId } })), events);
   assert.equal(audit(2).code, 'GROK_SESSION_INCOMPLETE', 'updates.jsonl은 지금처럼 모든 줄이 세션 id를 싣는다');
 });
