@@ -31,6 +31,7 @@ export const requiredJourneyChecks = [
   "abort-summary",
   "final-overlay-ended",
   "completed-review-reload",
+  "finished-landing-lobby",
   "command-reconnect",
   "study-paused-roundtrip",
   "keyboard-mobile",
@@ -355,8 +356,23 @@ export async function runLobbyJourney(outDir) {
         "document.querySelector('#table').contentDocument.querySelector('#action-status')?.textContent==='종료된 게임 기록입니다.'",
       ),
     );
+    // A page opened on a finished game lands on the lobby (#286); the result
+    // card and its record are one click away.
     await browser(["reload"]);
     await state("completed");
+    await wait(() =>
+      evaluate(
+        "!document.querySelector('#setup').hidden && document.querySelector('#result').hidden && document.querySelector('#game').hidden && !document.querySelector('#table').getAttribute('src') && document.querySelector('#back').textContent==='직전 게임 결과 보기'",
+      ),
+    );
+    check("finished-landing-lobby");
+    await browser(["screenshot", path.join(outDir, "finished-landing.png")]);
+    await click("#back");
+    await wait(() =>
+      evaluate(
+        "!document.querySelector('#result').hidden && document.querySelector('#setup').hidden && /terminal=1/.test(document.querySelector('#table').getAttribute('src') ?? '')",
+      ),
+    );
     await click("#review");
     await wait(()=>evaluate("document.querySelector('#table').contentDocument.querySelector('#review-close')!==null"));
     assert.equal(await evaluate("document.querySelector('#table').inert"),false);
