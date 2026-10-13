@@ -115,3 +115,13 @@ test('an identifier never excuses a frequency or a size claim', async () => {
   assert.equal(validateExplanation(evaluation, '100BB 깊이에서 22는 레이즈 2.5BB가 주력입니다.').ok, true);
   assert.equal(validateExplanation(evaluation, '6인 100BB에서 22는 레이즈 100%입니다.').ok, true);
 });
+
+test('explanationCall: 학습 설명은 상위 tier를 20초 예산·모델 기본 추론 강도로 부른다', () => {
+  const call = pipeline.explanationCall(supported);
+  assert.deepEqual(Object.keys(call).sort(), ['prompt', 'reasoning', 'tier', 'timeoutMs']);
+  assert.equal(call.tier, 'upper');
+  assert.equal(call.timeoutMs, 20_000);
+  assert.equal(call.timeoutMs, pipeline.EXPLANATION_TIMEOUT_MS);
+  assert.equal(call.reasoning, 'model-default');
+  assert.equal(call.prompt, pipeline.buildExplanationPrompt(supported));
+});

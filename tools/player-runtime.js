@@ -35,11 +35,14 @@ export { provisionRuntimeHome, verifyRuntimeHome } from './runtime-home.js';
 // `player`/`upper`는 폴백 고정값이다. claude는 별칭이라 CLI가 매번 최신으로 풀고, codex·grok은
 // 어댑터가 첫 probe 직전에 CLI 카탈로그에서 `LATEST_MODEL_RULES` 계열의 최신 id를 찾는다.
 // 카탈로그를 못 읽거나 그 id의 왕복이 실패할 때만 아래 값을 쓴다.
+// `upperArgs`는 상위 tier(코치·evaluator·종합자)의 probe-upper·oneshot에만 실린다. codex는
+// `--ignore-user-config`라 effort를 주지 않으면 CLI가 `reasoning effort: none`(모델 기본값)으로 부른다 —
+// 상위 tier는 medium으로 고정한다(2026-10-13 사용자 결정, codex-cli 0.162.1에서 배너로 적용 확인).
 export const RUNTIME_TABLE = {
-  claude: { player: 'sonnet', playerArgs: ['--effort', 'medium'], upper: 'opus', watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
-  codex: { player: 'gpt-6-luna', playerArgs: [], upper: 'gpt-6.1-sol', watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
+  claude: { player: 'sonnet', playerArgs: ['--effort', 'medium'], upper: 'opus', upperArgs: [], watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
+  codex: { player: 'gpt-6-luna', playerArgs: [], upper: 'gpt-6.1-sol', upperArgs: ['-c', 'model_reasoning_effort="medium"'], watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
   // Task 0: low effort 핀이 실패했다(기본 effort 유지) → 스펙 D8의 60s/30s를 그대로 쓴다.
-  grok: { player: 'grok-4.7', playerArgs: [], upper: 'grok-4.7', watchdog: { t1Ms: 60_000, t2Ms: 30_000 } },
+  grok: { player: 'grok-4.7', playerArgs: [], upper: 'grok-4.7', upperArgs: [], watchdog: { t1Ms: 60_000, t2Ms: 30_000 } },
 };
 
 // 카탈로그에서 찾을 계열. claude는 별칭(`sonnet`·`opus`)이 이미 최신으로 풀리므로 카탈로그를 부르지 않는다.
@@ -214,7 +217,8 @@ const RUNTIMES = {
     command: 'codex',
     newSessionId: () => null, // thread id는 첫 --json 스트림에서 캡처한다
     captureSession: (stdout) => codexThreadId(stdout),
-    spec(purpose, model, sessionId) {
+    // modelArgs는 `-c key=value` 전역 설정 덮어쓰기라 `exec` 앞(no-tool prefix 뒤)에 싣는다.
+    spec(purpose, model, sessionId, modelArgs = []) {
       switch (purpose) {
         case 'catalog':
           // 계정 범위 모델 카탈로그(JSON). refresh가 실패하면 CLI 번들 카탈로그로 떨어진다.
@@ -228,13 +232,13 @@ const RUNTIMES = {
           // 1에서 명시 불변식 — 파싱 가능한 **최종** `agent_message.text`가 있어야 정상
           // 응답 — 쪽으로 의도적으로 해소했다. plain 통과형 재검증은 실기 스모크로.
           return {
-            args: [...CODEX_NO_TOOL_PREFIX, 'exec', '--ignore-user-config', '-m', model, ...CODEX_SANDBOX, '--skip-git-repo-check', '--json', '-'],
+            args: [...CODEX_NO_TOOL_PREFIX, ...modelArgs, 'exec', '--ignore-user-config', '-m', model, ...CODEX_SANDBOX, '--skip-git-repo-check', '--json', '-'],
             format: 'codex-jsonl',
           };
         case 'resume':
           // 0.150.1 실측 순서: 전역 옵션 → `exec resume` → resume parser 옵션 → id → `-`.
           return {
-            args: [...CODEX_NO_TOOL_PREFIX, '-m', model, ...CODEX_SANDBOX,
+            args: [...CODEX_NO_TOOL_PREFIX, ...modelArgs, '-m', model, ...CODEX_SANDBOX,
               'exec', 'resume', '--ignore-user-config', '--json', '--skip-git-repo-check', sessionId, '-'],
             format: 'codex-jsonl',
           };
@@ -1248,7 +1252,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       let upperServed = null;
       let round;
       try {
-        round = await runOnce({ purpose: 'probe-upper', model, input: UPPER_PROBE_PROMPT, timeoutMs });
+        round = await runOnce({ purpose: 'probe-upper', model, modelArgs: table.upperArgs, input: UPPER_PROBE_PROMPT, timeoutMs });
       } catch (error) {
         verification.upper = false;
         return {
@@ -1293,7 +1297,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       }
       let result;
       try {
-        result = await runOnce({ purpose: 'probe-upper', model, input: canaryPrompt(canary.file, kind), timeoutMs });
+        result = await runOnce({ purpose: 'probe-upper', model, modelArgs: table.upperArgs, input: canaryPrompt(canary.file, kind), timeoutMs });
       } catch (error) {
         verification.upper = false;
         return {
@@ -1575,14 +1579,18 @@ export function createPlayerRuntime(kind, opts = {}) {
      * 호출자가 즉시 bind-handle할 수 있다. `done`은 **절대 자식을 죽이지 않는다** —
      * 타임아웃이면 reject만 하고, 종료는 호출자가 `terminate()`로 한다.
      */
-    oneshotStart({ tier = 'upper', prompt, timeoutMs = ONESHOT_TIMEOUT_MS }) {
+    // reasoning: 'tier'면 그 tier의 인자(상위는 upperArgs), 'model-default'면 추론 강도를 싣지 않고
+    // 모델 기본값을 쓴다 — 예산이 짧은 호출(학습 설명 20초)용이다. 닫힌 값만 받는다.
+    oneshotStart({ tier = 'upper', prompt, timeoutMs = ONESHOT_TIMEOUT_MS, reasoning = 'tier' }) {
       if (tier !== 'player' && tier !== 'upper') throw runtimeError('BAD_TIER', `BAD_TIER: ${tier}`);
+      if (reasoning !== 'tier' && reasoning !== 'model-default') throw runtimeError('BAD_REASONING', `BAD_REASONING: ${reasoning}`);
       if (kind === 'grok') {
         ensureGrokHome();
         assertGrokVerified(tier);
       }
       const model = models[tier];
-      const { handle, format } = start({ purpose: 'oneshot', model, modelArgs: tier === 'player' ? table.playerArgs : [], input: prompt });
+      const tierArgs = tier === 'player' ? table.playerArgs : table.upperArgs;
+      const { handle, format } = start({ purpose: 'oneshot', model, modelArgs: reasoning === 'model-default' ? [] : tierArgs, input: prompt });
       const pid = handle.pid ?? null;
       const startTime = pid === null ? null : (startTimeOf(pid) ?? null);
       // `closed`는 자식 lifecycle의 close(전 stdio 닫힘 + exit)가 실제로 관찰됐을 때만
