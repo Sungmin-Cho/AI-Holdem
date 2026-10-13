@@ -2447,9 +2447,13 @@ test('#282: grok 1.0.46 실측 세션 기록은 첫 턴과 resume 모두 감사�
   write(updates, mutated((rows) => { rows.splice(lastEnded, 0, { type: 'tool_completed', tool_name: 'read_file' }); }));
   assert.equal(audit(2).code, 'GROK_SESSION_TOOL', 'session_id가 없는 줄도 종류로 감사한다');
   for (const odd of [null, 42, 'turn_started', ['turn_started']]) {
-    fs.writeFileSync(path.join(dir, 'events.jsonl'), [...events.slice(0, 3), odd, ...events.slice(3)].map((row) => JSON.stringify(row)).join('\n') + '\n');
-    assert.equal(audit(2).code, 'GROK_SESSION_UNKNOWN_EVENT', `객체가 아닌 줄 ${JSON.stringify(odd)}`);
+    write(updates, [...events.slice(0, 3), odd, ...events.slice(3)]);
+    assert.equal(audit(2).code, 'GROK_SESSION_UNKNOWN_EVENT', `events.jsonl의 객체가 아닌 줄 ${JSON.stringify(odd)}`);
+    write([...updates.slice(0, 3), odd, ...updates.slice(3)], events);
+    assert.equal(audit(2).code, 'GROK_SESSION_UNKNOWN_EVENT', `updates.jsonl의 객체가 아닌 줄 ${JSON.stringify(odd)}`);
   }
+  write(updates, [null, ...events]);
+  assert.equal(audit(2).code, 'GROK_SESSION_UNKNOWN_EVENT', '첫 줄이 객체가 아니면 알 수 없는 이벤트가 불완전보다 먼저다');
 
   const withTasks = (tasks) => updates.map((row, i) => (i === firstCompleted + 1
     ? { ...row, params: { ...row.params, update: { ...row.params.update, tasks } } } : row));
