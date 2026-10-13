@@ -451,4 +451,12 @@ test('#286 a stored command recovered before any snapshot keeps the screen it se
  first.answers.push({state:'ended',gameId:'one',gameEpoch:'epoch',allowedCommands:['start','restart']});
  await first.context.recoverCommand();
  assert.equal(first.context.selecting,false);assert.equal(first.view().result,true);
+ // A recovery that settled before its own refresh failed: the next poll's ended snapshot shows the result.
+ const late=lobbyLanding();
+ late.answers.push(new Error('offline'));await assert.rejects(late.context.refresh(),/offline/);
+ late.store({requestId:'r3',kind:'end',expectedGameId:'one'});
+ late.answers.push(new Error('offline'));await late.context.recoverCommand();
+ assert.equal(late.context.selecting,false);
+ await late.poll('ended');
+ assert.equal(late.context.selecting,false);assert.equal(late.view().result,true);assert.equal(late.view().setup,false);
 });
