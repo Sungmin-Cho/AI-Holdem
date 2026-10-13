@@ -926,6 +926,10 @@ async function recoverCommand() {
     await commands.recover();
     settled = true;
     if (stored?.kind === "pause" && pauseLock) pauseLock = { ...pauseLock, settledSeq: refreshSeq };
+    // The settled command picks the screen, even when no snapshot was applied
+    // before it (a receipt that already reads settled polls nothing): the
+    // landing decision (#286) must not send its result back to the lobby.
+    landingDecided = true;
     selecting = false;
     $("error").textContent = "";
     await refresh();

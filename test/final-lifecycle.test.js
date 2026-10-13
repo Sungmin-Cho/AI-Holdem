@@ -338,22 +338,26 @@ test('#274 the result panel explains the recovery outcomes (binding, attempt syn
  assert.match(odd,/처음 멈춘 이유: 다시 보내려던 게시 기록/);
 });
 
-// #286: the actual refresh, render, chooseMode and back handler, run together, so
-// the landing decision is checked on the snapshots a page load really applies.
+// #286: the actual refresh, render, chooseMode, back handler and command recovery,
+// run together, so the landing decision is checked on the snapshots a page load
+// really applies.
 function lobbyLanding(){
  const dom=elements(),source=fs.readFileSync(new URL('../server/public/lobby.js',import.meta.url),'utf8');
- const answers=[];let opened=0,focused=null;
+ const answers=[];let opened=0,focused=null,stored=null;
  const context={...dom,URLSearchParams,snapshot:null,selecting:false,viewingRecord:false,frameId:null,busy:false,interruptBusy:false,pauseLock:null,rejoinFor:null,labels:{},errorMessages:{},appliedDefaults:true,form:{},
+  showError(){},openPauseMenu(){},
+  // A stored command whose receipt already reads succeeded settles without polling.
+  commands:{get pending(){return !!stored;},get pendingCommand(){return stored;},recover:async()=>{stored=null;return {status:'succeeded'};}},
   api:async()=>{const next=answers.shift();if(next instanceof Error)throw next;return next;}};
  vm.createContext(context);
  const between=(from,to)=>source.slice(source.indexOf(from),source.indexOf(to));
- vm.runInContext(between('function render()','const BOOT_ORDER')+between('function chooseMode()',"$('interrupt-decision').onclick")+between('$("back").onclick','form.onchange = () =>'),context);
+ vm.runInContext(between('function render()','const BOOT_ORDER')+between('function storedPause(','async function command(')+between('function chooseMode()',"$('interrupt-decision').onclick")+between('$("back").onclick','form.onchange = () =>')+between('async function recoverCommand()','async function roomOp('),context);
  dom.$('pause-dialog').showModal=()=>{opened+=1;};
  dom.$('review').focus=()=>{focused='review';};
  dom.$('ai-count').focus=()=>{};
  const poll=async(state,extra={})=>{answers.push({state,gameId:'one',gameEpoch:'epoch',allowedCommands:['start','restart'],...extra});await context.refresh();};
  const view=()=>({setup:!dom.$('setup').hidden,result:!dom.$('result').hidden,game:!dom.$('game').hidden,back:!dom.$('back').hidden,src:dom.$('table').getAttribute('src')});
- return {dom,context,answers,poll,view,opened:()=>opened,focused:()=>focused};
+ return {dom,context,answers,poll,view,opened:()=>opened,focused:()=>focused,store:command=>{stored=command;}};
 }
 test('#286 a page opened on a finished game lands on the lobby with the record detached', async () => {
  for(const state of ['completed','ended']){
@@ -428,4 +432,23 @@ test('#286 a paused game keeps its "back" wording and returns to the pause menu'
  dom.$('back').onclick();
  assert.equal(context.selecting,false);assert.equal(opened(),1);assert.equal(focused(),null);
  assert.deepEqual({setup:view().setup,game:view().game,result:view().result},{setup:false,game:true,result:false});
+});
+test('#286 a stored command recovered before any snapshot keeps the screen it settles on', async () => {
+ const {context,answers,view,store}=lobbyLanding();
+ // The page load's first refresh fails, then a stored 게임 종료 settles at once.
+ answers.push(new Error('offline'));await assert.rejects(context.refresh(),/offline/);
+ store({requestId:'r1',kind:'end',expectedGameId:'one'});
+ answers.push({state:'ended',gameId:'one',gameEpoch:'epoch',allowedCommands:['start','restart']});
+ await context.recoverCommand();
+ assert.equal(context.selecting,false,'the ended snapshot after the recovery does not land on the lobby');
+ const shown=view();
+ assert.deepEqual({...shown,src:undefined},{setup:false,result:true,game:true,back:false,src:undefined});
+ assert.match(shown.src,/terminal=1/);
+ // With a snapshot applied first, the recovery already wins over a landing decision.
+ const first=lobbyLanding();
+ await first.poll('ended');assert.equal(first.context.selecting,true);
+ first.store({requestId:'r2',kind:'end',expectedGameId:'one'});
+ first.answers.push({state:'ended',gameId:'one',gameEpoch:'epoch',allowedCommands:['start','restart']});
+ await first.context.recoverCommand();
+ assert.equal(first.context.selecting,false);assert.equal(first.view().result,true);
 });
