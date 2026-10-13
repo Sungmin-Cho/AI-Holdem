@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { G5_BANDS, NUT_RAISE_MIN_OPPORTUNITIES, gateFailures, measureExploits, measureTendencies } from '../tools/simulate-policies.js';
+import { G5_BANDS, NUT_RAISE_MIN_OPPORTUNITIES, gateFailures, measureExploits, measureTendencies, personaAgent, playTable } from '../tools/simulate-policies.js';
 
 // Reduced, deterministic versions of the slow gates (design G5/G6). The full
 // gate is `node tools/simulate-policies.js --tendencies --exploit-sim --assert`
@@ -18,6 +18,15 @@ test('G5 nut raise is judged only on a sample that can carry an 80% rate', () =>
   assert.deepEqual(gateFailures({ tendencies: { ...base, nutRaise: { ...few, rate: 100 * few.raises / few.opportunities } } }), []);
   const enough = { opportunities: NUT_RAISE_MIN_OPPORTUNITIES, raises: NUT_RAISE_MIN_OPPORTUNITIES / 2 };
   assert.deepEqual(gateFailures({ tendencies: { ...base, nutRaise: { ...enough, rate: 50 } } }), ['G5 nut raise 50.0 below 80']);
+});
+
+test('the measurements are deterministic for a seed: the first button is drawn from the seed, not the engine default (#281)', () => {
+  const agents = Object.fromEntries(['user', 'p1', 'p2', 'p3', 'p4', 'p5'].map((id) => [id, personaAgent('TAG')]));
+  const buttons = new Set(['a', 'b', 'c', 'd', 'e', 'f'].map((seed) => playTable({ hands: 1, agents, seed }).state.lastHand.button));
+  assert.ok(buttons.size > 1, 'different seeds still start from different seats');
+  for (let n = 0; n < 5; n += 1) assert.equal(playTable({ hands: 1, agents, seed: 'a' }).state.lastHand.button, playTable({ hands: 1, agents, seed: 'a' }).state.lastHand.button);
+  const run = () => measureExploits({ hands: 200, seed: 'det-check', strategies: ['bet-when-checked'] });
+  assert.deepEqual(run(), run());
 });
 
 test('G6 reduced: degenerate strategies do not beat the lobby tables', { timeout: 600_000 }, () => {

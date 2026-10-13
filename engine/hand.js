@@ -73,6 +73,7 @@ export function createGame({
   dealBias,
   participants,
   hostName,
+  button,
 } = {}) {
   const resolvedMode = mode ?? 'tournament';
   if (dealBias !== undefined && !DEAL_BIAS_MODES.includes(dealBias)) throwBadConfig('dealBias는 off/light/strong이어야 합니다.');
@@ -140,6 +141,10 @@ export function createGame({
   }
   const stats = {};
   for (const seat of seats) stats[seat.playerId] = emptyStats();
+  // 시뮬레이션처럼 결정적이어야 하는 호출자만 첫 버튼 좌석을 넘긴다. 없으면 무작위다.
+  if (button != null && (!Number.isInteger(button) || button < 0 || button >= seats.length)) {
+    throwBadConfig('button은 좌석 번호여야 합니다.');
+  }
 
   const resolvedShowdown = showdownPolicy ?? 'standard';
   if (resolvedShowdown !== 'open' && resolvedShowdown !== 'standard') {
@@ -178,7 +183,7 @@ export function createGame({
     level: 0,
     handNo: 0,
     phase: 'idle',
-    button: randomInt(seats.length),
+    button: button ?? randomInt(seats.length),
     seats,
     hand: null,
     lastHand: null,

@@ -1182,7 +1182,10 @@ test('race with a changed context: outstanding retirement evidence blocks the al
     }
   };
   const options = { executePublish: record, trainingControl: f.tc, relayBinding: () => relayBinding(f.dir) };
-  const a = pipeline.retireRejectedAnnotationAttempt(f.dir, { ...options, verifyRelay: async () => { aReady = true; await gateA; } });
+  // Set once A's queue settlement has joined the training lock's in-process queue (behind the holder).
+  let aQueued = false;
+  const aControl = { ...f.tc, retireRejectedAnnotations: (...args) => { const settling = f.tc.retireRejectedAnnotations(...args); aQueued = true; return settling; } };
+  const a = pipeline.retireRejectedAnnotationAttempt(f.dir, { ...options, trainingControl: aControl, verifyRelay: async () => { aReady = true; await gateA; } });
   const b = pipeline.flushAnnotationPublish(f.dir, {
     gameEpoch: EPOCH, trainingControl: f.tc,
     executePublish: async (args) => {
@@ -1200,6 +1203,9 @@ test('race with a changed context: outstanding retirement evidence blocks the al
   await until(() => holdReady, 'holder');
   allowA();
   await until(() => fs.existsSync(evidenceFile(f.dir)) && !fs.existsSync(attemptFile(f.dir)), 'A retired on evidence');
+  // The files change before A's publisher exits, and that exit can lag (#281): A's settlement
+  // must be queued first, or the other flush's settlement may consume A's evidence before it.
+  await until(() => aQueued, 'A settlement queued behind the holder');
   // The context changes: the card A's text names is no longer private (archived hands are
   // public under the new-game defaults; the live hand released it). A fresh judgement of A
   // would now be an acceptance.
