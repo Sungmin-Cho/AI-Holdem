@@ -401,22 +401,28 @@ function isEmptyContainer(value) {
   return false;
 }
 
+function claudeInitSurfaceEmpty(init) {
+  return Array.isArray(init?.tools) && init.tools.length === 0
+    && Array.isArray(init.mcp_servers) && init.mcp_servers.length === 0
+    && Array.isArray(init.plugins) && init.plugins.length === 0
+    && (init.hooks === undefined || isEmptyContainer(init.hooks));
+}
+
 // Claude stream 컨테인먼트: init의 도구·MCP·플러그인 목록이 **빈 배열**이고, 전체 이벤트에
-// tool_use와 hook이 0이어야 한다. init이 아예 없으면 검증 불가 → fail-closed.
+// tool_use와 hook이 0이어야 한다. init이 아예 없으면 검증 불가 → fail-closed. init이 여럿이면
+// 전부 검사한다 — 첫 init만 보면 뒤의 init에 실린 표면이 감사를 빠져나간다(#280).
 function claudeStreamAudit(stdout) {
   const events = parseJsonLines(stdout);
   if (events === null) return { clean: false, text: null, model: null };
-  const init = events.find((e) => e?.type === 'system' && e?.subtype === 'init') ?? null;
-  const hooked = events.some((e) => /hook/i.test(String(e?.type ?? '')) || /hook/i.test(String(e?.subtype ?? '')))
-    || Boolean(init && init.hooks !== undefined && !isEmptyContainer(init.hooks));
+  const inits = events.filter((e) => e?.type === 'system' && e?.subtype === 'init');
+  const hooked = events.some((e) => /hook/i.test(String(e?.type ?? '')) || /hook/i.test(String(e?.subtype ?? '')));
   const toolUse = events.some(hasToolUse);
-  const clean = Boolean(init)
-    && Array.isArray(init.tools) && init.tools.length === 0
-    && Array.isArray(init.mcp_servers) && init.mcp_servers.length === 0
-    && Array.isArray(init.plugins) && init.plugins.length === 0
-    && !toolUse && !hooked;
-  // 별칭이 실제로 풀린 id. 기록용이며 argv에는 다시 싣지 않는다.
-  const model = typeof init?.model === 'string' && CLAUDE_SERVED_ID.test(init.model) ? init.model : null;
+  const clean = inits.length > 0 && inits.every(claudeInitSurfaceEmpty) && !toolUse && !hooked;
+  // 별칭이 실제로 풀린 id. 기록용이며 argv에는 다시 싣지 않는다. init끼리 모델이 다르면
+  // 어느 쪽이 서빙했는지 알 수 없으므로 기록하지 않는다.
+  const served = new Set(inits.map((init) => init?.model));
+  const only = served.size === 1 ? [...served][0] : null;
+  const model = typeof only === 'string' && CLAUDE_SERVED_ID.test(only) ? only : null;
   return { clean, text: claudeStreamText(events), model };
 }
 
@@ -553,9 +559,15 @@ export function grokSessionAudit({ home, cwd, sessionId, turns = 1 }) {
   let turnStarted = 0;
   let turnEnded = 0;
   const eventToolRows = [];
+  // grok 1.0.46은 session_id를 turn_started 줄에만 싣는다(#282). 그래서 세션 일치는 구조로
+  // 묶는다: 첫 줄은 turn_started여야 하고, turn_started는 모두 이 세션 id를 실어야 하며,
+  // session_id가 있는 다른 줄도 이 세션 id여야 한다. 필드가 없는 줄은 앞선 turn_started에 속한다.
+  if (events.events[0]?.type !== 'turn_started') incomplete = true;
   for (const row of events.events) {
-    if (row?.session_id !== sessionId) incomplete = true;
     const type = row?.type;
+    if (type === 'turn_started' || (row && typeof row === 'object' && Object.hasOwn(row, 'session_id'))) {
+      if (row.session_id !== sessionId) incomplete = true;
+    }
     if (type === 'turn_started') turnStarted += 1;
     if (type === 'turn_ended') turnEnded += 1;
     if (type === 'tool_started' || type === 'permission_requested' || type === 'permission_resolved') {
@@ -591,7 +603,13 @@ export function grokSessionAudit({ home, cwd, sessionId, turns = 1 }) {
     if (row?.params?.sessionId !== sessionId) incomplete = true;
     const update = row?.params?.update?.sessionUpdate;
     if (update === 'hook_execution') hook = true;
-    else if (!GROK_UPDATE_ALLOWED.has(update)) unknown = true;
+    else if (update === 'background_tasks') {
+      // grok 1.0.46은 resume할 때 백그라운드 작업 목록을 한 줄 남긴다(#282). 빈 목록만 허용한다 —
+      // 작업이 하나라도 있으면 도구가 돌았다는 뜻이고, 목록 형식을 모르면 판단하지 않는다.
+      const tasks = row?.params?.update?.tasks;
+      if (!Array.isArray(tasks)) unknown = true;
+      else if (tasks.length !== 0) tool = true;
+    } else if (!GROK_UPDATE_ALLOWED.has(update)) unknown = true;
     if (update === 'agent_message_chunk') agentChunks += 1;
     if (update === 'turn_completed') turnCompleted += 1;
     if (update === 'tool_call') {
