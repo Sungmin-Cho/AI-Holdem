@@ -596,6 +596,42 @@ test('cardTokenLeaks는 붙여 쓴 카드도 잡고 핸드 클래스는 카드�
   assert.equal(cardTokenLeaks('ah', ['Ah']), false);
 });
 
+// #290: a ten written "10" is the same card, and a short count closed by Hangul right after
+// the cards ("AhKh3벳") ends the run. Every other glue stays glue.
+test('cardTokenLeaks는 10으로 쓴 텐과 카드 바로 뒤의 한국어 수량을 카드로 읽는다', () => {
+  for (const suit of 'cdhs') {
+    const symbol = { s: '♠', h: '♥', d: '♦', c: '♣' }[suit];
+    for (const spelling of [`10${suit}`, `10${suit.toUpperCase()}`, `10${symbol}`]) {
+      for (const text of [spelling, `상대는 ${spelling}를`, `(${spelling})`, `Ah${spelling}`, `${spelling}9d`]) {
+        assert.equal(cardTokenLeaks(text, [`T${suit}`]), true, text);
+      }
+    }
+  }
+  for (const [text, card] of [['AhKh3벳', 'Ah'], ['AhKh3벳', 'Kh'], ['Kh2장', 'Kh'], ['AhKh10장', 'Kh'], ['10h2장', 'Th'], ['As3벳', 'As']]) {
+    assert.equal(cardTokenLeaks(text, [card]), true, `${text} ${card}`);
+  }
+  const every = [...'23456789TJQKA'].flatMap((rank) => [...'cdhs'].map((suit) => `${rank}${suit}`));
+  // A ten inside a word or a number, a hand class, a count that runs on into a letter or
+  // past three digits, a number before the cards: none of them is a card.
+  for (const text of ['A10s', '110h', '2010s', 'x10h', '10hx', '10h9', 'AKs3벳', 'T9s3벳', 'Kh2x장', '7c2d9f', '7c2d1000칩', 'AhKh3bet', '3Kh', '10bb', '4max-10bb-co-push-v3']) {
+    assert.equal(cardTokenLeaks(text, every), false, text);
+  }
+  // A masked run holding a ten is still no English word after a hidden "As".
+  assert.equal(cardTokenLeaks('As x10h 이후', ['As']), false);
+  assert.equal(cardTokenLeaks('As 7c10h9', ['As']), true);
+  // A hex digest holds no cards, alone or followed by a Korean particle.
+  for (let i = 0; i < 2000; i += 1) {
+    const digest = createHash('sha256').update(`ten-${i}`).digest('hex');
+    for (const text of [digest, `${digest}의`, `${digest}에서`]) assert.equal(cardTokenLeaks(text, every), false, text);
+  }
+  const record = { handNo: 1, holes: { user: ['Ah', 'Kh'], h1: ['Th', '2d'] }, seats: [{ playerId: 'user', kind: 'human' }, { playerId: 'h1', kind: 'human' }] };
+  const lookup = (handNo) => (handNo === 1 ? record : null);
+  for (const text of ['상대는 10♥를 버렸습니다.', '상대 10h2d였다', '상대는 2d3장을 버렸다']) {
+    assert.throws(() => assertHostText({ coach: [{ handNo: 1, text }] }, lookup), { code: 'FORBIDDEN_LITERAL' }, text);
+  }
+  assert.doesNotThrow(() => assertHostText({ coach: [{ handNo: 1, text: '내 AhKh3벳은 10bb였다' }] }, lookup));
+});
+
 test('assertHostText는 핸드를 알 수 없는 annotation을 건너뛰지 않고 거부한다', () => {
   const record = { handNo: 1, holes: { user: ['Ah', 'Kh'], h1: ['7c', '2d'] }, seats: [{ playerId: 'user', kind: 'human' }, { playerId: 'h1', kind: 'human' }] };
   const lookup = (handNo) => (handNo === 1 ? record : null);
