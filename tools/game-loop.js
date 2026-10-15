@@ -4585,7 +4585,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return note;
   };
 
-  const coachHostTextLeaks = (note, handNo) => {
+  const coachHostTextLeaks = (note, handNo, { event = 'coach-host-text-refused' } = {}) => {
     const players = readJsonOptional(playersPath, 'PLAYERS');
     if (!sessionHasParticipants(players)) return false;
     const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
@@ -4598,7 +4598,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     } catch (error) {
       // FORBIDDEN_LITERAL: a quoted card. FORBIDDEN_LITERAL_UNAVAILABLE: the hand record could
       // not be read; refused either way, the code keeps the two apart in the log.
-      log('coach-host-text-refused', { handNo, code: error.code ?? 'ERROR' });
+      log(event, { handNo, code: error.code ?? 'ERROR' });
       return true;
     }
   };
@@ -6792,7 +6792,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       const review = validateReviewOutput(appendTrainingPendingToReview(machineReview({
         statsRaw, players, result: engine.result, evaluator: evaluatorText, records,
-        notes: coachNotesDigest(coachSnapshotPath), seats: engine.seats?.length ?? 6,
+        // #290: the snapshot keeps every note as published; one the host is not sent is not
+        // quoted here either.
+        notes: coachNotesDigest(coachSnapshotPath, {
+          withhold: (note) => coachHostTextLeaks(note, note.handNo, { event: 'review-coach-note-withheld' }),
+        }),
+        seats: engine.seats?.length ?? 6,
       })), { requireHeadings: true });
       appendNotice('LLM 종합 리뷰를 제공할 수 없어 이번 세션의 관찰 기록으로 기계 리뷰를 작성했습니다.');
       log('review-machine-fallback', { reason });

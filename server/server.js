@@ -484,18 +484,25 @@ function restoreAnnotationRow(row, { machine, literals, gate, hostTextLeaks = ()
 function restoredHostTextGate(gameDir, expectedSessionToken) {
   const open = { annotation: () => false, coach: () => false };
   let roster = null;
+  let rosterMissing = false;
   try {
     const players = readSecurityJson(gameDir, ['players.json']);
     roster = Array.isArray(players) ? players : (Array.isArray(players?.players) ? players.players : null);
-  } catch {
-    roster = null;
+  } catch (error) {
+    rosterMissing = error?.code === 'ENOENT';
   }
   if (roster && !sessionHasParticipants(roster)) return open;
+  let engine;
   try {
-    const engineState = validatePrivateEngineState(
-      readSecurityJson(gameDir, ['state.json']),
-      { expectedSessionToken },
-    );
+    engine = readSecurityJson(gameDir, ['state.json']);
+  } catch (error) {
+    // Neither file exists: nothing on disk names a participant, and the live relay treats
+    // the directory as a solo session too.
+    if (rosterMissing && error?.code === 'ENOENT') return open;
+    return { annotation: () => true, coach: () => true };
+  }
+  try {
+    const engineState = validatePrivateEngineState(engine, { expectedSessionToken });
     if (!roster && !sessionHasParticipants(engineState.seats)) return open;
     // One load reads each hand's record once, however many restored rows name it.
     const records = new Map();
@@ -589,8 +596,9 @@ function restoreHistory(rawHistory, context) {
       if (rows.length) payload.trainingAnnotations = rows;
       else delete payload.trainingAnnotations;
     }
-    // #290: no reader proves anything from a history's coach notes, so one the host must
-    // not see leaves the history.
+    // #290: no reader proves anything from a history's coach notes (the coach reads only the
+    // snapshot's own), so one the host must not see leaves the history for good, unlike the
+    // snapshot's own notes, which are kept as published and only withheld.
     if (Array.isArray(payload.coach)) {
       const notes = payload.coach.filter((note) => !context.coachLeaks(note));
       dropped += payload.coach.length - notes.length;

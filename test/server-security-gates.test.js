@@ -1615,8 +1615,9 @@ test('#290 멀티 세션의 복원은 숨은 카드를 인용한 코치 노트�
     ],
   });
   await withServer(leaking, async ({ port }) => {
+    // The host's SSE replays the history; the snapshot's own note is pinned by /api/snapshot.
     const sse = await collectSse(port);
-    for (const text of ['10♥', '2d3장', '기록 없는 핸드의 노트', '핸드를 적지 않은 노트']) assert.equal(sse.includes(text), false, text);
+    for (const text of ['2d3장', '기록 없는 핸드의 노트', '핸드를 적지 않은 노트']) assert.equal(sse.includes(text), false, text);
     assert.deepEqual((await snapshotOf(port)).coach, []);
     // A later publication rewrites the file: the withheld note is still there for reconcile.
     const rewrite = await post(port, { publishId: 5, training: [summaryOf()] });
@@ -1624,6 +1625,10 @@ test('#290 멀티 세션의 복원은 숨은 카드를 인용한 코치 노트�
     const file = JSON.parse(fs.readFileSync(path.join(leaking, 'ui-snapshot.json'), 'utf8'));
     assert.deepEqual(file.coach, [ten]);
     assert.equal((await snapshotOf(port)).coach.length, 0);
+    // A note published today for the same hand replaces the withheld one and is shown.
+    const replaced = { handNo: 1, text: '프리플랍 콜 범위를 다시 봅니다.' };
+    assert.equal((await post(port, { publishId: 6, coach: [replaced] })).status, 200);
+    assert.deepEqual((await snapshotOf(port)).coach.map((row) => row.text), [replaced.text]);
   });
   const clean = tmpDir();
   noAiSessionFixtures(clean, { h1Holes: ['Th', '2d'] });
