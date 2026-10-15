@@ -38,6 +38,7 @@ import {
   validateMessages,
   assertHostText,
   hostAnnotationLeaks,
+  hostCoachLeaks,
   sessionHasParticipants,
   nextDecisionFromViews,
 } from '../publish-contract.js';
@@ -478,16 +479,18 @@ function restoreAnnotationRow(row, { machine, literals, gate, hostTextLeaks = ()
 
 // #289: in a multiplayer session a restored explanation meets the live publish rule for
 // other participants' hidden cards (assertHostText). Unreadable material drops them all.
+// #290: so does a restored coach note, in the snapshot and in its history.
 function restoredHostTextGate(gameDir, expectedSessionToken) {
   try {
-    if (!sessionHasParticipants(readPlayers(gameDir))) return () => false;
+    if (!sessionHasParticipants(readPlayers(gameDir))) return { annotation: () => false, coach: () => false };
     const engineState = validatePrivateEngineState(
       readSecurityJson(gameDir, ['state.json']),
       { expectedSessionToken },
     );
-    return (row) => hostAnnotationLeaks(row, (handNo) => lookupHandRecord(gameDir, engineState, handNo));
+    const lookup = (handNo) => lookupHandRecord(gameDir, engineState, handNo);
+    return { annotation: (row) => hostAnnotationLeaks(row, lookup), coach: (note) => hostCoachLeaks(note, lookup) };
   } catch {
-    return () => true;
+    return { annotation: () => true, coach: () => true };
   }
 }
 
@@ -571,6 +574,13 @@ function restoreHistory(rawHistory, context) {
       if (rows.length) payload.trainingAnnotations = rows;
       else delete payload.trainingAnnotations;
     }
+    // #290: a coach note in the history meets the snapshot's rule.
+    if (Array.isArray(payload.coach)) {
+      const notes = payload.coach.filter((note) => !context.coachLeaks(note));
+      dropped += payload.coach.length - notes.length;
+      if (notes.length) payload.coach = notes;
+      else delete payload.coach;
+    }
     if ('handReplays' in payload) {
       const rows = handReplayList(restoreHandReplays(
         payload.handReplays, context.root, context.engineState, context.assertNoStudyCapability,
@@ -631,7 +641,8 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       literals = null;
     }
     const gate = { gameOver: engineGameOver(gameDir, expectedSessionToken) };
-    const hostTextLeaks = restoredHostTextGate(gameDir, expectedSessionToken);
+    const hostTextGate = restoredHostTextGate(gameDir, expectedSessionToken);
+    const hostTextLeaks = hostTextGate.annotation;
 
     const restoredAnnotations = Object.create(null);
     let droppedAnnotations = migrated.dropped;
@@ -678,11 +689,13 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       engineState = null;
     }
     const replay = restoreHistory(raw.history, {
-      machineById, literals, gate, hostTextLeaks, annotations: restoredAnnotations, legacyProvenance,
+      machineById, literals, gate, hostTextLeaks, coachLeaks: hostTextGate.coach, annotations: restoredAnnotations, legacyProvenance,
       root: gameDir, engineState, assertNoStudyCapability: assertRaw,
     });
-    if (droppedAnnotations || replay.dropped) {
-      process.stderr.write(`ui-snapshot restore dropped ${droppedAnnotations} annotation(s) and ${replay.dropped} history row(s)\n`);
+    const coach = Array.isArray(raw.coach) ? raw.coach.filter((note) => !hostTextGate.coach(note)) : [];
+    const droppedCoach = Array.isArray(raw.coach) ? raw.coach.length - coach.length : 0;
+    if (droppedAnnotations || replay.dropped || droppedCoach) {
+      process.stderr.write(`ui-snapshot restore dropped ${droppedAnnotations} annotation(s), ${droppedCoach} coach note(s) and ${replay.dropped} history row(s)\n`);
     }
     let views = raw.view ? { [HOST_ID]: raw.view } : undefined;
     let decision = raw.decision ?? null;
@@ -694,7 +707,7 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       view: raw.view ?? null,
       hint: raw.hint ?? null,
       log: Array.isArray(raw.log) ? raw.log : [],
-      coach: Array.isArray(raw.coach) ? mergeCoach([], raw.coach) : [],
+      coach: mergeCoach([], coach),
       training: migrated.training,
       trainingAnnotations: restoredAnnotations,
       review: raw.review,

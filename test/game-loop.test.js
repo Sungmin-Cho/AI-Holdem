@@ -4586,7 +4586,7 @@ test('#290 멀티 진행 중 코치는 참가자 숨은 카드 인용을 지연�
           assert.ok(at >= 0, `${overlap} is in the deck`);
           state.hand.deck[at] = state.hand.holes.p1[0];
           state.hand.holes.p1[0] = overlap;
-          fs.writeFileSync(statePath, JSON.stringify(state));
+          writeJsonAtomic(statePath, state);
         }
       },
     },

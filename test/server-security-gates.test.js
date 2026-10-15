@@ -760,13 +760,13 @@ test('M1: forged identity and detail leaves are rejected at the server, snapshot
 
 // --- M4: 복원된 history는 live merge와 같은 다섯 술어를 통과한 재투영이다 ---
 
-function seedSnapshot(dir, { training = [], trainingAnnotations = [], history = [], view = null }) {
+function seedSnapshot(dir, { training = [], trainingAnnotations = [], history = [], view = null, coach = [] }) {
   fs.writeFileSync(path.join(dir, 'ui-snapshot.json'), JSON.stringify({
     revision: history.length + 1,
     publishId: history.length + 1,
     view,
     log: [],
-    coach: [],
+    coach,
     training,
     trainingAnnotations,
     history,
@@ -1595,6 +1595,39 @@ test('#289 멀티 세션의 복원은 다른 인간의 비공개 카드를 담�
     const sse = await collectSse(port);
     assert.equal(sse.includes('7c 2d'), false);
     assert.equal((await snapshotOf(port)).trainingAnnotations.length, 0);
+  });
+});
+
+// #290: a coach note restored from the snapshot or its history meets the live participant
+// rule, so a ten or a Korean count an earlier version let through is dropped on restart,
+// as is a note for a hand whose record cannot be read or that names no hand. A clean note
+// is kept.
+test('#290 멀티 세션의 복원은 다른 인간의 숨은 카드를 인용한 코치 노트를 snapshot과 history에서 버린다', async () => {
+  const leaking = tmpDir();
+  noAiSessionFixtures(leaking, { h1Holes: ['Th', '2d'] });
+  seedSnapshot(leaking, {
+    coach: [{ handNo: 1, text: '상대는 10♥를 버렸다' }],
+    history: [
+      { revision: 1, at: '2026-01-01T00:00:00.000Z', payload: { coach: [{ handNo: 1, text: '상대는 2d3장을 버렸다' }] } },
+      { revision: 2, at: '2026-01-01T00:00:01.000Z', payload: { coach: [{ handNo: 9, text: '기록 없는 핸드의 노트' }] } },
+      { revision: 3, at: '2026-01-01T00:00:02.000Z', payload: { coach: [{ text: '핸드를 적지 않은 노트' }] } },
+    ],
+  });
+  await withServer(leaking, async ({ port }) => {
+    const sse = await collectSse(port);
+    for (const text of ['10♥', '2d3장', '기록 없는 핸드의 노트', '핸드를 적지 않은 노트']) assert.equal(sse.includes(text), false, text);
+    assert.deepEqual((await snapshotOf(port)).coach, []);
+  });
+  const clean = tmpDir();
+  noAiSessionFixtures(clean, { h1Holes: ['Th', '2d'] });
+  const note = { handNo: 1, text: '내 AhKh로 3벳했고 10bb를 더 넣었다' };
+  seedSnapshot(clean, {
+    coach: [note],
+    history: [{ revision: 1, at: '2026-01-01T00:00:00.000Z', payload: { coach: [note] } }],
+  });
+  await withServer(clean, async ({ port }) => {
+    assert.equal((await collectSse(port)).includes('10bb를'), true);
+    assert.deepEqual((await snapshotOf(port)).coach.map((row) => row.text), [note.text]);
   });
 });
 

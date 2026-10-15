@@ -637,6 +637,44 @@ test('cardTokenLeaks는 10으로 쓴 텐과 카드 바로 뒤의 한국어 수�
   assert.doesNotThrow(() => assertHostText({ coach: [{ handNo: 1, text: '내 AhKh3벳은 10bb였다' }] }, lookup));
 });
 
+// #290: the matcher as it stood before the ten's "10" and the Korean count, kept to pin
+// that every card it found is still found.
+function rankOnlyCardTokenLeaks(text, cardList) {
+  const token = '[2-9TJQKA][cdhsCDHS♠♥♦♣♤♡♢♧]';
+  const run = new RegExp(`(?:${token})+`, 'gu');
+  const inRun = new RegExp(`(${token})(?=${token})`, 'gu');
+  const word = /[A-Za-z0-9]/;
+  const separated = text.replace(run, (found, offset, whole) => (
+    word.test(whole[offset - 1] ?? '') || word.test(whole[offset + found.length] ?? '')
+      ? '0'.repeat(found.length)
+      : found.replace(inRun, '$1 ')));
+  const symbols = { s: '♠♤', h: '♥♡', d: '♦♢', c: '♣♧' };
+  return cardList.some(([rank, suit]) => {
+    if (new RegExp(`(?<![A-Za-z0-9])${rank}[${symbols[suit]}](?![A-Za-z0-9])`, 'u').test(separated)) return true;
+    const letter = new RegExp(`(?<![A-Za-z0-9])${rank}[${suit}${suit.toUpperCase()}](?![A-Za-z0-9])`, 'g');
+    return [...separated.matchAll(letter)].some((match) => !(match[0] === 'As' && /^\s+[a-z]/.test(separated.slice(match.index + 2))));
+  });
+}
+
+test('cardTokenLeaks는 10과 한국어 수량 이전 판정이 찾던 카드를 모두 찾는다', () => {
+  let seed = 290;
+  const random = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const pieces = ['10♥', '10h', '10', 'Ks', 'K♠', 'Ah', 'A♠', 'As', 'Th', '9♥', '7c', '2d', 'x', 'a', '1', '0', ' ', '장', '3', '-', 'you', 'h', '♥'];
+  const cards = ['Ah', 'As', 'Kh', 'Ks', 'Th', 'Ts', '9h', '9s', '7c', '2d'];
+  for (let i = 0; i < 3000; i += 1) {
+    let text = '';
+    for (let n = 1 + Math.floor(random() * 7); n > 0; n -= 1) text += pieces[Math.floor(random() * pieces.length)];
+    for (const card of cards) {
+      if (rankOnlyCardTokenLeaks(text, [card])) assert.equal(cardTokenLeaks(text, [card]), true, `${text} ${card}`);
+    }
+  }
+});
+
 test('assertHostText는 핸드를 알 수 없는 annotation을 건너뛰지 않고 거부한다', () => {
   const record = { handNo: 1, holes: { user: ['Ah', 'Kh'], h1: ['7c', '2d'] }, seats: [{ playerId: 'user', kind: 'human' }, { playerId: 'h1', kind: 'human' }] };
   const lookup = (handNo) => (handNo === 1 ? record : null);
