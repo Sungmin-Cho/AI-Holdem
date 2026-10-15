@@ -429,19 +429,6 @@ export function hostAnnotationLeaks(row, lookupRecord) {
   }
 }
 
-// #290: a coach note restored from a snapshot or its history meets the same rule, so a note
-// an earlier version accepted is judged as one published today. A note that names no hand
-// cannot be judged and is dropped.
-export function hostCoachLeaks(note, lookupRecord) {
-  if (!Number.isSafeInteger(note?.handNo) || note.handNo < 1) return true;
-  try {
-    assertHostText({ coach: [note] }, lookupRecord);
-    return false;
-  } catch {
-    return true;
-  }
-}
-
 export function projectForSeat(payload, seat) {
   if (!payload || typeof payload !== 'object') return {};
   if (seat === HOST_ID) {

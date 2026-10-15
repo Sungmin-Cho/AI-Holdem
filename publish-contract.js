@@ -22,7 +22,6 @@ export {
   cardTokenLeaks,
   assertHostText,
   hostAnnotationLeaks,
-  hostCoachLeaks,
   sessionHasParticipants,
   projectForSeat,
   nextDecisionFromViews,
