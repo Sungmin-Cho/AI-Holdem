@@ -596,6 +596,85 @@ test('cardTokenLeaks는 붙여 쓴 카드도 잡고 핸드 클래스는 카드�
   assert.equal(cardTokenLeaks('ah', ['Ah']), false);
 });
 
+// #290: a ten written "10" is the same card, and a short count closed by Hangul right after
+// the cards ("AhKh3벳") ends the run. Every other glue stays glue.
+test('cardTokenLeaks는 10으로 쓴 텐과 카드 바로 뒤의 한국어 수량을 카드로 읽는다', () => {
+  for (const suit of 'cdhs') {
+    const symbol = { s: '♠', h: '♥', d: '♦', c: '♣' }[suit];
+    for (const spelling of [`10${suit}`, `10${suit.toUpperCase()}`, `10${symbol}`]) {
+      for (const text of [spelling, `상대는 ${spelling}를`, `(${spelling})`, `Ah${spelling}`, `${spelling}9d`]) {
+        assert.equal(cardTokenLeaks(text, [`T${suit}`]), true, text);
+      }
+    }
+  }
+  for (const [text, card] of [['AhKh3벳', 'Ah'], ['AhKh3벳', 'Kh'], ['Kh2장', 'Kh'], ['AhKh10장', 'Kh'], ['Kh999칩', 'Kh'], ['10h2장', 'Th'], ['As3벳', 'As']]) {
+    assert.equal(cardTokenLeaks(text, [card]), true, `${text} ${card}`);
+  }
+  // "10" is also read as a number: a ten glued on its left never takes the cards after its
+  // symbol with it, so every card found before the ten rank existed is still found.
+  for (const [text, card] of [['x7c10♥Ks', 'Ks'], ['A10♥K♠', 'Ks'], ['pot10♥Ks', 'Ks'], ['AK10♥9♥', '9h']]) {
+    assert.equal(cardTokenLeaks(text, [card]), true, `${text} ${card}`);
+  }
+  const every = [...'23456789TJQKA'].flatMap((rank) => [...'cdhs'].map((suit) => `${rank}${suit}`));
+  // A ten inside a word or a number, a hand class, a number before the cards, and a count
+  // that is not one to three digits closed by Hangul: none of them is a card.
+  for (const text of ['A10s', '110h', '2010s', 'x10h', '10hx', '10h9', 'AKs3벳', 'T9s3벳', 'Kh2x장', 'Kh2 장', 'Kh2.', 'AhKh3-bet', 'AhKh3-벳', 'Kh1234장', '7c2d9f', '7c2d1000칩', 'AhKh3bet', '3Kh', '10bb', '4max-10bb-co-push-v3']) {
+    assert.equal(cardTokenLeaks(text, every), false, text);
+  }
+  // The mask of a glued run is no lower-case word, so it never exempts a hidden "As".
+  assert.equal(cardTokenLeaks('As 10h9 이후', ['As']), true);
+  assert.equal(cardTokenLeaks('As 7c10h9', ['As']), true);
+  // A hex digest holds no cards, alone or followed by a Korean particle.
+  for (let i = 0; i < 2000; i += 1) {
+    const digest = createHash('sha256').update(`ten-${i}`).digest('hex');
+    for (const text of [digest, `${digest}의`, `${digest}에서`]) assert.equal(cardTokenLeaks(text, every), false, text);
+  }
+  const record = { handNo: 1, holes: { user: ['Ah', 'Kh'], h1: ['Th', '2d'] }, seats: [{ playerId: 'user', kind: 'human' }, { playerId: 'h1', kind: 'human' }] };
+  const lookup = (handNo) => (handNo === 1 ? record : null);
+  for (const text of ['상대는 10♥를 버렸습니다.', '상대는 10♡였다', '상대는 10H였다', '상대 10h2d였다', '상대는 2d3장을 버렸다']) {
+    assert.throws(() => assertHostText({ coach: [{ handNo: 1, text }] }, lookup), { code: 'FORBIDDEN_LITERAL' }, text);
+  }
+  assert.doesNotThrow(() => assertHostText({ coach: [{ handNo: 1, text: '내 AhKh3벳은 10bb였다' }] }, lookup));
+});
+
+// #290: the matcher as it stood before the ten's "10" and the Korean count, kept to pin
+// that every card it found is still found.
+function rankOnlyCardTokenLeaks(text, cardList) {
+  const token = '[2-9TJQKA][cdhsCDHS♠♥♦♣♤♡♢♧]';
+  const run = new RegExp(`(?:${token})+`, 'gu');
+  const inRun = new RegExp(`(${token})(?=${token})`, 'gu');
+  const word = /[A-Za-z0-9]/;
+  const separated = text.replace(run, (found, offset, whole) => (
+    word.test(whole[offset - 1] ?? '') || word.test(whole[offset + found.length] ?? '')
+      ? '0'.repeat(found.length)
+      : found.replace(inRun, '$1 ')));
+  const symbols = { s: '♠♤', h: '♥♡', d: '♦♢', c: '♣♧' };
+  return cardList.some(([rank, suit]) => {
+    if (new RegExp(`(?<![A-Za-z0-9])${rank}[${symbols[suit]}](?![A-Za-z0-9])`, 'u').test(separated)) return true;
+    const letter = new RegExp(`(?<![A-Za-z0-9])${rank}[${suit}${suit.toUpperCase()}](?![A-Za-z0-9])`, 'g');
+    return [...separated.matchAll(letter)].some((match) => !(match[0] === 'As' && /^\s+[a-z]/.test(separated.slice(match.index + 2))));
+  });
+}
+
+test('cardTokenLeaks는 10과 한국어 수량 이전 판정이 찾던 카드를 모두 찾는다', () => {
+  let seed = 290;
+  const random = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const pieces = ['10♥', '10h', '10', 'Ks', 'K♠', 'Ah', 'A♠', 'As', 'Th', '9♥', '7c', '2d', 'x', 'a', '1', '0', ' ', '장', '3', '-', 'you', 'h', '♥'];
+  const cards = ['Ah', 'As', 'Kh', 'Ks', 'Th', 'Ts', '9h', '9s', '7c', '2d'];
+  for (let i = 0; i < 3000; i += 1) {
+    let text = '';
+    for (let n = 1 + Math.floor(random() * 7); n > 0; n -= 1) text += pieces[Math.floor(random() * pieces.length)];
+    for (const card of cards) {
+      if (rankOnlyCardTokenLeaks(text, [card])) assert.equal(cardTokenLeaks(text, [card]), true, `${text} ${card}`);
+    }
+  }
+});
+
 test('assertHostText는 핸드를 알 수 없는 annotation을 건너뛰지 않고 거부한다', () => {
   const record = { handNo: 1, holes: { user: ['Ah', 'Kh'], h1: ['7c', '2d'] }, seats: [{ playerId: 'user', kind: 'human' }, { playerId: 'h1', kind: 'human' }] };
   const lookup = (handNo) => (handNo === 1 ? record : null);

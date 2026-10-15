@@ -21,6 +21,7 @@ import {
   prepareGameSession,
   engineInitFlags,
   applyModeDefaults,
+  initializePreparedSession,
 } from '../tools/game-loop.js';
 import { createPlayerRuntime, spawnCli } from '../tools/player-runtime.js';
 import { gameEpochOf } from '../publish-contract.js';
@@ -4530,6 +4531,97 @@ test('showdown에서 진행 중 상대 Kh 인용은 deferred가 아니라 INVALI
   assert.equal(note.text.includes('Kh'), false);
   const auth = readJson(path.join(gameDir, '.coach-authority.json'));
   assert.equal(auth.deferred?.['1'], undefined);
+});
+
+// #290: in a multiplayer session the relay's participant-card rule is judged before the
+// coach's deferral. During hand 2, a hand 1 note quoting h1's unseen card beside a card that
+// hand 2 now hides is refused by that rule and retried; the retry quoting only the second
+// card, public in hand 1, is the note deferred. The refusal log pins which check ran first.
+test('#290 멀티 진행 중 코치는 참가자 숨은 카드 인용을 지연보다 먼저 거절한다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  const symbols = { s: '♠', h: '♥', d: '♦', c: '♣' };
+  let hidden = null;
+  let overlap = null;
+  const both = () => `핸드 1에서 h1이 버린 ${hidden[0]}${symbols[hidden[1]]}와 p1의 ${overlap}를 함께 봅니다.`;
+  const only = () => `핸드 1에서 p1의 ${overlap}만 인용합니다.`;
+  const upper = makeCoachAdapter({
+    rounds: [
+      { get raw() { return JSON.stringify({ handNo: 1, text: hidden ? both() : '카드 없이 평가' }); } },
+      { get raw() { return JSON.stringify({ handNo: 1, text: overlap ? only() : '카드 없이 평가' }); } },
+    ],
+  });
+  const gameDir = tmpGame();
+  const coachCalls = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: resolverForCoach(makeAdapter(), upper, ['fake coach runtime selected']),
+    opts: {
+      port: 0,
+      waitMs: 0,
+      scanCoachRuntimeProcesses: TEST_DEFAULT_SCAN_COACH_RUNTIME_PROCESSES,
+      onCoachInvoke: (args) => coachCalls.push(args),
+      async coachCaptureCheckpoint({ handNo }) {
+        if (handNo !== 1) return;
+        // The hand changes only while the loop waits on the host in hand 2: its views are
+        // published and no engine step is in flight.
+        await waitFor(async () => {
+          const lock = readJson(path.join(gameDir, 'lock.json'));
+          const response = await fetch(`http://127.0.0.1:${lock.port}/api/snapshot?token=${lock.sessionToken}`);
+          const view = response.ok ? (await response.json()).view : null;
+          return view?.handNo === 2 && view.legal?.toAct === 'user' ? view : null;
+        }, 'hand 2 did not wait on the host before coach deny', 8_000 * WIN32_SCALE);
+        const statePath = path.join(gameDir, 'state.json');
+        const state = readJson(statePath);
+        const record = readJson(path.join(gameDir, 'hands', 'hand-0001.json'));
+        const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
+        assert.ok(record.folded.includes('h1') && !record.showdown, JSON.stringify(record.folded));
+        hidden = record.holes.h1[0];
+        // A card public in hand 1 that no person holds or sees in hand 2 goes into p1's
+        // hidden hand, swapped with the deck: no view the relay checks changes.
+        const seen = new Set([...state.hand.holes.user, ...state.hand.holes.h1, ...state.hand.board]);
+        overlap = [...Object.values(replay.holes ?? {}).flat(), ...(replay.board ?? [])]
+          .find((card) => !seen.has(card) && card !== hidden);
+        assert.ok(overlap, 'hand 1 shows a card no person holds in hand 2');
+        if (!state.hand.holes.p1.includes(overlap)) {
+          const at = state.hand.deck.indexOf(overlap);
+          assert.ok(at >= 0, `${overlap} is in the deck`);
+          state.hand.deck[at] = state.hand.holes.p1[0];
+          state.hand.holes.p1[0] = overlap;
+          writeJsonAtomic(statePath, state);
+        }
+      },
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  const setup = { ai: 1, stack: 100, replayReveal: 'all' };
+  const preinitialized = await initializePreparedSession(gameDir, {
+    ...setup, participants: [{ playerId: 'h1', name: '민준', participantId: 'part-1' }],
+  });
+  await loop.bootstrap({ ...setup, preinitialized });
+  // From the user's button the deal moves it to h1: p1 posts the small blind, the user the big.
+  putAiFirst(gameDir);
+  await cliJson(gameDir, ['step', '--new-hand']);
+  await cliJson(gameDir, ['apply', 'h1', 'fold']);
+  await cliJson(gameDir, ['apply', 'p1', 'call']);
+  await cliJson(gameDir, ['apply', 'user', 'check']);
+  await cliJson(gameDir, ['apply', 'p1', 'check']);
+  await cliJson(gameDir, ['apply', 'user', 'raise', '50']);
+  const running = startRun(loop);
+
+  const deferred = await waitFor(() => {
+    try {
+      return readJson(path.join(gameDir, '.coach-authority.json')).deferred?.['1'] ?? null;
+    } catch {
+      return null;
+    }
+  }, 'hand 1 coach was not deferred', 10_000 * WIN32_SCALE);
+  await stopRun(loop, running);
+  assert.equal(upper.starts.length, 2, 'the first note was refused and retried');
+  assert.equal((deferred.note ?? deferred).text, only());
+  const refused = readLoopLog(gameDir).filter((row) => row.event === 'coach-host-text-refused');
+  assert.deepEqual(refused.map((row) => [row.handNo, row.code]), [[1, 'FORBIDDEN_LITERAL']]);
+  assert.equal(coachCalls.filter((args) => args[0] === 'defer').length, 1);
+  const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  assert.equal((snapshot.coach ?? []).some((note) => note.handNo === 1), false);
 });
 
 test('SIGKILL 뒤 resume은 deferred 코치 노트를 이어 게시한다', { timeout: 40_000 }, async (t) => {

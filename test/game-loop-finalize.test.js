@@ -30,7 +30,7 @@ import {
   legacyCoachRuntimeCandidates,
   scanCoachRuntimeProcesses,
 } from '../tools/game-loop.js';
-import { gameEpochOf } from '../publish-contract.js';
+import { gameEpochOf, payloadSha256, publicProofId } from '../publish-contract.js';
 import { reviewWaivable } from '../tools/recovery-exit.js';
 import { createCoachControl } from '../tools/coach-control.js';
 import { defaultEvaluate } from '../tools/training-pipeline.js';
@@ -1990,6 +1990,57 @@ test('#289 멀티 세션의 코치는 relay가 거절할 참가자 카드 인용
   const note = readJson(path.join(gameDir, 'ui-snapshot.json')).coach.find((row) => row.handNo === 1);
   assert.equal(note.unavailable, true, JSON.stringify(note));
   assert.equal(JSON.stringify(note).includes('7♥'), false);
+});
+
+// #290: the machine review quotes the snapshot's coach notes. One the host is not sent, here
+// quoting h1's unseen 7h 2c from hand 1, is not quoted; a clean note still is.
+test('#290 멀티 세션 기계 리뷰는 호스트에게 보내지 않는 코치 노트를 인용하지 않는다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedHostBustMultiGame(gameDir);
+  // Both notes were published and sealed by an earlier version, so no coach work runs again.
+  const epoch = gameEpochOf(init.sessionToken);
+  const owner = '29029029-0290-4290-8290-290290290290';
+  const sealed = (note) => {
+    const queueId = `${epoch}:sealed:${note.handNo}`;
+    const proof = { id: publicProofId(queueId), payloadSha256: payloadSha256(note) };
+    return {
+      note: { ...note, coachProof: proof },
+      seal: { queueId, handNo: note.handNo, noteKind: 'coach', payloadSha256: proof.payloadSha256, publicProofId: proof.id, overfold: false, publishedAtRevision: 1 },
+    };
+  };
+  const leaking = sealed({ handNo: 1, text: '상대는 7♥ 2♣를 들고 폴드했습니다.' });
+  const clean = sealed({ handNo: 2, text: '핸드 2는 탈락 뒤 관전으로 지나갔습니다.' });
+  fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
+    revision: 1, publishId: 1, view: { gameOver: true, handNo: 2 }, log: [], coach: [leaking.note, clean.note], history: [],
+  }));
+  writeJsonAtomic(path.join(gameDir, '.coach-authority.json'), {
+    schemaVersion: 2,
+    gameEpoch: epoch,
+    activeOwnerSessionId: owner,
+    adapterState: 'enabled',
+    legacyMigrationCompleted: true,
+    overfoldLease: null,
+    hands: {},
+    retiredAttempts: [],
+    publishQueue: {},
+    publishedSeals: { 1: leaking.seal, 2: clean.seal },
+    deferred: {},
+    noNewPlayTimePublishers: false,
+    finalization: null,
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: null, loopOpts: { controlProtocolVersion: 1 }, stateOverrides: { handNo: 2, upperRuntime: null, ownerSessionId: owner },
+  });
+
+  await loop.resume();
+  await loop.run();
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.phase, 'done', JSON.stringify(state.halt ?? null));
+  const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  assert.match(snapshot.review, /핸드 2: 핸드 2는 탈락 뒤 관전으로 지나갔습니다/);
+  assert.equal(snapshot.review.includes('7♥'), false, snapshot.review);
+  assert.deepEqual(readLoopLog(gameDir).filter((row) => row.event === 'review-coach-note-withheld').map((row) => row.handNo), [1]);
 });
 
 test('#288 호스트가 먼저 탈락한 멀티 토너먼트는 상위 모델 없이도 기계 리뷰로 끝난다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {

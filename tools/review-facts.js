@@ -91,8 +91,9 @@ export function vpipBand(seated) {
   return { vpip: [15, 24], pfr: [11, 19] };
 }
 
-// Published per-hand coach notes (skipping unavailable placeholders), newest last.
-export function coachNotesDigest(snapshotPath, { limit = 10, chars = 220 } = {}) {
+// Published per-hand coach notes (skipping unavailable placeholders), newest last. #290: a
+// note the caller withholds (one the host must not see) is left out.
+export function coachNotesDigest(snapshotPath, { limit = 10, chars = 220, withhold = () => false } = {}) {
   let snapshot;
   try {
     snapshot = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'));
@@ -101,6 +102,7 @@ export function coachNotesDigest(snapshotPath, { limit = 10, chars = 220 } = {})
   }
   const notes = Array.isArray(snapshot?.coach) ? snapshot.coach : [];
   return notes.filter((note) => note && note.unavailable !== true && Number.isSafeInteger(note.handNo) && typeof note.text === 'string')
+    .filter((note) => !withhold(note))
     .slice(-limit)
     .map((note) => `핸드 ${note.handNo}: ${note.text.replace(/\s+/g, ' ').trim().slice(0, chars)}`);
 }

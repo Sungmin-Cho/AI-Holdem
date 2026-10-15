@@ -18,19 +18,39 @@ const RESULT = new Set(['win', 'lose', 'completed', 'abort']);
 // whole run stands alone as a word: a run glued to a letter or digit ("STACKS", "7c2d9",
 // a hex digest) is not cards, as a single card glued to one ("x7c") is not. Each run
 // found is split so every card meets the boundary below.
-const CARD_TOKEN = '[2-9TJQKA][cdhsCDHS♠♥♦♣♤♡♢♧]';
-const CARD_RUN = new RegExp(`(?:${CARD_TOKEN})+`, 'gu');
-const CARD_IN_RUN = new RegExp(`(${CARD_TOKEN})(?=${CARD_TOKEN})`, 'gu');
+// #290: a ten is also written "10" ("10h", "10♥"), the spelling Korean prose uses. "10" is
+// a number too, so a text is read both ways, with "10" as the ten and without it, and a
+// card found in either reading is a card. Read without it, "10♥" is no token and the cards
+// after its symbol stand alone, as they did before this rank ("x7c10♥Ks").
+const SUIT = '[cdhsCDHS♠♥♦♣♤♡♢♧]';
+const READINGS = [
+  { rank: '(?:10|[2-9TJQKA])', ten: '(?:T|10)' },
+  { rank: '[2-9TJQKA]', ten: 'T' },
+].map(({ rank, ten }) => ({
+  ten,
+  run: new RegExp(`(?:${rank}${SUIT})+`, 'gu'),
+  inRun: new RegExp(`(${rank}${SUIT})(?=${rank}${SUIT})`, 'gu'),
+}));
 const WORD_CHAR = /[A-Za-z0-9]/;
+// #290: a short number closed by Hangul right after the cards is a Korean count ("AhKh3벳",
+// "Kh2장"), not glue. Only after the run: a number before cards has no such reading, and a
+// number that runs on into a letter or past three digits ("7c2d9f", a UUID tail) stays glue.
+const KOREAN_COUNT = /\d{1,3}[가-힣]/y;
 
 // Each maximal run of cards is judged as a whole: standing alone it is split into
 // bounded cards; glued to a letter or digit at either end, none of it is a card. The mask
-// is '0': still a word character (the glue stays), but neither a rank nor a lower-case
-// letter, so it never reads as the English word after an "As".
-function separateCardRuns(text) {
-  return text.replace(CARD_RUN, (run, offset, whole) => {
-    const glued = WORD_CHAR.test(whole[offset - 1] ?? '') || WORD_CHAR.test(whole[offset + run.length] ?? '');
-    return glued ? '0'.repeat(run.length) : run.replace(CARD_IN_RUN, '$1 ');
+// is 'X': still a word character (the glue stays), but no rank (the ten's "10" included),
+// no suit in either case and not lower-case, so it never makes a card or reads as the
+// English word after an "As". Glue is judged on the original text, never on a mask.
+function separateCardRuns(text, reading) {
+  return text.replace(reading.run, (run, offset, whole) => {
+    const end = offset + run.length;
+    KOREAN_COUNT.lastIndex = end;
+    const counted = KOREAN_COUNT.test(whole);
+    const glued = WORD_CHAR.test(whole[offset - 1] ?? '') || (!counted && WORD_CHAR.test(whole[end] ?? ''));
+    if (glued) return 'X'.repeat(run.length);
+    const split = run.replace(reading.inRun, '$1 ');
+    return counted ? `${split} ` : split;
   });
 }
 
@@ -351,10 +371,13 @@ const SUIT_SYMBOLS = { s: '♠♤', h: '♥♡', d: '♦♢', c: '♣♧' };
 
 export function cardTokenLeaks(text, cardList) {
   if (typeof text !== 'string' || !text) return false;
-  text = separateCardRuns(text);
+  return READINGS.some((reading) => readingLeaks(separateCardRuns(text, reading), cardList, reading.ten));
+}
+
+function readingLeaks(text, cardList, ten) {
   for (const card of cardList) {
     if (typeof card !== 'string' || !CARD_RE.test(card)) continue;
-    const rank = card[0];
+    const rank = card[0] === 'T' ? ten : card[0];
     const suit = card[1];
     // A suit symbol is checked on its own: an English "As" elsewhere never hides an "A♠".
     if (new RegExp(`(?<![A-Za-z0-9])${rank}[${SUIT_SYMBOLS[suit]}](?![A-Za-z0-9])`, 'u').test(text)) return true;
@@ -400,6 +423,19 @@ export function assertHostText(body, lookupRecord) {
 export function hostAnnotationLeaks(row, lookupRecord) {
   try {
     assertHostText({ trainingAnnotations: [row] }, lookupRecord);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+// #290: a coach note restored from a snapshot or its history is judged as one published
+// today, so a note an earlier version accepted is not shown again. A note that names no
+// hand cannot be judged. True means the host must not see it.
+export function hostCoachLeaks(note, lookupRecord) {
+  if (!Number.isSafeInteger(note?.handNo) || note.handNo < 1) return true;
+  try {
+    assertHostText({ coach: [note] }, lookupRecord);
     return false;
   } catch {
     return true;

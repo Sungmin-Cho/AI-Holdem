@@ -38,6 +38,7 @@ import {
   validateMessages,
   assertHostText,
   hostAnnotationLeaks,
+  hostCoachLeaks,
   sessionHasParticipants,
   nextDecisionFromViews,
 } from '../publish-contract.js';
@@ -478,16 +479,40 @@ function restoreAnnotationRow(row, { machine, literals, gate, hostTextLeaks = ()
 
 // #289: in a multiplayer session a restored explanation meets the live publish rule for
 // other participants' hidden cards (assertHostText). Unreadable material drops them all.
+// #290: so does a restored coach note. A roster that cannot be read is no proof of a
+// session without participants: the engine's seats decide.
 function restoredHostTextGate(gameDir, expectedSessionToken) {
+  const open = { annotation: () => false, coach: () => false };
+  let roster = null;
+  let rosterMissing = false;
   try {
-    if (!sessionHasParticipants(readPlayers(gameDir))) return () => false;
-    const engineState = validatePrivateEngineState(
-      readSecurityJson(gameDir, ['state.json']),
-      { expectedSessionToken },
-    );
-    return (row) => hostAnnotationLeaks(row, (handNo) => lookupHandRecord(gameDir, engineState, handNo));
+    const players = readSecurityJson(gameDir, ['players.json']);
+    roster = Array.isArray(players) ? players : (Array.isArray(players?.players) ? players.players : null);
+  } catch (error) {
+    rosterMissing = error?.code === 'ENOENT';
+  }
+  if (roster && !sessionHasParticipants(roster)) return open;
+  let engine;
+  try {
+    engine = readSecurityJson(gameDir, ['state.json']);
+  } catch (error) {
+    // Neither file exists: nothing on disk names a participant, and the live relay treats
+    // the directory as a solo session too.
+    if (rosterMissing && error?.code === 'ENOENT') return open;
+    return { annotation: () => true, coach: () => true };
+  }
+  try {
+    const engineState = validatePrivateEngineState(engine, { expectedSessionToken });
+    if (!roster && !sessionHasParticipants(engineState.seats)) return open;
+    // One load reads each hand's record once, however many restored rows name it.
+    const records = new Map();
+    const lookup = (handNo) => {
+      if (!records.has(handNo)) records.set(handNo, lookupHandRecord(gameDir, engineState, handNo));
+      return records.get(handNo);
+    };
+    return { annotation: (row) => hostAnnotationLeaks(row, lookup), coach: (note) => hostCoachLeaks(note, lookup) };
   } catch {
-    return () => true;
+    return { annotation: () => true, coach: () => true };
   }
 }
 
@@ -571,6 +596,15 @@ function restoreHistory(rawHistory, context) {
       if (rows.length) payload.trainingAnnotations = rows;
       else delete payload.trainingAnnotations;
     }
+    // #290: no reader proves anything from a history's coach notes (the coach reads only the
+    // snapshot's own), so one the host must not see leaves the history for good, unlike the
+    // snapshot's own notes, which are kept as published and only withheld.
+    if (Array.isArray(payload.coach)) {
+      const notes = payload.coach.filter((note) => !context.coachLeaks(note));
+      dropped += payload.coach.length - notes.length;
+      if (notes.length) payload.coach = notes;
+      else delete payload.coach;
+    }
     if ('handReplays' in payload) {
       const rows = handReplayList(restoreHandReplays(
         payload.handReplays, context.root, context.engineState, context.assertNoStudyCapability,
@@ -631,7 +665,8 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       literals = null;
     }
     const gate = { gameOver: engineGameOver(gameDir, expectedSessionToken) };
-    const hostTextLeaks = restoredHostTextGate(gameDir, expectedSessionToken);
+    const hostTextGate = restoredHostTextGate(gameDir, expectedSessionToken);
+    const hostTextLeaks = hostTextGate.annotation;
 
     const restoredAnnotations = Object.create(null);
     let droppedAnnotations = migrated.dropped;
@@ -678,11 +713,16 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       engineState = null;
     }
     const replay = restoreHistory(raw.history, {
-      machineById, literals, gate, hostTextLeaks, annotations: restoredAnnotations, legacyProvenance,
+      machineById, literals, gate, hostTextLeaks, coachLeaks: hostTextGate.coach, annotations: restoredAnnotations, legacyProvenance,
       root: gameDir, engineState, assertNoStudyCapability: assertRaw,
     });
-    if (droppedAnnotations || replay.dropped) {
-      process.stderr.write(`ui-snapshot restore dropped ${droppedAnnotations} annotation(s) and ${replay.dropped} history row(s)\n`);
+    // #290: the snapshot's own coach notes stay as published, because the coach's reconcile,
+    // overfold and migration read them back from this file and a note dropped here could
+    // never be proven. One the host must not see is withheld from what the host is sent.
+    const coach = Array.isArray(raw.coach) ? mergeCoach([], raw.coach) : [];
+    const hiddenCoach = new Set(coach.filter((note) => hostTextGate.coach(note)));
+    if (droppedAnnotations || replay.dropped || hiddenCoach.size) {
+      process.stderr.write(`ui-snapshot restore dropped ${droppedAnnotations} annotation(s) and ${replay.dropped} history row(s), withheld ${hiddenCoach.size} coach note(s)\n`);
     }
     let views = raw.view ? { [HOST_ID]: raw.view } : undefined;
     let decision = raw.decision ?? null;
@@ -694,7 +734,8 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       view: raw.view ?? null,
       hint: raw.hint ?? null,
       log: Array.isArray(raw.log) ? raw.log : [],
-      coach: Array.isArray(raw.coach) ? mergeCoach([], raw.coach) : [],
+      coach,
+      hiddenCoach,
       training: migrated.training,
       trainingAnnotations: restoredAnnotations,
       review: raw.review,
@@ -910,7 +951,7 @@ function hostSnapshot(state, hint = null) {
     view: state.view,
     hint,
     log: state.log,
-    coach: state.coach,
+    coach: state.hiddenCoach?.size ? state.coach.filter((note) => !state.hiddenCoach.has(note)) : state.coach,
     training: state.training ?? [],
     trainingAnnotations: annotationsToArray(state.trainingAnnotations),
     turnDeadline: state.turnDeadline ?? null,
