@@ -760,13 +760,13 @@ test('M1: forged identity and detail leaves are rejected at the server, snapshot
 
 // --- M4: 복원된 history는 live merge와 같은 다섯 술어를 통과한 재투영이다 ---
 
-function seedSnapshot(dir, { training = [], trainingAnnotations = [], history = [], view = null }) {
+function seedSnapshot(dir, { training = [], trainingAnnotations = [], history = [], view = null, coach = [] }) {
   fs.writeFileSync(path.join(dir, 'ui-snapshot.json'), JSON.stringify({
     revision: history.length + 1,
     publishId: history.length + 1,
     view,
     log: [],
-    coach: [],
+    coach,
     training,
     trainingAnnotations,
     history,
@@ -1596,6 +1596,76 @@ test('#289 멀티 세션의 복원은 다른 인간의 비공개 카드를 담�
     assert.equal(sse.includes('7c 2d'), false);
     assert.equal((await snapshotOf(port)).trainingAnnotations.length, 0);
   });
+});
+
+// #290: a coach note restored in a multiplayer session meets the live participant rule. The
+// snapshot's own notes stay in the file, where the coach's reconcile reads them back, but the
+// host is not sent one that quotes a hidden card or names no readable hand; the history drops
+// such notes. A clean note is sent from both.
+test('#290 멀티 세션의 복원은 숨은 카드를 인용한 코치 노트를 호스트에게 보내지 않고 파일에는 남긴다', async () => {
+  const leaking = tmpDir();
+  noAiSessionFixtures(leaking, { h1Holes: ['Th', '2d'] });
+  const ten = { handNo: 1, text: '상대는 10♥를 버렸다' };
+  seedSnapshot(leaking, {
+    coach: [ten],
+    history: [
+      { revision: 1, at: '2026-01-01T00:00:00.000Z', payload: { coach: [{ handNo: 1, text: '상대는 2d3장을 버렸다' }] } },
+      { revision: 2, at: '2026-01-01T00:00:01.000Z', payload: { coach: [{ handNo: 9, text: '기록 없는 핸드의 노트' }] } },
+      { revision: 3, at: '2026-01-01T00:00:02.000Z', payload: { coach: [{ text: '핸드를 적지 않은 노트' }] } },
+    ],
+  });
+  await withServer(leaking, async ({ port }) => {
+    const sse = await collectSse(port);
+    for (const text of ['10♥', '2d3장', '기록 없는 핸드의 노트', '핸드를 적지 않은 노트']) assert.equal(sse.includes(text), false, text);
+    assert.deepEqual((await snapshotOf(port)).coach, []);
+    // A later publication rewrites the file: the withheld note is still there for reconcile.
+    const rewrite = await post(port, { publishId: 5, training: [summaryOf()] });
+    assert.deepEqual([rewrite.status, rewrite.json.applied], [200, true], JSON.stringify(rewrite.json));
+    const file = JSON.parse(fs.readFileSync(path.join(leaking, 'ui-snapshot.json'), 'utf8'));
+    assert.deepEqual(file.coach, [ten]);
+    assert.equal((await snapshotOf(port)).coach.length, 0);
+  });
+  const clean = tmpDir();
+  noAiSessionFixtures(clean, { h1Holes: ['Th', '2d'] });
+  const note = { handNo: 1, text: '내 AhKh로 3벳했고 10bb를 더 넣었다' };
+  const historyOnly = { handNo: 1, text: '히스토리에만 남은 깨끗한 노트' };
+  seedSnapshot(clean, {
+    coach: [note],
+    history: [{ revision: 1, at: '2026-01-01T00:00:00.000Z', payload: { coach: [historyOnly] } }],
+  });
+  await withServer(clean, async ({ port }) => {
+    assert.equal((await collectSse(port)).includes(historyOnly.text), true);
+    assert.deepEqual((await snapshotOf(port)).coach.map((row) => row.text), [note.text]);
+  });
+});
+
+// #290: a roster that cannot be read does not make a multiplayer session look solo: the
+// engine's seats decide, so a leaking note is still withheld, and a solo session sends it.
+test('#290 로스터를 읽지 못해도 엔진 좌석이 참가자를 보이면 복원 코치 노트를 검사한다', async () => {
+  for (const roster of ['missing', 'corrupt']) {
+    const spoil = (dir) => {
+      const file = path.join(dir, 'players.json');
+      if (roster === 'missing') fs.rmSync(file);
+      else fs.writeFileSync(file, '{not json');
+    };
+    const note = { handNo: 1, text: '상대는 10♥를 버렸다' };
+    const multi = tmpDir();
+    noAiSessionFixtures(multi, { h1Holes: ['Th', '2d'] });
+    seedSnapshot(multi, { coach: [note], history: [{ revision: 1, at: '2026-01-01T00:00:00.000Z', payload: { coach: [note] } }] });
+    spoil(multi);
+    await withServer(multi, async ({ port }) => {
+      assert.equal((await collectSse(port)).includes('10♥'), false, roster);
+      assert.deepEqual((await snapshotOf(port)).coach, [], roster);
+    });
+    const solo = tmpDir();
+    writeSecurityFixtures(solo);
+    seedSnapshot(solo, { coach: [note], history: [{ revision: 1, at: '2026-01-01T00:00:00.000Z', payload: { coach: [note] } }] });
+    spoil(solo);
+    await withServer(solo, async ({ port }) => {
+      assert.equal((await collectSse(port)).includes('10♥'), true, roster);
+      assert.deepEqual((await snapshotOf(port)).coach.map((row) => row.text), [note.text], roster);
+    });
+  }
 });
 
 test('#289 config가 AI를 세는데 좌석이 모두 human으로 적힌 세션은 빈 deny 목록을 허용하지 않는다', async () => {
