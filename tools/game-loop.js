@@ -47,6 +47,7 @@ import {
 } from './player-runtime.js';
 import {
   assertHostText,
+  cardTokenLeaks,
   coachNoteStrings,
   collectPrivateLiteralsDetailed,
   gameEpochOf,
@@ -4562,9 +4563,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if ([...others].some((literal) => literal && strings.some((value) => value.includes(literal)))) {
       throw codedError('INVALID_COACH_OUTPUT', '코치 출력에 private literal이 포함됐습니다.');
     }
+    // #289: in a multiplayer session the relay refuses a note that quotes another
+    // participant's hidden card in any spelling (suit case or symbol, joined cards).
+    // The same rule refuses it here, so a note accepted is never one the relay refuses.
+    // It does not depend on the hand in progress, so it is judged before any deferral.
+    if (coachHostTextLeaks(note, handNo)) {
+      throw codedError('INVALID_COACH_OUTPUT', '코치 출력이 다른 참가자의 비공개 카드를 인용합니다.');
+    }
     const cards = forbiddenDetailed?.cards ?? new Set();
+    // A hidden card quoted as a substring, or as a token in another spelling ("KD", "K♦").
     const cardsHit = [...cards].filter((literal) => (
-      literal && strings.some((value) => value.includes(literal))
+      literal && strings.some((value) => value.includes(literal) || cardTokenLeaks(value, [literal]))
     ));
     if (cardsHit.length) {
       const publicCards = replayPublicCards(replay);
@@ -4572,12 +4581,6 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         throw codedError('DEFER_COACH_OUTPUT', '카드 인용이 진행 중 핸드와 겹칩니다.', { note });
       }
       throw codedError('INVALID_COACH_OUTPUT', '코치 출력이 replay 공개 범위 밖 카드를 인용합니다.');
-    }
-    // #289: in a multiplayer session the relay refuses a note that quotes another
-    // participant's hidden card in any spelling (suit case or symbol, joined cards).
-    // The same rule refuses it here, so a note accepted is never one the relay refuses.
-    if (coachHostTextLeaks(note, handNo)) {
-      throw codedError('INVALID_COACH_OUTPUT', '코치 출력이 다른 참가자의 비공개 카드를 인용합니다.');
     }
     return note;
   };
@@ -4592,7 +4595,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         return record ? { ...record, seats: engine?.seats } : null;
       });
       return false;
-    } catch {
+    } catch (error) {
+      // FORBIDDEN_LITERAL: a quoted card. FORBIDDEN_LITERAL_UNAVAILABLE: the hand record could
+      // not be read; refused either way, the code keeps the two apart in the log.
+      log('coach-host-text-refused', { handNo, code: error.code ?? 'ERROR' });
       return true;
     }
   };
@@ -7217,7 +7223,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     } finally {
       publishDeadlineNs = null;
     }
-    // A step can also leave work behind without failing outright: what is left is counted.
+    return recordWaiverOutcome(failedSteps);
+  };
+
+  // A step can also leave work behind without failing outright: what is left is counted,
+  // for every phase a waiver settles from.
+  const recordWaiverOutcome = (failedSteps) => {
     const leftovers = [];
     if (fs.existsSync(publishAttemptPath)) leftovers.push('publish-attempt');
     const queuedCoach = Object.keys(readCoachAuthority()?.publishQueue ?? {}).length;
@@ -8842,6 +8853,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (state.phase === 'finalizing') {
       await finalize({ waiveReview: true });
       if (stopRequested) return readLoopState();
+    } else {
+      // review_generated/review_published: the cutoff and drains ran before the review was
+      // generated; only what its publication may have left is counted.
+      recordWaiverOutcome([]);
     }
     const waiver = readLoopState()?.reviewWaiver;
     appendNotice(`종합 리뷰 없이 결과를 정리합니다 (사유: ${waiver?.haltCode ?? '확인 불가'}).`);

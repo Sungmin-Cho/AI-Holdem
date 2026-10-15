@@ -1945,6 +1945,28 @@ test('#288 멀티 토너먼트에서 호스트가 먼저 탈락해도 completed 
   assert.deepEqual(snapshot.coach.map((note) => note.handNo).sort((a, b) => a - b), [1, 2]);
 });
 
+// #289: the coach's relay rule refuses only hidden participant cards. In hand 1 the host
+// held 3c 3d and h2's As Ah were shown down: a note quoting them is accepted and published.
+test('#289 멀티 세션의 코치는 공개된 참가자 카드와 호스트 카드 인용을 그대로 게시한다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedHostBustMultiGame(gameDir);
+  const text = '내 3c 3d로 콜했고, 상대가 쇼다운에서 보여 준 A♠ A♥에 졌습니다.';
+  const upper = makeCoachAdapter({ rounds: [{ raw: JSON.stringify({ handNo: 1, text }) }] });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper, loopOpts: { controlProtocolVersion: 1 }, stateOverrides: { handNo: 2 },
+  });
+
+  await loop.resume();
+  await loop.run();
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.phase, 'done', JSON.stringify(state.halt ?? null));
+  const note = readJson(path.join(gameDir, 'ui-snapshot.json')).coach.find((row) => row.handNo === 1);
+  assert.equal(note.unavailable, undefined, JSON.stringify(note));
+  assert.ok(note.text.startsWith(text), note.text);
+  assert.equal(upper.starts.length >= 1 && upper.starts.length < 3, true);
+});
+
 // #289: h1 folded 7h 2c unseen in hand 1. A coach note quoting them with suit symbols
 // passes the coach's substring literals, but the relay refuses it; the coach applies the
 // relay's own rule first, so the note is refused here and the game still finishes.
@@ -2278,6 +2300,22 @@ test('#288 review_generated에서 멈춘 게임의 REVIEW_WAIVED는 생성된 �
   assert.equal(state.reviewWaiver.haltCode, 'REVIEW_FAILED');
   assert.equal(publishInvocations(calls).some((args) => path.basename(flagValue(args, '--from') ?? '') === '.review.json'), false);
   assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).review, undefined);
+});
+
+test('#288 review_generated의 REVIEW_WAIVED도 리뷰 게시가 남긴 attempt를 잔여로 보고한다', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  await reviewGeneratedHalt(gameDir);
+  fs.writeFileSync(path.join(gameDir, '.publish-attempt.json'), JSON.stringify({ publishId: 9, body: { review: 'x', publishId: 9 } }));
+  const { loop } = waiverLoop(t, gameDir, { operationId: 'waive-9' });
+
+  await loop.resume();
+  await loop.run();
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.phase, 'done');
+  assert.deepEqual(state.reviewWaiver.failedSteps, []);
+  assert.deepEqual(state.reviewWaiver.leftovers, ['publish-attempt']);
+  assert.ok(state.notices.some((notice) => notice.includes('publish-attempt')));
 });
 
 test('#288 멈춘 loop owner의 코치 런타임 종료 영수증이 없으면 REVIEW_WAIVED를 거부한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {

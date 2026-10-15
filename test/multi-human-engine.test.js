@@ -579,7 +579,7 @@ test('cardTokenLeaks는 붙여 쓴 카드도 잡고 핸드 클래스는 카드�
   assert.equal(cardTokenLeaks('As you can see', ['As']), false);
   // A run of cards glued to a letter or digit is not cards, as a single card glued to one
   // is not ("x7c"): the same word-boundary rule for one card and for a run.
-  for (const text of ['AKs로 오픈', 'QJs', 'T9s 콜', 'As you can see', 'AKS', 'Ace', 'STACKS', 'TASKS', 'OUTS', 'NUTS', 'aa7c2d', '7c2d9a1b', '7c2d9', 'AKs7c2d', '7♣2♦a', 'x7c']) {
+  for (const text of ['AKs로 오픈', 'QJs', 'T9s 콜', 'As you can see', 'AKS', 'Ace', 'STACKS', 'TASKS', 'OUTS', 'NUTS', 'aa7c2d', '7c2d9a1b', '7c2d9', 'AKs7c2d', '7♣2♦a', 'x7♣2♦', 'x7♣2d', 'x7c']) {
     assert.equal(cardTokenLeaks(text, ['Ks', 'Js', '9s', 'Ts', 'As', '7c', '2d']), false, text);
   }
   // A run of cards counts only when it stands alone: a hex digest holds no cards.

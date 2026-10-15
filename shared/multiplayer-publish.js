@@ -19,8 +19,18 @@ const RESULT = new Set(['win', 'lose', 'completed', 'abort']);
 // a hex digest) is not cards, as a single card glued to one ("x7c") is not. Each run
 // found is split so every card meets the boundary below.
 const CARD_TOKEN = '[2-9TJQKA][cdhsCDHS♠♥♦♣♤♡♢♧]';
-const CARD_RUN = new RegExp(`(?<![A-Za-z0-9])(?:${CARD_TOKEN}){2,}(?![A-Za-z0-9])`, 'gu');
+const CARD_RUN = new RegExp(`(?:${CARD_TOKEN})+`, 'gu');
 const CARD_IN_RUN = new RegExp(`(${CARD_TOKEN})(?=${CARD_TOKEN})`, 'gu');
+const WORD_CHAR = /[A-Za-z0-9]/;
+
+// Each maximal run of cards is judged as a whole: standing alone it is split into
+// bounded cards; glued to a letter or digit at either end, none of it is a card.
+function separateCardRuns(text) {
+  return text.replace(CARD_RUN, (run, offset, whole) => {
+    const glued = WORD_CHAR.test(whole[offset - 1] ?? '') || WORD_CHAR.test(whole[offset + run.length] ?? '');
+    return glued ? 'x'.repeat(run.length) : run.replace(CARD_IN_RUN, '$1 ');
+  });
+}
 
 function coded(code, message) {
   return Object.assign(new Error(message || code), { code });
@@ -339,7 +349,7 @@ const SUIT_SYMBOLS = { s: '♠♤', h: '♥♡', d: '♦♢', c: '♣♧' };
 
 export function cardTokenLeaks(text, cardList) {
   if (typeof text !== 'string' || !text) return false;
-  text = text.replace(CARD_RUN, (run) => run.replace(CARD_IN_RUN, '$1 '));
+  text = separateCardRuns(text);
   for (const card of cardList) {
     if (typeof card !== 'string' || !CARD_RE.test(card)) continue;
     const rank = card[0];

@@ -4426,6 +4426,54 @@ test('replay 범위 밖 카드 인용은 지연이 아니라 INVALID_COACH_OUTPU
   assert.equal(auth.deferred?.['1'], undefined);
 });
 
+// #289: a hidden AI card quoted in another spelling — an upper-case suit or a suit
+// symbol — is the same card, refused and retried like the lower-case one.
+for (const [spelling, rewrite] of [
+  ['upper-case suit', (card) => `${card[0]}${card[1].toUpperCase()}`],
+  ['suit symbol', (card) => `${card[0]}${{ s: '♠', h: '♥', d: '♦', c: '♣' }[card[1]]}`],
+]) {
+  test(`replay 범위 밖 카드를 ${spelling}로 인용해도 INVALID_COACH_OUTPUT 재시도다`, { timeout: 20_000 }, async (t) => {
+    let decisionId = 'd-1-preflop-0';
+    let ghost = null;
+    const rounds = [
+      {
+        get raw() {
+          return JSON.stringify({
+            handNo: 1,
+            text: '알 수 없는 카드를 인용합니다.',
+            decisions: [{
+              decisionId,
+              why: '왜 그 액션을 했는지 설명합니다.',
+              outcome: ghost ? `상대는 ${rewrite(ghost)}를 가지고 있었다.` : '보드만 근거로 평가한다.',
+              alternative: '다른 라인을 검토할 수 있었습니다.',
+            }],
+          });
+        },
+      },
+      { raw: JSON.stringify({ handNo: 1, text: '카드 없이 재작성했습니다.' }) },
+    ];
+    const upper = makeCoachAdapter({ rounds });
+    const { gameDir, loop } = await setupCoachHand(t, {
+      upper,
+      bootstrap: { replayReveal: 'showdown' },
+      loopOpts: {
+        async coachCaptureCheckpoint() {
+          const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
+          decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
+          const record = readJson(path.join(gameDir, 'hands', 'hand-0001.json'));
+          const folded = (record.folded ?? []).find((pid) => pid !== 'user') ?? 'p1';
+          ghost = record.holes[folded][0];
+        },
+      },
+    });
+    const running = startRun(loop);
+    const note = await waitForCoachNote(gameDir, 1);
+    await stopRun(loop, running);
+    assert.equal(upper.starts.length, 2, `${spelling} of ${ghost} was accepted`);
+    assert.equal(note.text, '카드 없이 재작성했습니다.');
+  });
+}
+
 test('showdown에서 진행 중 상대 Kh 인용은 deferred가 아니라 INVALID_COACH_OUTPUT 재시도다', { timeout: 20_000 }, async (t) => {
   let decisionId = 'd-1-preflop-0';
   let liveKh = null;
