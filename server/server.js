@@ -487,7 +487,12 @@ function restoredHostTextGate(gameDir, expectedSessionToken) {
       readSecurityJson(gameDir, ['state.json']),
       { expectedSessionToken },
     );
-    const lookup = (handNo) => lookupHandRecord(gameDir, engineState, handNo);
+    // One load reads each hand's record once, however many restored rows name it.
+    const records = new Map();
+    const lookup = (handNo) => {
+      if (!records.has(handNo)) records.set(handNo, lookupHandRecord(gameDir, engineState, handNo));
+      return records.get(handNo);
+    };
     return { annotation: (row) => hostAnnotationLeaks(row, lookup), coach: (note) => hostCoachLeaks(note, lookup) };
   } catch {
     return { annotation: () => true, coach: () => true };
