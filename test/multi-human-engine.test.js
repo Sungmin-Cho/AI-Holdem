@@ -578,7 +578,7 @@ test('cardTokenLeaks는 붙여 쓴 카드도 잡고 핸드 클래스는 카드�
   assert.equal(cardTokenLeaks('As you can see, As가 블로커입니다.', ['As']), true);
   assert.equal(cardTokenLeaks('As you can see', ['As']), false);
   // A masked glued run after a hidden "As" is not an English word that exempts it.
-  for (const text of ['상대의 As 7c9', 'As 7c2d9', 'As x7c2d 이후']) {
+  for (const text of ['상대의 As 7c9', 'As 7c2d9', 'As 7c2dx 이후', 'As x7c2d 이후']) {
     assert.equal(cardTokenLeaks(text, ['As']), text !== 'As x7c2d 이후', text);
   }
   // A run of cards glued to a letter or digit is not cards, as a single card glued to one
