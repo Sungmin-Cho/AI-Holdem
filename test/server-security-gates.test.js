@@ -1416,8 +1416,8 @@ test('deny list is never empty under all for policy and llm runtimes', async () 
 // #289: a session with no AI seat has no persona/policy literal, and under replay-all
 // between hands no hidden card is in the deny scope. The empty list is then the
 // truthful answer from validated inputs, not a collection failure.
-function noAiSessionFixtures(dir, { players, seats } = {}) {
-  const record = handRecordFixture(1, { holes: { user: ['Ah', 'Kh'], h1: ['7c', '2d'] } });
+function noAiSessionFixtures(dir, { players, seats, h1Holes = ['7c', '2d'] } = {}) {
+  const record = handRecordFixture(1, { holes: { user: ['Ah', 'Kh'], h1: h1Holes } });
   delete record.holes.p1;
   delete record.startStacks.p1;
   delete record.endStacks.p1;
@@ -1496,12 +1496,33 @@ test('#289 AI 0명 세션의 live 게시는 붙여 쓴 카드와 핸드를 알 �
     });
     assert.equal(noHand.status, 500);
     assert.equal(noHand.json.code, 'FORBIDDEN_LITERAL_UNAVAILABLE');
-    // A hand class is not a card: the host's own AKs-style notation passes.
+    const upper = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '상대 패는 7C 2D였다')],
+    });
+    assert.equal(upper.status, 400);
+    assert.equal(upper.json.code, 'FORBIDDEN_LITERAL');
+  });
+});
+
+test('#289 핸드 클래스 표기는 숨은 카드와 글자가 겹쳐도 카드로 막지 않는다', async () => {
+  const dir = tmpDir();
+  // h1 hides Ks: "AKs" contains the letters "Ks" but names a hand class, not that card.
+  noAiSessionFixtures(dir, { h1Holes: ['Ks', '2d'] });
+  const summary = summaryOf();
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
     const handClass = await post(port, {
       publishId: 2,
       trainingAnnotations: [annotationRow(summary, 'explanation', 'AKs로 오픈하는 스팟이다')],
     });
     assert.equal(handClass.status, 200, JSON.stringify(handClass.json));
+    const card = await post(port, {
+      publishId: 3,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '상대는 Ks를 들고 있었다')],
+    });
+    assert.equal(card.status, 400, JSON.stringify(card.json));
+    assert.equal(card.json.code, 'FORBIDDEN_LITERAL');
   });
 });
 

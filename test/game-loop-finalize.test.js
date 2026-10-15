@@ -1944,6 +1944,24 @@ test('#288 멀티 토너먼트에서 호스트가 먼저 탈락해도 completed 
   assert.deepEqual(snapshot.coach.map((note) => note.handNo).sort((a, b) => a - b), [1, 2]);
 });
 
+test('#288 호스트가 먼저 탈락한 멀티 토너먼트는 상위 모델 없이도 기계 리뷰로 끝난다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedHostBustMultiGame(gameDir);
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: null, loopOpts: { controlProtocolVersion: 1 }, stateOverrides: { handNo: 2, upperRuntime: null },
+  });
+
+  await loop.resume();
+  await loop.run();
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.phase, 'done', JSON.stringify(state.halt ?? null));
+  const review = readJson(path.join(gameDir, 'ui-snapshot.json')).review;
+  assert.equal(typeof review, 'string');
+  assert.match(review, /플레이한 핸드: 1핸드/);
+  assert.ok(readLoopLog(gameDir).some((row) => row.event === 'review-machine-fallback'));
+});
+
 test('#288 멀티 토너먼트도 호스트가 받은 핸드 수와 stats user.sample이 다르면 fail closed한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedHostBustMultiGame(gameDir);
@@ -2031,11 +2049,14 @@ async function haltedReviewStage(t) {
   return { gameDir, init, engineBytes: fs.readFileSync(enginePath) };
 }
 
-function waiverLoop(t, gameDir, { operationId = null, upper = makeCoachAdapter() } = {}) {
+function waiverLoop(t, gameDir, { operationId = null, upper = makeCoachAdapter(), loopOpts = {}, seed = null } = {}) {
+  seed?.();
   const calls = [];
+  let resolved = 0;
   const loop = createGameLoop({
     gameDir,
     resolver: async ({ need }) => {
+      resolved += 1;
       assert.equal(need, 'upper-only');
       return { player: null, upper, notices: [] };
     },
@@ -2046,16 +2067,31 @@ function waiverLoop(t, gameDir, { operationId = null, upper = makeCoachAdapter()
       onPublishInvoke: (args) => calls.push({ kind: 'publish', args }),
       scanCoachRuntimeProcesses: TEST_DEFAULT_SCAN_COACH_RUNTIME_PROCESSES,
       ...(operationId ? { abortUnrecoverable: { operationId, reason: 'REVIEW_WAIVED' } } : {}),
+      ...loopOpts,
     },
   });
   t.after(() => loop.requestStop().catch(() => {}));
-  return { loop, calls, upper };
+  return { loop, calls, upper, resolverCalls: () => resolved };
+}
+
+// A finalizing game halted in its review stage by a loop that stopped cleanly.
+function finalizingStateWithHalt(gameDir, sessionToken, overrides = {}) {
+  seedGameOverSnapshot(gameDir);
+  writeLoopStateFixture(gameDir, sessionToken, {
+    phase: 'finalizing',
+    handNo: 1,
+    playerRuntime: null,
+    upperRuntime: 'coach-fake',
+    halt: { code: 'FINALIZATION_ABORTED', message: '리뷰 게이트를 열지 않습니다.' },
+    coachRuntimeClosures: [{ ownerSessionId: 'old-owner', confirmedAt: '2026-10-15T00:00:00.000Z' }],
+    ...overrides,
+  });
 }
 
 test('#288 REVIEW_WAIVED는 리뷰 단계에서 멈춘 결과 확정 게임을 결과 그대로 리뷰 없이 done으로 끝낸다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
   const { gameDir, engineBytes } = await haltedReviewStage(t);
   const halted = fs.readFileSync(path.join(gameDir, 'loop-state.json'));
-  const { loop, calls, upper } = waiverLoop(t, gameDir, { operationId: 'waive-1' });
+  const { loop, calls, upper, resolverCalls } = waiverLoop(t, gameDir, { operationId: 'waive-1' });
 
   await loop.resume();
   await loop.run();
@@ -2084,6 +2120,32 @@ test('#288 REVIEW_WAIVED는 리뷰 단계에서 멈춘 결과 확정 게임을 �
   assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).review, undefined);
   assert.deepEqual(fs.readFileSync(path.join(gameDir, 'state.json')), engineBytes);
   assert.ok(readLoopLog(gameDir).some((row) => row.event === 'review-waived' && row.operationId === 'waive-1'));
+  assert.equal(resolverCalls(), 0, 'a waiver run starts no model probe');
+  assert.deepEqual(state.reviewWaiver.unsettled, []);
+});
+
+test('#288 REVIEW_WAIVED는 게시하지 못한 항목을 세어 reviewWaiver와 notice에 남기고 done으로 끝낸다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  // A coach Q the relay never takes: its publish fails, and the waiver goes on to done.
+  const { loop } = waiverLoop(t, gameDir, {
+    operationId: 'waive-7',
+    seed: () => finalizingStateWithHalt(gameDir, init.sessionToken),
+    loopOpts: {
+      onPublishInvoke: (args) => {
+        if (!args.includes('--view-only')) throw Object.assign(new Error('relay refused'), { code: 'PUBLISH_REJECTED' });
+      },
+    },
+  });
+
+  await loop.resume();
+  await loop.run();
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.phase, 'done');
+  assert.ok(state.reviewWaiver.unsettled.length > 0, JSON.stringify(state.reviewWaiver));
+  assert.ok(state.reviewWaiver.unsettled.some((row) => row.startsWith('coach-queue')), JSON.stringify(state.reviewWaiver.unsettled));
+  assert.ok(state.notices.some((notice) => notice.startsWith('리뷰 없는 결과 정리 뒤 게시하지 못한 항목이 남았습니다')));
 });
 
 test('#288 REVIEW_WAIVED는 리뷰 단계 halt가 없는 게임을 아무것도 쓰지 않고 거부한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
@@ -2176,42 +2238,19 @@ test('#288 멈춘 loop owner의 코치 런타임 종료 영수증이 없으면 R
   assert.equal(fs.readdirSync(gameDir).some((name) => name.startsWith('loop-state.abandoned.')), false);
 });
 
-test('#288 REVIEW_WAIVED도 종료를 확인하지 못한 코치가 있으면 done으로 끝내지 않는다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+// #288: a waiver run starts no model work, but a detached solver it cannot prove ended
+// (an unreadable record) still keeps the game from being called done.
+test('#288 REVIEW_WAIVED도 종료를 확인하지 못한 학습 solver가 있으면 done으로 끝내지 않는다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
-  let release;
-  const gate = new Promise((resolve) => { release = resolve; });
-  t.after(() => release());
-  const upper = makeCoachAdapter({
-    rounds: [{
-      gate,
-      raw: JSON.stringify({ handNo: 1, text: '종료를 확인할 수 없는 코치' }),
-      terminate: { confirmed: false, reason: 'still-alive' },
-    }],
-  });
-  const clock = createJumpClock();
-  const resultWaitMs = 5_000 * WIN32_SCALE;
-  const leadMs = 4_300 * WIN32_SCALE;
-  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
-    upper,
-    stateOverrides: {
-      halt: { code: 'FINALIZATION_ABORTED', message: '리뷰 게이트를 열지 않습니다.' },
-      coachRuntimeClosures: [{ ownerSessionId: 'old-owner', confirmedAt: '2026-10-15T00:00:00.000Z' }],
-    },
-    loopOpts: {
-      finalizeBudgetMs: resultWaitMs + leadMs,
-      finalizeCutoffLeadMs: leadMs,
-      monotonicNs: clock.monotonicNs,
-      abortUnrecoverable: { operationId: 'waive-6', reason: 'REVIEW_WAIVED' },
-    },
+  fs.writeFileSync(path.join(gameDir, '.solver-child.json'), '{');
+  const { loop, calls, resolverCalls } = waiverLoop(t, gameDir, {
+    operationId: 'waive-6',
+    loopOpts: { trainingEnabled: true, finalizeBudgetMs: 6_000, finalizeCutoffLeadMs: 2_000 },
+    seed: () => finalizingStateWithHalt(gameDir, init.sessionToken),
   });
 
   await loop.resume();
-  await waitFor(
-    () => readJson(path.join(gameDir, '.coach-authority.json')).hands?.['1']?.agentHandle,
-    'tracked coach was not bound before the cutoff',
-  );
-  clock.jumpBy(resultWaitMs);
   await assert.rejects(loop.run(), (error) => error.code === 'FINALIZATION_ABORTED');
 
   const state = readJson(path.join(gameDir, 'loop-state.json'));
@@ -2221,7 +2260,7 @@ test('#288 REVIEW_WAIVED도 종료를 확인하지 못한 코치가 있으면 do
   assert.equal(state.finalization.cutoff.reason, 'termination_unconfirmed');
   assert.equal(state.finalization.cutoff.terminationConfirmed, false);
   assert.equal(coachInvocations(calls, 'finalize-cutoff').length, 0);
-  assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).finalization, null);
+  assert.equal(resolverCalls(), 0, 'a waiver run starts no model probe');
 });
 
 test('종료: finalizing resume은 새 owner로 begin-owner를 한 번만 실행하고 봉인된 핸드를 재스폰하지 않는다', { timeout: 40_000 }, async (t) => {

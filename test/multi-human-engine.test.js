@@ -540,7 +540,8 @@ test('emptyPrivateLiteralsAllowed는 players·seats·config가 모두 AI 0명일
   const seats = humans.map((row) => ({ ...row, stack: 100, out: false }));
   const config = { aiCount: 0, humanCount: 2 };
   assert.equal(emptyPrivateLiteralsAllowed({ players: humans, engineState: { seats, config } }), true);
-  assert.equal(emptyPrivateLiteralsAllowed({ players: { players: humans }, engineState: { seats, config } }), true);
+  // Only the canonical array roster: a wrapper is not trusted to mean "no AI".
+  assert.equal(emptyPrivateLiteralsAllowed({ players: { players: humans }, engineState: { seats, config } }), false);
   // A legacy single-human state: seats without kind are AI unless they are the host.
   assert.equal(emptyPrivateLiteralsAllowed({
     players: humans,
@@ -570,8 +571,12 @@ test('cardTokenLeaks는 붙여 쓴 카드도 잡고 핸드 클래스는 카드�
   }
   assert.equal(cardTokenLeaks('7c2d', ['7c']), true);
   assert.equal(cardTokenLeaks('7c2d', ['2d']), true);
-  for (const text of ['AKs로 오픈', 'QJs', 'T9s 콜', 'As you can see']) {
+  for (const text of ['AKs로 오픈', 'QJs', 'T9s 콜', 'As you can see', 'AKS', 'Ace']) {
     assert.equal(cardTokenLeaks(text, ['Ks', 'Js', '9s', 'As']), false, text);
+  }
+  // A suit letter in either case names the same card, alone or joined.
+  for (const [text, card] of [['7C', '7c'], ['7c2D', '7c'], ['7c2D', '2d'], ['7C2D', '7c'], ['7C2D', '2d'], ['7c2dAh', 'Ah'], ['ah', 'Ah']]) {
+    assert.equal(cardTokenLeaks(text, [card]), card !== 'Ah' || text !== 'ah', `${text} ${card}`);
   }
 });
 

@@ -310,7 +310,9 @@ export function createSessionManager({
       if (loop.sessionToken!==engine.sessionToken || loop.gameEpoch!==epoch) return null;
       if (loop.aborting) {
         const checkpoint=validateAbortingCheckpoint(current.sessionDir,engine,loop);
-        return checkpoint ? {mode:checkpoint.mode} : null;
+        // #288: a waiver interrupted before it was recorded is still a waiver.
+        const waived=loop.abandonedPendingDecision?.reason==='REVIEW_WAIVED';
+        return checkpoint ? {mode:checkpoint.mode,...(waived ? {reason:'REVIEW_WAIVED'} : {})} : null;
       }
       const mode=abortModeFor(engine,loop);
       if (ABORTABLE_ERROR_CODES.includes(error))

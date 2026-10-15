@@ -15,6 +15,7 @@ import {resolveSessionReference} from '../tools/reference-source.js';
 import {sealPreparation} from '../tools/session-preparation.js';
 import {normalizeSetup,setupToArgs} from '../shared/game-setup.js';
 import {inspectStudyService,stopStudyService} from '../tools/study-service.js';
+import {hasCutoffMarker} from '../tools/training-control.js';
 
 const TIMEOUT=process.platform==='win32'?300000:30000;
 const body=(manager,kind)=>{const s=manager.snapshot();return {requestId:randomUUID(),kind,
@@ -508,6 +509,8 @@ test('#288 a result-final game halted in the review stage is settled without its
   assert.equal(loop.reviewWaiver.haltCode,'FINALIZATION_ABORTED');
   assert.equal(loop.abandonedPendingDecision.reason,'REVIEW_WAIVED');
   assert.deepEqual(fs.readFileSync(path.join(f.gameDir,'state.json')),before);
+  // The review is waived, the explanation cutoff is not.
+  assert.equal(hasCutoffMarker(f.gameDir),true);
 });
 test('#288 the review waiver is offered only for a cleanly stopped finalization halt',{timeout:TIMEOUT},async t=>{
   const halted={code:'FINALIZATION_ABORTED',message:'x'};
@@ -531,9 +534,10 @@ test('#288 the review waiver is offered only for a cleanly stopped finalization 
 });
 // #288: an app that crashed after the waiver was recorded runs the same journal row again
 // on its next start; the waiver is not taken twice and the game still settles.
-test('#288 an accepted waiver row replayed after its waiver was recorded settles the game once',{timeout:TIMEOUT},async t=>{
+for(const kind of ['end','restart'])test(`#288 an accepted waiver ${kind} row replayed after its waiver was recorded settles the game once`,{timeout:TIMEOUT},async t=>{
   const f=await haltedReviewStore(t,{halt:{code:'FINALIZATION_ABORTED',message:'x'}});
-  const end=body(f.manager,'end');
+  const oldGameId=f.manager.snapshot().gameId;
+  const end=body(f.manager,kind);
   const loopFile=path.join(f.gameDir,'loop-state.json');
   const rename=fs.renameSync;
   let cut=false;
@@ -556,10 +560,46 @@ test('#288 an accepted waiver row replayed after its waiver was recorded settles
   t.after(()=>restored.close());
   await restored.initialize();
   assert.equal(restored.receipt(end.requestId).status,'succeeded',receiptDiagnostics(restored,restored.receipt(end.requestId)));
-  assert.equal(restored.snapshot().state,'completed');
+  if(kind==='end')assert.equal(restored.snapshot().state,'completed');
+  else assert.notEqual(restored.snapshot().gameId,oldGameId,'restart opens the next game after the waiver');
   const loop=read(loopFile);
   assert.equal(loop.phase,'done');
   assert.equal(loop.reviewWaiver.operationId,end.requestId);
   assert.deepEqual(fs.readFileSync(path.join(f.gameDir,loop.abandonedPendingDecision.sidecar)),sidecar);
   assert.equal(fs.readdirSync(f.gameDir).filter((name)=>name.startsWith('loop-state.abandoned.')).length,1);
+});
+test('#288 a waiver interrupted after its checkpoint is still offered as a waiver and finishes',{timeout:TIMEOUT},async t=>{
+  const f=await haltedReviewStore(t,{halt:{code:'FINALIZATION_ABORTED',message:'x'}});
+  const end=body(f.manager,'end');
+  const loopFile=path.join(f.gameDir,'loop-state.json');
+  const rename=fs.renameSync;
+  let cut=false;
+  // Cut the write that would record the waiver: only the aborting checkpoint remains.
+  fs.renameSync=function(from,to){
+    if(!cut&&to===loopFile&&Object.hasOwn(read(from),'reviewWaiver')){cut=true;throw Object.assign(new Error('crash before waiver'),{code:'CRASH_BEFORE_WAIVER'});}
+    return rename.apply(this,arguments);
+  };
+  let row;
+  try {f.manager.command(end);row=await settle(f.manager,end.requestId);}
+  finally {fs.renameSync=rename;}
+  assertReceipt(f.manager,row,'failed');
+  assert.equal(read(loopFile).aborting.mode,'finalize');
+  assert.deepEqual(f.manager.snapshot().recoveryExit,{mode:'finalize',waivesReview:true});
+  const retry=body(f.manager,'end');f.manager.command(retry);
+  assertReceipt(f.manager,await settle(f.manager,retry.requestId),'succeeded');
+  assert.equal(f.manager.snapshot().state,'completed');
+  const loop=read(loopFile);
+  assert.equal(loop.phase,'done');
+  assert.equal(loop.reviewWaiver.operationId,end.requestId,'the first operation is the one finished');
+  // The second row took over the first one's waiver. Replayed after a crash that lost
+  // its receipt, it still settles: the recorded waiver continues, whatever its operation.
+  await f.manager.close();
+  const journal=path.join(f.root,'.app','commands',`${retry.requestId}.json`);
+  write(journal,{...read(journal),status:'accepted',error:undefined,completedAt:undefined});
+  const restored=createSessionManager({storeDir:f.root,resolver:async()=>({player:null,upper:null,notices:[]})});
+  t.after(()=>restored.close());
+  await restored.initialize();
+  assert.equal(restored.receipt(retry.requestId).status,'succeeded',receiptDiagnostics(restored,restored.receipt(retry.requestId)));
+  assert.equal(restored.snapshot().state,'completed');
+  assert.equal(read(loopFile).reviewWaiver.operationId,end.requestId);
 });

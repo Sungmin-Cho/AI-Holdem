@@ -7,6 +7,7 @@ import {createHash} from 'node:crypto';
 import {isDeepStrictEqual,promisify} from 'node:util';
 import {createOwnedTempDir,registerOwnedProcess} from './helpers/owned-fixtures.mjs';
 import {createGameLoop,initializePreparedSession} from '../tools/game-loop.js';
+import {ABANDON_REASONS,REVIEW_WAIVABLE_HALTS,reviewWaivable,validateAbortingCheckpoint} from '../tools/recovery-exit.js';
 const WIN32_SCALE=process.platform==='win32'?6:1;
 const TIMEOUT=20_000*WIN32_SCALE;
 const ENGINE=path.resolve('engine/cli.js');
@@ -383,4 +384,45 @@ test('#197 requestStop waits through real relay adoption before releasing the te
   await stopping;
   assert.equal(fs.existsSync(path.join(f.root,'loop.lock.d')),false);
   assert.notEqual(listenerCalls,0);
+});
+
+// #288: the waiver's premise, judged on the engine and loop records alone.
+test('#288 reviewWaivable needs a final result, a finalization halt and a clean stop of the owner that halted',()=>{
+  assert.deepEqual([...REVIEW_WAIVABLE_HALTS],['FINALIZATION_ABORTED','REVIEW_GATE_CLOSED','REVIEW_FAILED','COACH_RECONCILE_PENDING']);
+  assert.equal(ABANDON_REASONS.includes('REVIEW_WAIVED'),true);
+  const engine={gameOver:true,result:'completed'};
+  const state={phase:'finalizing',ownerSessionId:'o2',halt:{code:'FINALIZATION_ABORTED',message:'x'},
+    coachRuntimeClosures:[{ownerSessionId:'o1',confirmedAt:'2026-10-15T00:00:00.000Z'},{ownerSessionId:'o2',confirmedAt:'2026-10-15T00:00:01.000Z'}]};
+  assert.equal(reviewWaivable(engine,state),true);
+  for(const result of ['win','lose'])assert.equal(reviewWaivable({...engine,result},state),true,result);
+  for(const phase of ['review_generated','review_published'])assert.equal(reviewWaivable(engine,{...state,phase}),true,phase);
+  for(const code of REVIEW_WAIVABLE_HALTS)assert.equal(reviewWaivable(engine,{...state,halt:{code,message:'x'}}),true,code);
+  const refused=[
+    ['abort result',{...engine,result:'abort'},state],
+    ['game not over',{gameOver:false,result:null},state],
+    ['playing phase',engine,{...state,phase:'playing'}],
+    ['done phase',engine,{...state,phase:'done'}],
+    ['no halt',engine,{...state,halt:undefined}],
+    ['other halt',engine,{...state,halt:{code:'NO_COACH_OWNER',message:'x'}}],
+    ['operator recovery',engine,{...state,halt:{...state.halt,recovery:{commands:[]}}}],
+    ['null recovery',engine,{...state,halt:{...state.halt,recovery:null}}],
+    ['cleanup error',engine,{...state,cleanupError:{code:'X'}}],
+    ['cleanup failed at',engine,{...state,cleanupFailedAt:'2026-10-15T00:00:02.000Z'}],
+    ['no owner',engine,{...state,ownerSessionId:''}],
+    ['earlier owner only',engine,{...state,coachRuntimeClosures:[state.coachRuntimeClosures[0]]}],
+    ['no receipts',engine,{...state,coachRuntimeClosures:undefined}],
+  ];
+  for(const [name,e,s] of refused)assert.equal(reviewWaivable(e,s),false,name);
+});
+test('#288 an aborting checkpoint accepts the REVIEW_WAIVED reason as it does the others',()=>{
+  const root=createOwnedTempDir('waiver-checkpoint');
+  const bytes=Buffer.from('{"phase":"finalizing"}');
+  for(const reason of ABANDON_REASONS){
+    const operationId=`op-${reason.toLowerCase().replace(/_/g,'-')}`;
+    const sidecar=`loop-state.abandoned.${operationId}.json`;
+    fs.writeFileSync(path.join(root,sidecar),bytes);
+    const state={phase:'finalizing',aborting:{operationId,mode:'finalize'},abandonedPendingDecision:{operationId,mode:'finalize',sidecar,
+      sha256:sha(bytes),reason,unverifiedSnapshot:false,abandonedAt:'2026-10-15T00:00:00.000Z'}};
+    assert.deepEqual(validateAbortingCheckpoint(root,{gameOver:true,result:'completed'},state),{operationId,mode:'finalize'},reason);
+  }
 });

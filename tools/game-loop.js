@@ -4341,21 +4341,24 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // player is in a hand's sample when the hand dealt them holes). A host who busted
   // while others played on holds fewer than the completed hands. A record that cannot
   // be read is not guessed at: the count is then unavailable (null).
-  const hostDealtHandsThrough = (completed) => {
+  const hostDealtTally = (completed) => {
     let dealt = 0;
     for (let handNo = 1; handNo <= completed; handNo += 1) {
       let record;
       try {
         record = fullHandRecord(handNo);
       } catch {
-        return null;
+        return { unavailableHandNo: handNo };
       }
       const holes = record?.holes;
-      if (record?.handNo !== handNo || !holes || typeof holes !== 'object' || Array.isArray(holes)) return null;
+      if (record?.handNo !== handNo || !holes || typeof holes !== 'object' || Array.isArray(holes)) {
+        return { unavailableHandNo: handNo };
+      }
       if (Object.hasOwn(holes, HOST_ID)) dealt += 1;
     }
-    return dealt;
+    return { dealt };
   };
+  const hostDealtHandsThrough = (completed) => hostDealtTally(completed).dealt ?? null;
 
   // 규칙 자체는 게시 계약이 갖는다 — 서버의 deny 수집기와 같은 코드여야 한다.
   const coachForbiddenDetailed = (handNo) => collectPrivateLiteralsDetailed({
@@ -7094,11 +7097,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // #288: the sample counts only hands the host was dealt. In a multiplayer session
     // the others play on after the host busts, so it is compared with the dealt count —
     // always, since a corrupt sample can equal the completed count by accident.
-    const dealt = hostDealtHandsThrough(completed);
-    if (dealt === null) {
+    const { dealt, unavailableHandNo } = hostDealtTally(completed);
+    if (dealt === undefined) {
       throw abortCompletedHandAuthority(
         'host_dealt_unavailable',
-        `1..${completed} 핸드 기록에서 호스트가 받은 핸드 수를 확인하지 못해 리뷰 게이트를 열지 않습니다.`,
+        `핸드 ${unavailableHandNo} 기록을 읽지 못해 호스트가 받은 핸드 수를 확인하지 못했으므로 리뷰 게이트를 열지 않습니다.`,
         terminationConfirmed,
       );
     }
@@ -7152,6 +7155,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       );
     }
     closeWaived({ completed, sealed: sealed.sealed ?? [], reason: 'review_waived', reviewGate: 'waived' });
+    const unsettled = [];
     publishDeadlineNs = finalDeadlineNs;
     try {
       for (const [step, settle] of [
@@ -7165,7 +7169,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         try {
           await settle();
         } catch (error) {
-          appendNotice(`리뷰 없는 결과 정리 중 ${step} 단계를 마치지 못했습니다 (${error.code ?? 'ERROR'}).`);
+          unsettled.push(`${step}:${error.code ?? 'ERROR'}`);
           log('review-waived-step-error', { step, code: error.code ?? 'ERROR' });
         }
         if (stopRequested) break;
@@ -7173,6 +7177,25 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     } finally {
       publishDeadlineNs = null;
     }
+    // Several steps log a refused publish and return: what is left is counted, not
+    // inferred from what threw.
+    if (fs.existsSync(publishAttemptPath)) unsettled.push('publish-attempt');
+    const queuedCoach = Object.keys(readCoachAuthority()?.publishQueue ?? {}).length;
+    if (queuedCoach) unsettled.push(`coach-queue:${queuedCoach}`);
+    if (trainingOn) {
+      try {
+        const training = createTrainingControl({ storeDir }).loadAuthority(root);
+        const queuedAnnotations = Object.keys(training?.annotationQueue ?? {}).length;
+        const pending = Object.keys(training?.pending ?? {}).length;
+        if (queuedAnnotations) unsettled.push(`annotation-queue:${queuedAnnotations}`);
+        if (pending) unsettled.push(`training-pending:${pending}`);
+      } catch (error) {
+        unsettled.push(`training-authority:${error.code ?? 'ERROR'}`);
+      }
+    }
+    if (unsettled.length) appendNotice(`리뷰 없는 결과 정리 뒤 게시하지 못한 항목이 남았습니다: ${unsettled.join(', ')}.`);
+    const waiver = readLoopState()?.reviewWaiver;
+    if (waiver) writeLoopState({ reviewWaiver: { ...waiver, unsettled } });
     return readLoopState();
   };
 
@@ -8372,7 +8395,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const policyMode = opponentRuntimeOf() === 'policy'
         || existingState.opponentRuntime === 'policy';
       markBootStage('runtime-probe');
-      const resolved = await createCanaryAndResolve('upper-only');
+      // #288: a waiver run starts no model work — no probe, no coach or explanation child —
+      // so a crash during it leaves nothing a later run could not prove ended.
+      const resolved = existingState.reviewWaiver
+        ? { player: null, upper: null, notices: [] }
+        : await createCanaryAndResolve('upper-only');
       selectAdapters(resolved ?? {});
       const notices = [
         ...(Array.isArray(existingState.notices) ? existingState.notices : []),
@@ -8484,11 +8511,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (engineState.result === 'abort') return finishAbortedLifecycle(engineState, state);
       openLog();
       lifecycleStarted = true;
-      // #288: an app that crashed after this operation's waiver was recorded runs the same
-      // command again. The waiver already is its abandonment; it is not taken twice.
+      // #288: a waiver once recorded is the abandonment. An app that crashed after it runs
+      // the command again, and a later command may have taken over an earlier one's
+      // checkpoint: either way the recorded waiver continues and is not taken twice.
       const replayedWaiver = opts.abortUnrecoverable?.reason === 'REVIEW_WAIVED' && !state?.aborting
-        && state?.reviewWaiver?.operationId === opts.abortUnrecoverable.operationId;
-      if (replayedWaiver) log('review-waiver-replayed', { operationId: opts.abortUnrecoverable.operationId });
+        && validRecoveryOperation(state?.reviewWaiver?.operationId);
+      if (replayedWaiver) {
+        log('review-waiver-continued', {
+          operationId: opts.abortUnrecoverable.operationId, waiverOperationId: state.reviewWaiver.operationId,
+        });
+      }
       else if (opts.abortUnrecoverable || state?.aborting) {
         const ended=await abandonUnverifiedRecovery(engineState,state);
         if (ended) return ended;

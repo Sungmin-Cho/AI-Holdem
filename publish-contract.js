@@ -745,7 +745,8 @@ export function collectPrivateLiterals(args) {
  * 목록이 비면 수집이 깨진 것이므로 호출자는 계속 fail-closed로 거부한다.
  */
 export function emptyPrivateLiteralsAllowed({ players, engineState } = {}) {
-  const list = Array.isArray(players) ? players : players?.players;
+  // Only the canonical array roster (engine/game-archive.js writes no other shape).
+  const list = players;
   const seats = engineState?.seats;
   const config = engineState?.config;
   // The roster must agree with the game config too: rows relabelled human while the

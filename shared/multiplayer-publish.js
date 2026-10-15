@@ -14,10 +14,11 @@ const STREET = new Set(['preflop', 'flop', 'turn', 'river']);
 const ACTION = new Set(['fold', 'check', 'call', 'raise']);
 const DECISION_ID_RE = /^d-[1-9]\d*-(?:preflop|flop|turn|river)-\d+$/;
 const RESULT = new Set(['win', 'lose', 'completed', 'abort']);
-const SUIT_CLASS = { s: '[s♠♤]', h: '[h♥♡]', d: '[d♦♢]', c: '[c♣♧]' };
+// #289: a suit letter is matched in either case ("7C" names the same card as "7c").
+const SUIT_CLASS = { s: '[sS♠♤]', h: '[hH♥♡]', d: '[dD♦♢]', c: '[cC♣♧]' };
 // #289: two cards written together ("7c2d", "Ah7♣") are two tokens. Splitting them lets
 // each one meet the token boundary below, while a hand class ("AKs") stays one word.
-const ADJACENT_CARDS = /([2-9TJQKA][cdhs♠♥♦♣♤♡♢♧])(?=[2-9TJQKA][cdhs♠♥♦♣♤♡♢♧])/gu;
+const ADJACENT_CARDS = /([2-9TJQKA][cdhsCDHS♠♥♦♣♤♡♢♧])(?=[2-9TJQKA][cdhsCDHS♠♥♦♣♤♡♢♧])/gu;
 
 function coded(code, message) {
   return Object.assign(new Error(message || code), { code });
@@ -327,8 +328,9 @@ function annotationHandNo(evaluationId) {
 }
 
 export function sessionHasParticipants(players) {
-  return (Array.isArray(players) ? players : [])
-    .some((row) => row?.playerId !== HOST_ID && (isHumanSeat(row) || /^h[1-8]$/.test(row?.playerId)));
+  // The roster shapes the literal collector accepts: an array or { players: [...] }.
+  const list = Array.isArray(players) ? players : (Array.isArray(players?.players) ? players.players : []);
+  return list.some((row) => row?.playerId !== HOST_ID && (isHumanSeat(row) || /^h[1-8]$/.test(row?.playerId)));
 }
 
 export function cardTokenLeaks(text, cardList) {
@@ -338,7 +340,7 @@ export function cardTokenLeaks(text, cardList) {
     if (typeof card !== 'string' || !CARD_RE.test(card)) continue;
     const rank = card[0];
     const suit = card[1];
-    const latin = new RegExp(`(?<![A-Za-z0-9])${rank}${suit}(?![A-Za-z0-9])`);
+    const latin = new RegExp(`(?<![A-Za-z0-9])${rank}[${suit}${suit.toUpperCase()}](?![A-Za-z0-9])`);
     const unicode = new RegExp(`(?<![A-Za-z0-9])${rank}${SUIT_CLASS[suit]}(?![A-Za-z0-9])`, 'u');
     if (unicode.test(text) && !latin.test(text) && /[♠♥♦♣♤♡♢♧]/.test(text)) return true;
     if (latin.test(text)) {
