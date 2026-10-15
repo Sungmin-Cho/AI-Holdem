@@ -4561,17 +4561,33 @@ test('#290 멀티 진행 중 코치는 참가자 숨은 카드 인용을 지연�
       onCoachInvoke: (args) => coachCalls.push(args),
       async coachCaptureCheckpoint({ handNo }) {
         if (handNo !== 1) return;
-        await waitFor(() => {
-          const state = readJson(path.join(gameDir, 'state.json'));
-          return state.hand && state.lastHand?.handNo === 1 ? state : null;
-        }, 'hand 2 was not dealt before coach deny', 8_000);
+        // The hand changes only while the loop waits on the host in hand 2: its views are
+        // published and no engine step is in flight.
+        await waitFor(async () => {
+          const lock = readJson(path.join(gameDir, 'lock.json'));
+          const response = await fetch(`http://127.0.0.1:${lock.port}/api/snapshot?token=${lock.sessionToken}`);
+          const view = response.ok ? (await response.json()).view : null;
+          return view?.handNo === 2 && view.legal?.toAct === 'user' ? view : null;
+        }, 'hand 2 did not wait on the host before coach deny', 8_000 * WIN32_SCALE);
         const statePath = path.join(gameDir, 'state.json');
         const state = readJson(statePath);
         const record = readJson(path.join(gameDir, 'hands', 'hand-0001.json'));
+        const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
         assert.ok(record.folded.includes('h1') && !record.showdown, JSON.stringify(record.folded));
         hidden = record.holes.h1[0];
-        overlap = injectCurrentHandCard(state, record.holes.p1[0]);
-        fs.writeFileSync(statePath, JSON.stringify(state));
+        // A card public in hand 1 that no person holds or sees in hand 2 goes into p1's
+        // hidden hand, swapped with the deck: no view the relay checks changes.
+        const seen = new Set([...state.hand.holes.user, ...state.hand.holes.h1, ...state.hand.board]);
+        overlap = [...Object.values(replay.holes ?? {}).flat(), ...(replay.board ?? [])]
+          .find((card) => !seen.has(card) && card !== hidden);
+        assert.ok(overlap, 'hand 1 shows a card no person holds in hand 2');
+        if (!state.hand.holes.p1.includes(overlap)) {
+          const at = state.hand.deck.indexOf(overlap);
+          assert.ok(at >= 0, `${overlap} is in the deck`);
+          state.hand.deck[at] = state.hand.holes.p1[0];
+          state.hand.holes.p1[0] = overlap;
+          fs.writeFileSync(statePath, JSON.stringify(state));
+        }
       },
     },
   });
