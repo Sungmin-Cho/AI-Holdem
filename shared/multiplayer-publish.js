@@ -24,11 +24,13 @@ const CARD_IN_RUN = new RegExp(`(${CARD_TOKEN})(?=${CARD_TOKEN})`, 'gu');
 const WORD_CHAR = /[A-Za-z0-9]/;
 
 // Each maximal run of cards is judged as a whole: standing alone it is split into
-// bounded cards; glued to a letter or digit at either end, none of it is a card.
+// bounded cards; glued to a letter or digit at either end, none of it is a card. The mask
+// is '0': still a word character (the glue stays), but neither a rank nor a lower-case
+// letter, so it never reads as the English word after an "As".
 function separateCardRuns(text) {
   return text.replace(CARD_RUN, (run, offset, whole) => {
     const glued = WORD_CHAR.test(whole[offset - 1] ?? '') || WORD_CHAR.test(whole[offset + run.length] ?? '');
-    return glued ? 'x'.repeat(run.length) : run.replace(CARD_IN_RUN, '$1 ');
+    return glued ? '0'.repeat(run.length) : run.replace(CARD_IN_RUN, '$1 ');
   });
 }
 

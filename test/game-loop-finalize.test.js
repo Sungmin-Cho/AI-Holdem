@@ -1964,7 +1964,8 @@ test('#289 멀티 세션의 코치는 공개된 참가자 카드와 호스트 �
   const note = readJson(path.join(gameDir, 'ui-snapshot.json')).coach.find((row) => row.handNo === 1);
   assert.equal(note.unavailable, undefined, JSON.stringify(note));
   assert.ok(note.text.startsWith(text), note.text);
-  assert.equal(upper.starts.length >= 1 && upper.starts.length < 3, true);
+  assert.equal(readLoopLog(gameDir).filter((row) => row.event === 'coach-host-text-refused').length, 0,
+    'the relay rule refused none of these public or own cards');
 });
 
 // #289: h1 folded 7h 2c unseen in hand 1. A coach note quoting them with suit symbols
