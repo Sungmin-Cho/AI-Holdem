@@ -1524,6 +1524,8 @@ export function createCoachControl(deps = {}) {
     });
   }
 
+  // Operator CLI only (the loop never calls it): it scans 1..host sample, which in a
+  // multiplayer game whose host busted early is shorter than the completed hands (#288).
   async function missing({ gameDir, statsFile }) {
     return withLock(gameDir, () => {
       const stats = readStats(statsFile);
@@ -1581,11 +1583,14 @@ export function createCoachControl(deps = {}) {
           reconcileLocked(auth, snapshotFile);
         }
         auth.noNewPlayTimePublishers = true;
+        // #288: the loop's completed count (engine lastHand.handNo) is the seal range. The
+        // host sample counts only the hands the host was dealt, so a host who busted while
+        // others played on holds fewer; it can never hold more.
         let n = completed;
         if (statsFile) {
           const stats = readStats(statsFile);
-          n = stats.sample;
-          if (Number.isInteger(completed) && completed !== n) fail('COMPLETED_MISMATCH');
+          if (!Number.isInteger(completed)) n = stats.sample;
+          else if (stats.sample > completed) fail('COMPLETED_MISMATCH');
         }
         const missingHands = [];
         for (let handNo = 1; handNo <= n; handNo += 1) {

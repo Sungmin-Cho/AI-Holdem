@@ -137,11 +137,13 @@ engine init 뒤 runtime/server 기동이 실패한 경우에도 새 session이 c
 
 새 게임 commit 뒤 시작이 실패하면 그 게임이 current로 남고 온라인 세션은 그 게임에 묶인 채 유지된다(원인 제거 후 불러오기). 한 핸드도 시작하지 않은 게임은 오류 코드와 무관하게 **게임 종료**·**같은 설정으로 새 게임**을 허용하며 audit reason은 `NEVER_DEALT`다.
 
+결과가 확정된 게임의 종료 처리가 멈추면(`FINALIZATION_ABORTED`·`REVIEW_GATE_CLOSED`·`REVIEW_FAILED`·`COACH_RECONCILE_PENDING` halt) 오류 코드와 무관하게 앱 재시작 뒤에도 **리뷰 없이 결과 정리**를 허용한다. 단 운영자 복구 명령이 붙은 halt, cleanup 실패 기록, 마지막 owner의 코치 런타임 종료 영수증이 없는 게임은 제외한다. 이 경우에는 엔진 결과를 바꾸지 않고 종합 리뷰를 생성·게시하지 않은 채 `done`으로 끝낸다. 이 정리는 모델을 부르지 않는다(probe·코치·설명 자식 없음). 학습 cutoff, 코치·학습 자식 종료 확인, 코치 권한 봉인은 그대로 거치며, 그 단계가 실패하면 다시 halt한다. 남은 게시는 한 번 시도하고, 마치지 못한 항목은 `reviewWaiver.failedSteps`·`leftovers`와 notice로 남긴다. audit reason은 `REVIEW_WAIVED`이고 loop-state에 `reviewWaiver`가 남는다.
+
 legacy 정지 게임은 `node tools/game-loop.js --game-dir /absolute/game --resume --abort-unrecoverable recovery-1`로 명시 종료한다(operationId 필수, `--retry-decision`과 배타). `GAME_ENDED` 뒤에는 run을 다시 호출하지 않는다. audit retry 이벤트는 operationId/SHA별로 반복될 수 있어 exactly-once를 주장하지 않는다. pendingDecision·accepted 명령·terminal 엔진과 미수렴한 aborting/abandonedPendingDecision이 남으면 downgrade하지 않는다. 호환 버전에서 roll-forward하고 원문 sidecar는 삭제하지 않는다. 상세 행렬은 `docs/implementation/unrecoverable-recovery-exit.md`다.
 
 ## 4. 종료 보고
 
-종료까지 관찰할 때의 관찰 종료 조건도 셋이다: `phase`가 done, `halt` 기록, `resume-check.loopPidAlive:false`. exit 0은 SIGTERM을 포함한 **정상적인 프로세스 정리**일 뿐 게임 완료 증명이 아니다. 완료는 오직 `loop-state.json`의 `phase:"done"`과 `finishedAt`으로 판정한다. 정상 완료면 종합 리뷰가 UI 오버레이로 게시돼 있고 본문이 `$SESSION_DIR/review.md`에 있다 — 사용자에게 리뷰가 준비됐다는 것과 '다음 게임에서 연습할 것' 항목을 한 줄로 전한다.
+종료까지 관찰할 때의 관찰 종료 조건도 셋이다: `phase`가 done, `halt` 기록, `resume-check.loopPidAlive:false`. exit 0은 SIGTERM을 포함한 **정상적인 프로세스 정리**일 뿐 게임 완료 증명이 아니다. 완료는 오직 `loop-state.json`의 `phase:"done"`과 `finishedAt`으로 판정한다. 정상 완료면 종합 리뷰가 UI 오버레이로 게시돼 있고 본문이 `$SESSION_DIR/review.md`에 있다 — 사용자에게 리뷰가 준비됐다는 것과 '다음 게임에서 연습할 것' 항목을 한 줄로 전한다. 단 loop-state에 `reviewWaiver`가 있으면 리뷰 없이 결과만 확정된 게임이다 — 리뷰가 준비됐다고 말하지 말고 그 사실과 halt 코드(`reviewWaiver.haltCode`)를 전한다.
 
 `halt`가 기록돼 있으면 `halt.code`로 분기해 **한 줄씩** 안내한다.
 

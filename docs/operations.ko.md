@@ -42,6 +42,8 @@ Preflop 학습 평가는 `training/`에 있다. 기준은 버전이 고정된 �
 
 새 게임이 저장소에 기록된 뒤 시작이 실패하면(런타임 확인·학습 서비스 거부 등) 그 게임이 현재 게임으로 남고, 온라인 세션은 그 게임에 묶인 채 유지된다. 원인을 없애고 **불러오기**로 이어 간다. 원인을 없앨 수 없으면, 아직 한 핸드도 시작하지 않은 게임은 오류 코드와 관계없이 **게임 종료** 또는 **같은 설정으로 새 게임**을 쓸 수 있다(감사 사유 `NEVER_DEALT`, 같은 보존 파일 경로). 종료하면 온라인 세션이 다시 열린다.
 
+결과가 확정된 게임의 종료 처리가 멈추면(`FINALIZATION_ABORTED`·`REVIEW_GATE_CLOSED`·`REVIEW_FAILED`·`COACH_RECONCILE_PENDING`) **불러오기**는 같은 검사에서 다시 멈출 수 있다. 이때 앱은 오류 코드와 관계없이, 앱을 다시 켠 뒤에도 **리뷰 없이 결과 정리**를 보여 준다. 누르면 엔진 결과는 그대로 두고 종합 리뷰 없이 게임을 끝낸다. 이 정리에서는 모델을 부르지 않는다(런타임 확인·코치·설명 자식을 띄우지 않으며, 남은 코치 노트는 고정 문구로 봉인한다). 학습 cutoff, 코치·학습 자식 종료 확인, 코치 권한 봉인은 생략하지 않으므로 그 단계가 실패하면 다시 멈춘다. 남은 코치·학습 게시는 한 번 시도하고, 마치지 못한 항목은 `reviewWaiver.failedSteps`·`leftovers`와 notice로 남긴다. 감사 사유는 `REVIEW_WAIVED`이고 같은 보존 파일 경로를 쓰며, loop-state의 `reviewWaiver`가 리뷰 없이 끝난 게임임을 기록한다. 한 번 고른 리뷰 생략은 취소되지 않는다: 정리 단계가 실패해 다시 멈춘 뒤 **불러오기**를 눌러도 리뷰 없이 이어서 정리한다. 다음 경우에는 이 버튼을 주지 않는다: 운영자 복구 명령이 붙은 halt(코치 worker 미해소), cleanup 실패 기록이 남은 게임, 멈춘 loop의 owner에 코치 런타임 종료 영수증(`coachRuntimeClosures`)이 없는 게임. 마지막 경우는 이전 프로세스의 리뷰 자식이 종료됐는지 증명할 수 없기 때문이다.
+
 legacy 정지 게임의 명시 종료는 `node tools/game-loop.js --game-dir /absolute/game --resume --abort-unrecoverable recovery-1`이다. operationId는 필수이며 `--retry-decision`과 함께 쓸 수 없다. `GAME_ENDED`이면 게임 실행을 다시 시작하지 않는다. audit retry 이벤트는 operationId/SHA 기준으로 반복될 수 있으므로 exactly-once라고 해석하지 않는다. `pendingDecision`, accepted 명령, 미완료 `aborting`/`abandonedPendingDecision` 체크포인트가 남아 있으면 구버전으로 내리지 말고 호환 버전에서 먼저 수렴시킨다. [복구 종료와 롤백 조건](implementation/unrecoverable-recovery-exit.md)을 참고한다.
 
 ## JEV 상대 플레이어

@@ -636,6 +636,49 @@ export async function seedFinishedGame(gameDir) {
   return init;
 }
 
+// #288: a three-human tournament (no AI) where the host busts in hand 1 and the game
+// goes on without them: h2's aces beat the host's all-in call, h1 folds, and in hand 2
+// h2's aces bust h1's blind all-in. Ends `completed`, winner h2, lastHand 2, host sample 1.
+export async function seedHostBustMultiGame(gameDir) {
+  // init clears the game dir, so the participants file lives beside it.
+  const participantsFile = `${gameDir}.participants.json`;
+  fs.writeFileSync(participantsFile, JSON.stringify({
+    schemaVersion: 1,
+    hostName: '호스트',
+    participants: [
+      { playerId: 'h1', name: '민준', participantId: 'part-1' },
+      { playerId: 'h2', name: '서연', participantId: 'part-2' },
+    ],
+  }));
+  const init = await cliJson(gameDir, [
+    'init', '--ai', '0', '--participants-file', participantsFile,
+    '--stack', '50', '--replay-reveal', 'all',
+  ]);
+  fs.rmSync(participantsFile, { force: true });
+  const statePath = path.join(gameDir, 'state.json');
+  const seeded = readJson(statePath);
+  // startHand advances the button first: from h2 it lands on the host (SB h1, BB h2).
+  seeded.button = seeded.seats.findIndex((seat) => seat.playerId === 'h2');
+  fs.writeFileSync(statePath, JSON.stringify(seeded));
+  // Deal order starts at the SB: h1, h2, user (two rounds), then the board.
+  await cliJson(gameDir, ['step', '--new-hand', '--deck',
+    stackedDeck(['7h', 'As', '3c', '2c', 'Ah', '3d', 'Ks', 'Qd', '9c', '5h', '4d'])]);
+  await cliJson(gameDir, ['step', 'user', 'call']);
+  const first = await cliJson(gameDir, ['step', 'h1', 'fold']);
+  assert.equal(first.gameOver ?? false, false, JSON.stringify(first));
+  // Heads-up: the button (h1) posts the SB all-in; h2 is dealt second.
+  const over = await cliJson(gameDir, ['step', '--new-hand', '--deck',
+    stackedDeck(['7h', 'As', '2c', 'Ah', 'Ks', 'Qd', '9c', '5h', '4d'])]);
+  const state = readJson(statePath);
+  assert.equal(state.gameOver, true, JSON.stringify(over));
+  assert.equal(state.result, 'completed');
+  assert.equal(state.winnerId, 'h2');
+  assert.equal(state.lastHand.handNo, 2);
+  assert.equal(state.stats.user.hands, 1);
+  assert.equal(Object.hasOwn(state.lastHand.holes, 'user'), false);
+  return init;
+}
+
 export function expandFinishedGameToTwoHands(gameDir) {
   const statePath = path.join(gameDir, 'state.json');
   const state = readJson(statePath);

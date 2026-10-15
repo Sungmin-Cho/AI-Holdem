@@ -14,7 +14,25 @@ const STREET = new Set(['preflop', 'flop', 'turn', 'river']);
 const ACTION = new Set(['fold', 'check', 'call', 'raise']);
 const DECISION_ID_RE = /^d-[1-9]\d*-(?:preflop|flop|turn|river)-\d+$/;
 const RESULT = new Set(['win', 'lose', 'completed', 'abort']);
-const SUIT_CLASS = { s: '[s♠♤]', h: '[h♥♡]', d: '[d♦♢]', c: '[c♣♧]' };
+// #289: cards written together ("7c2d", "Ah7♣") are separate tokens, but only when the
+// whole run stands alone as a word: a run glued to a letter or digit ("STACKS", "7c2d9",
+// a hex digest) is not cards, as a single card glued to one ("x7c") is not. Each run
+// found is split so every card meets the boundary below.
+const CARD_TOKEN = '[2-9TJQKA][cdhsCDHS♠♥♦♣♤♡♢♧]';
+const CARD_RUN = new RegExp(`(?:${CARD_TOKEN})+`, 'gu');
+const CARD_IN_RUN = new RegExp(`(${CARD_TOKEN})(?=${CARD_TOKEN})`, 'gu');
+const WORD_CHAR = /[A-Za-z0-9]/;
+
+// Each maximal run of cards is judged as a whole: standing alone it is split into
+// bounded cards; glued to a letter or digit at either end, none of it is a card. The mask
+// is '0': still a word character (the glue stays), but neither a rank nor a lower-case
+// letter, so it never reads as the English word after an "As".
+function separateCardRuns(text) {
+  return text.replace(CARD_RUN, (run, offset, whole) => {
+    const glued = WORD_CHAR.test(whole[offset - 1] ?? '') || WORD_CHAR.test(whole[offset + run.length] ?? '');
+    return glued ? '0'.repeat(run.length) : run.replace(CARD_IN_RUN, '$1 ');
+  });
+}
 
 function coded(code, message) {
   return Object.assign(new Error(message || code), { code });
@@ -309,29 +327,42 @@ export function hostTextFieldsOf(body) {
   const annotations = body.trainingAnnotations;
   const rows = Array.isArray(annotations) ? annotations : Object.values(annotations ?? {}).flatMap((fieldsMap) => Object.values(fieldsMap ?? {}));
   for (const row of rows) {
-    const evaluationId = row?.evaluationId;
-    const handNo = typeof evaluationId === 'string'
-      ? Number(/:d-([1-9]\d*)-/.exec(evaluationId)?.[1])
-      : row?.handNo;
-    if (typeof row?.value === 'string') fields.push({ handNo, text: row.value });
+    // #289: an annotation always names its hand; one that does not is checked, not skipped.
+    if (typeof row?.value === 'string') fields.push({ handNo: annotationHandNo(row?.evaluationId), text: row.value, strict: true });
   }
   return fields;
 }
 
+// #289: the decision segment of an evaluationId names the hand. A hand that cannot be read
+// from it (d-0, no decision segment) is null, which fails closed like a missing record.
+function annotationHandNo(evaluationId) {
+  const match = typeof evaluationId === 'string' ? /:d-(\d+)-/.exec(evaluationId) : null;
+  const handNo = match ? Number(match[1]) : NaN;
+  return Number.isSafeInteger(handNo) && handNo >= 1 ? handNo : null;
+}
+
+export function sessionHasParticipants(players) {
+  // The roster shapes the literal collector accepts: an array or { players: [...] }.
+  const list = Array.isArray(players) ? players : (Array.isArray(players?.players) ? players.players : []);
+  return list.some((row) => row?.playerId !== HOST_ID && (isHumanSeat(row) || /^h[1-8]$/.test(row?.playerId)));
+}
+
+const SUIT_SYMBOLS = { s: '♠♤', h: '♥♡', d: '♦♢', c: '♣♧' };
+
 export function cardTokenLeaks(text, cardList) {
   if (typeof text !== 'string' || !text) return false;
+  text = separateCardRuns(text);
   for (const card of cardList) {
     if (typeof card !== 'string' || !CARD_RE.test(card)) continue;
     const rank = card[0];
     const suit = card[1];
-    const latin = new RegExp(`(?<![A-Za-z0-9])${rank}${suit}(?![A-Za-z0-9])`);
-    const unicode = new RegExp(`(?<![A-Za-z0-9])${rank}${SUIT_CLASS[suit]}(?![A-Za-z0-9])`, 'u');
-    if (unicode.test(text) && !latin.test(text) && /[♠♥♦♣♤♡♢♧]/.test(text)) return true;
-    if (latin.test(text)) {
-      if (card === 'As' && /(?<![A-Za-z0-9])As(?=\s+[a-z])/.test(text)
-        && !latin.test(text.replace(/(?<![A-Za-z0-9])As(?=\s+[a-z])/g, 'XX'))) {
-        continue;
-      }
+    // A suit symbol is checked on its own: an English "As" elsewhere never hides an "A♠".
+    if (new RegExp(`(?<![A-Za-z0-9])${rank}[${SUIT_SYMBOLS[suit]}](?![A-Za-z0-9])`, 'u').test(text)) return true;
+    // A suit letter in either case. Only "As" followed by a lower-case word is the English
+    // word; that exemption covers that occurrence alone.
+    const letter = new RegExp(`(?<![A-Za-z0-9])${rank}[${suit}${suit.toUpperCase()}](?![A-Za-z0-9])`, 'g');
+    for (const match of text.matchAll(letter)) {
+      if (match[0] === 'As' && /^\s+[a-z]/.test(text.slice(match.index + 2))) continue;
       return true;
     }
   }
@@ -351,13 +382,27 @@ function hiddenParticipantCards(record, humanIds) {
 
 export function assertHostText(body, lookupRecord) {
   for (const field of hostTextFieldsOf(body)) {
-    if (!Number.isInteger(field.handNo)) continue;
+    if (!Number.isInteger(field.handNo)) {
+      if (field.strict) fail('FORBIDDEN_LITERAL_UNAVAILABLE', 'annotation hand');
+      continue;
+    }
     const record = lookupRecord(field.handNo);
     if (!record) fail('FORBIDDEN_LITERAL_UNAVAILABLE', `hand ${field.handNo}`);
     const ids = humanIdsOf(record.seats ?? []).filter((id) => id !== HOST_ID);
     if (cardTokenLeaks(field.text, hiddenParticipantCards(record, ids.length ? ids : undefined))) {
       fail('FORBIDDEN_LITERAL', 'host text');
     }
+  }
+}
+
+// #289: an annotation restored from a snapshot, its history or the training queue meets
+// the same hand-scoped participant-card rule as one published live. True means drop it.
+export function hostAnnotationLeaks(row, lookupRecord) {
+  try {
+    assertHostText({ trainingAnnotations: [row] }, lookupRecord);
+    return false;
+  } catch {
+    return true;
   }
 }
 

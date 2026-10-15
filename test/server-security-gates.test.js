@@ -7,6 +7,7 @@ import path from 'node:path';
 import {
   annotationValueSha256,
   canonicalHandReplayJson,
+  collectPrivateLiterals,
   detailRefOf,
   projectTrainingAnnotation,
   projectTrainingSummary,
@@ -1409,6 +1410,236 @@ test('deny list is never empty under all for policy and llm runtimes', async () 
       trainingAnnotations: [annotationRow(summary, 'explanation', '성격 FIXTURE_PERSONALITY_SENTINEL')],
     });
     assert.equal(personality.status, 400);
+  });
+});
+
+// #289: a session with no AI seat has no persona/policy literal, and under replay-all
+// between hands no hidden card is in the deny scope. The empty list is then the
+// truthful answer from validated inputs, not a collection failure.
+function noAiSessionFixtures(dir, { players, seats, h1Holes = ['7c', '2d'] } = {}) {
+  const record = handRecordFixture(1, { holes: { user: ['Ah', 'Kh'], h1: h1Holes } });
+  delete record.holes.p1;
+  delete record.startStacks.p1;
+  delete record.endStacks.p1;
+  const rows = players ?? [
+    { playerId: 'user', kind: 'human' },
+    { playerId: 'h1', kind: 'human', participantId: 'part-1' },
+  ];
+  return writeSecurityFixtures(dir, {
+    players: rows,
+    hands: [record],
+    config: { replayReveal: 'all', aiCount: 0, humanCount: 2 },
+    state: {
+      policySeed: null,
+      seats: seats ?? rows.map((row) => ({ playerId: row.playerId, stack: 10_000, out: false, kind: 'human' })),
+    },
+  });
+}
+
+test('#289 AI 0명 replay-all 세션의 핸드 사이 explanation은 게시되고 재기동 뒤에도 복원된다', async () => {
+  const dir = tmpDir();
+  noAiSessionFixtures(dir);
+  const summary = summaryOf();
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const accepted = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '레인지 상단으로 밸류를 뽑는 스팟이다')],
+    });
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.json));
+    assert.equal((await snapshotOf(port)).trainingAnnotations.length, 1);
+  });
+  await withServer(dir, async ({ port }) => {
+    const snap = await snapshotOf(port);
+    assert.equal(snap.trainingAnnotations.length, 1);
+    assert.equal(snap.trainingAnnotations[0].value, '레인지 상단으로 밸류를 뽑는 스팟이다');
+  });
+});
+
+test('#289 AI 0명 세션의 빈 deny 목록도 경로 표지와 다른 인간의 비공개 카드는 막는다', async () => {
+  const dir = tmpDir();
+  noAiSessionFixtures(dir);
+  const summary = summaryOf();
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const pathLeak = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '기록은 /Users/someone/game 에 있다')],
+    });
+    assert.equal(pathLeak.status, 400);
+    assert.equal(pathLeak.json.code, 'FORBIDDEN_LITERAL');
+    const participantCard = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '상대는 7c를 들고 있었다')],
+    });
+    assert.equal(participantCard.status, 400);
+    assert.equal(participantCard.json.code, 'FORBIDDEN_LITERAL');
+  });
+});
+
+test('#289 AI 0명 세션의 live 게시는 붙여 쓴 카드와 핸드를 알 수 없는 evaluationId를 막는다', async () => {
+  const dir = tmpDir();
+  noAiSessionFixtures(dir);
+  const summary = summaryOf();
+  const unnamed = summaryOf({ decisionId: 'd-0-preflop-0' });
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary, unnamed] });
+    const joined = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '상대 패는 7c2d였다')],
+    });
+    assert.equal(joined.status, 400);
+    assert.equal(joined.json.code, 'FORBIDDEN_LITERAL');
+    const noHand = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(unnamed, 'explanation', '레인지 상단으로 밸류를 뽑는 스팟이다')],
+    });
+    assert.equal(noHand.status, 500);
+    assert.equal(noHand.json.code, 'FORBIDDEN_LITERAL_UNAVAILABLE');
+    const upper = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '상대 패는 7C 2D였다')],
+    });
+    assert.equal(upper.status, 400);
+    assert.equal(upper.json.code, 'FORBIDDEN_LITERAL');
+  });
+});
+
+test('#289 영어 As 예외는 같은 해설의 A♠ 인용을 숨기지 않는다', async () => {
+  const dir = tmpDir();
+  noAiSessionFixtures(dir, { h1Holes: ['As', '2d'] });
+  const summary = summaryOf();
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const leak = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', 'As you can see: 상대의 A♠가 블로커입니다.')],
+    });
+    assert.equal(leak.status, 400, JSON.stringify(leak.json));
+    assert.equal(leak.json.code, 'FORBIDDEN_LITERAL');
+  });
+});
+
+test('#289 멀티 세션의 기계 행은 다이제스트 안의 카드 같은 글자 때문에 거절되지 않는다', async () => {
+  const dir = tmpDir();
+  noAiSessionFixtures(dir);
+  // h1 hides 7c 2d, and this evaluationId opens with those letters: a digest, not a card.
+  const summary = summaryOf({ gameEpoch: `7c2d${'ab'.repeat(30)}` });
+  await withServer(dir, async ({ port }) => {
+    const published = await post(port, { publishId: 1, training: [summary] });
+    assert.equal(published.status, 200, JSON.stringify(published.json));
+  });
+});
+
+test('#289 래퍼 roster의 세션도 참가자 카드 검사를 받는다', async () => {
+  const dir = tmpDir();
+  // An AI keeps the deny list non-empty, so only the participant check stands between
+  // h1's hidden card and the host text.
+  const rows = [
+    { playerId: 'user', kind: 'human' },
+    { playerId: 'h1', kind: 'human', participantId: 'part-1' },
+    { playerId: 'p1', kind: 'ai', archetype: FIXTURE_ARCHETYPE },
+  ];
+  const record = handRecordFixture(1, { holes: { user: ['Ah', 'Kh'], h1: ['7c', '2d'], p1: ['9s', '9h'] } });
+  writeSecurityFixtures(dir, {
+    players: rows,
+    hands: [record],
+    config: { replayReveal: 'all', aiCount: 1, humanCount: 2 },
+    state: { seats: rows.map((row) => ({ playerId: row.playerId, stack: 10_000, out: false, kind: row.kind })) },
+  });
+  fs.writeFileSync(path.join(dir, 'players.json'), JSON.stringify({ players: rows }));
+  const summary = summaryOf();
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const leak = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '상대는 7c 2d를 들고 있었다')],
+    });
+    assert.equal(leak.status, 400, JSON.stringify(leak.json));
+    assert.equal(leak.json.code, 'FORBIDDEN_LITERAL');
+  });
+});
+
+test('#289 핸드 클래스 표기는 숨은 카드와 글자가 겹쳐도 카드로 막지 않는다', async () => {
+  const dir = tmpDir();
+  // h1 hides Ks: "AKs" contains the letters "Ks" but names a hand class, not that card.
+  noAiSessionFixtures(dir, { h1Holes: ['Ks', '2d'] });
+  const summary = summaryOf();
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const handClass = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', 'AKs로 오픈하는 스팟이다')],
+    });
+    assert.equal(handClass.status, 200, JSON.stringify(handClass.json));
+    const card = await post(port, {
+      publishId: 3,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '상대는 Ks를 들고 있었다')],
+    });
+    assert.equal(card.status, 400, JSON.stringify(card.json));
+    assert.equal(card.json.code, 'FORBIDDEN_LITERAL');
+  });
+});
+
+test('#289 멀티 세션의 복원은 다른 인간의 비공개 카드를 담은 explanation을 snapshot과 history에서 버린다', async () => {
+  const dir = tmpDir();
+  noAiSessionFixtures(dir);
+  const summary = summaryOf();
+  const leaking = storedRow(summary, 'explanation', '상대는 7c 2d를 들고 있었다');
+  seedSnapshot(dir, {
+    training: [summary],
+    trainingAnnotations: [leaking],
+    history: [{ revision: 1, at: '2026-01-01T00:00:00.000Z', payload: { trainingAnnotations: [leaking] } }],
+  });
+  await withServer(dir, async ({ port }) => {
+    const sse = await collectSse(port);
+    assert.equal(sse.includes('7c 2d'), false);
+    assert.equal((await snapshotOf(port)).trainingAnnotations.length, 0);
+  });
+});
+
+test('#289 config가 AI를 세는데 좌석이 모두 human으로 적힌 세션은 빈 deny 목록을 허용하지 않는다', async () => {
+  const dir = tmpDir();
+  const players = [{ playerId: 'user', kind: 'human' }, { playerId: 'h1', kind: 'human', participantId: 'part-1' }];
+  noAiSessionFixtures(dir, { players });
+  const statePath = path.join(dir, 'state.json');
+  const engine = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  fs.writeFileSync(statePath, JSON.stringify({ ...engine, config: { ...engine.config, aiCount: 1, humanCount: 1 } }));
+  const summary = summaryOf();
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const refused = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '레인지 상단으로 밸류를 뽑는 스팟이다')],
+    });
+    assert.equal(refused.status, 500);
+    assert.equal(refused.json.code, 'FORBIDDEN_LITERAL_UNAVAILABLE');
+  });
+});
+
+test('#289 AI 좌석이 있는 세션의 빈 deny 목록은 여전히 fail closed다', async () => {
+  const dir = tmpDir();
+  // An AI row without any private field: nothing to collect, which for an AI seat means
+  // the collection is broken, not that the session has nothing private.
+  const players = [{ playerId: 'user', kind: 'human' }, { playerId: 'h1', kind: 'ai' }];
+  const fixture = noAiSessionFixtures(dir, {
+    players,
+    seats: [
+      { playerId: 'user', stack: 10_000, out: false, kind: 'human' },
+      { playerId: 'h1', stack: 10_000, out: false, kind: 'ai' },
+    ],
+  });
+  // The inputs are valid and the list is empty: the 500 is the empty-list branch itself.
+  assert.deepEqual(collectPrivateLiterals({ players, engineState: fixture.state, records: fixture.hands }), []);
+  const summary = summaryOf();
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const refused = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '레인지 상단으로 밸류를 뽑는 스팟이다')],
+    });
+    assert.equal(refused.status, 500);
+    assert.equal(refused.json.code, 'FORBIDDEN_LITERAL_UNAVAILABLE');
   });
 });
 

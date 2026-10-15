@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,7 +15,11 @@ import { checkHintResume } from '../tools/hint-control.js';
 import { HOST_ID, humanIdsOf, isHumanSeat, seatLabel } from '../shared/seat-roles.js';
 import { replayRecord, canonicalHandReplayJson } from '../shared/hand-replay.js';
 import {
+  assertHostText,
+  cardTokenLeaks,
   collectPrivateLiteralsDetailed,
+  emptyPrivateLiteralsAllowed,
+  hostAnnotationLeaks,
   participantHiddenCards,
   validatePrivateEngineState,
   validatePrivateRecord,
@@ -528,6 +533,81 @@ test('validatePrivateRecord 조건부 holes.user와 alwaysDenyHumanSeats', () =>
     ...Object.entries(cur.lastHand.holes).flatMap(([pid, cards]) => (pid === 'h1' ? [] : cards)),
   ]);
   assert.equal(hidden.some((card) => others.has(card)), false);
+});
+
+// #289: an empty deny list is truthful only when neither players nor seats have an AI.
+test('emptyPrivateLiteralsAllowed는 players·seats·config가 모두 AI 0명일 때만 참이다', () => {
+  const humans = [{ playerId: 'user', kind: 'human' }, { playerId: 'h1', kind: 'human' }];
+  const seats = humans.map((row) => ({ ...row, stack: 100, out: false }));
+  const config = { aiCount: 0, humanCount: 2 };
+  assert.equal(emptyPrivateLiteralsAllowed({ players: humans, engineState: { seats, config } }), true);
+  // Only the canonical array roster: a wrapper is not trusted to mean "no AI".
+  assert.equal(emptyPrivateLiteralsAllowed({ players: { players: humans }, engineState: { seats, config } }), false);
+  // A legacy single-human state: seats without kind are AI unless they are the host.
+  assert.equal(emptyPrivateLiteralsAllowed({
+    players: humans,
+    engineState: { seats: [{ playerId: 'user' }, { playerId: 'h1' }], config },
+  }), false);
+  assert.equal(emptyPrivateLiteralsAllowed({
+    players: [{ playerId: 'user' }, { playerId: 'p1' }],
+    engineState: { seats, config },
+  }), false);
+  assert.equal(emptyPrivateLiteralsAllowed({
+    players: [...humans, { playerId: 'p2', kind: 'ai' }],
+    engineState: { seats, config },
+  }), false);
+  // Rows relabelled human while the config still counts an AI, or a missing config.
+  assert.equal(emptyPrivateLiteralsAllowed({ players: humans, engineState: { seats, config: { aiCount: 1, humanCount: 1 } } }), false);
+  assert.equal(emptyPrivateLiteralsAllowed({ players: humans, engineState: { seats, config: { aiCount: 0, humanCount: 3 } } }), false);
+  assert.equal(emptyPrivateLiteralsAllowed({ players: humans, engineState: { seats } }), false);
+  assert.equal(emptyPrivateLiteralsAllowed({ players: [], engineState: { seats: [], config } }), false);
+  assert.equal(emptyPrivateLiteralsAllowed({ players: humans, engineState: null }), false);
+  assert.equal(emptyPrivateLiteralsAllowed(), false);
+});
+
+// #289: the hand-scoped participant-card rule holds for joined cards and names every hand.
+test('cardTokenLeaks는 붙여 쓴 카드도 잡고 핸드 클래스는 카드로 보지 않는다', () => {
+  for (const text of ['7c2d', '상대는 7c2d', '2d7c였다', '7♣2♦', '(7c2d)', '"7c2d"', '카드\n7c2d\n', '7C2D', '7c2D', '7♧2♢']) {
+    for (const card of ['7c', '2d']) assert.equal(cardTokenLeaks(text, [card]), true, `${text} ${card}`);
+  }
+  assert.equal(cardTokenLeaks('Ah7c', ['Ah']), true);
+  assert.equal(cardTokenLeaks('Ah7c', ['7c']), true);
+  // The English-word exemption for "As" covers that occurrence only, never a suit symbol
+  // or another "As" in the same text.
+  assert.equal(cardTokenLeaks('As you can see: 상대의 A♠가 블로커입니다.', ['As']), true);
+  assert.equal(cardTokenLeaks('As you can see, As가 블로커입니다.', ['As']), true);
+  assert.equal(cardTokenLeaks('As you can see', ['As']), false);
+  // A masked glued run after a hidden "As" is not an English word that exempts it.
+  for (const text of ['상대의 As 7c9', 'As 7c2d9', 'As 7c2dx 이후', 'As x7c2d 이후']) {
+    assert.equal(cardTokenLeaks(text, ['As']), text !== 'As x7c2d 이후', text);
+  }
+  // A run of cards glued to a letter or digit is not cards, as a single card glued to one
+  // is not ("x7c"): the same word-boundary rule for one card and for a run.
+  for (const text of ['AKs로 오픈', 'QJs', 'T9s 콜', 'As you can see', 'AKS', 'Ace', 'STACKS', 'TASKS', 'OUTS', 'NUTS', 'aa7c2d', '7c2d9a1b', '7c2d9', 'AKs7c2d', '7♣2♦a', 'x7♣2♦', 'x7♣2d', 'x7c']) {
+    assert.equal(cardTokenLeaks(text, ['Ks', 'Js', '9s', 'Ts', 'As', '7c', '2d']), false, text);
+  }
+  // A run of cards counts only when it stands alone: a hex digest holds no cards.
+  for (let i = 0; i < 2000; i += 1) {
+    const digest = createHash('sha256').update(`digest-${i}`).digest('hex');
+    assert.equal(cardTokenLeaks(digest, ['7c', '2d', '9c', '3d', '5c', '8d', '4c', '6d']), false, digest);
+  }
+  // A suit letter in either case names the same card, alone or joined; the rank stays upper.
+  for (const [text, card] of [['7C', '7c'], ['7c2dAh', 'Ah'], ['AS', 'As']]) assert.equal(cardTokenLeaks(text, [card]), true, `${text} ${card}`);
+  assert.equal(cardTokenLeaks('ah', ['Ah']), false);
+});
+
+test('assertHostText는 핸드를 알 수 없는 annotation을 건너뛰지 않고 거부한다', () => {
+  const record = { handNo: 1, holes: { user: ['Ah', 'Kh'], h1: ['7c', '2d'] }, seats: [{ playerId: 'user', kind: 'human' }, { playerId: 'h1', kind: 'human' }] };
+  const lookup = (handNo) => (handNo === 1 ? record : null);
+  const row = (decision, value) => ({ evaluationId: `${'ab'.repeat(32)}:${decision}:ref@1.0.0`, value });
+  assert.doesNotThrow(() => assertHostText({ trainingAnnotations: [row('d-1-preflop-0', '깨끗한 해설')] }, lookup));
+  assert.throws(() => assertHostText({ trainingAnnotations: [row('d-1-preflop-0', '상대 7c2d')] }, lookup), { code: 'FORBIDDEN_LITERAL' });
+  for (const decision of ['d-0-preflop-0', 'nodecision', 'd--1-flop-0']) {
+    assert.throws(() => assertHostText({ trainingAnnotations: [row(decision, '깨끗한 해설')] }, lookup), { code: 'FORBIDDEN_LITERAL_UNAVAILABLE' }, decision);
+  }
+  assert.equal(hostAnnotationLeaks(row('d-1-preflop-0', '깨끗한 해설'), lookup), false);
+  assert.equal(hostAnnotationLeaks(row('d-1-preflop-0', '상대 7c 2d'), lookup), true);
+  assert.equal(hostAnnotationLeaks(row('d-0-preflop-0', '깨끗한 해설'), lookup), true);
 });
 
 test('participantHiddenCards 100핸드 물리 카드 유일성', () => {

@@ -12,10 +12,10 @@ import {
   trimHandLog,
   canonicalHandReplayJson,
   collectPrivateLiterals,
+  emptyPrivateLiteralsAllowed,
   gameEpochOf,
   HOST_ID,
   humanIdsOf,
-  isHumanSeat,
   validateActionAck,
   legacyExplanationAnnotation,
   MAX_PUBLISH_BODY_BYTES,
@@ -37,6 +37,8 @@ import {
   validateEventsAgainstEngine,
   validateMessages,
   assertHostText,
+  hostAnnotationLeaks,
+  sessionHasParticipants,
   nextDecisionFromViews,
 } from '../publish-contract.js';
 
@@ -255,14 +257,13 @@ function readSecurityJson(root, segments) {
 function readPlayers(root) {
   try {
     const players = readSecurityJson(root, ['players.json']);
-    return Array.isArray(players) ? players : [];
+    // #289: the same roster shapes the literal collector accepts, so a session it treats
+    // as having participants is never published or restored without their card check.
+    if (Array.isArray(players)) return players;
+    return Array.isArray(players?.players) ? players.players : [];
   } catch {
     return [];
   }
-}
-
-function sessionHasParticipants(players) {
-  return players.some((row) => row.playerId !== HOST_ID && (isHumanSeat(row) || /^h[1-8]$/.test(row.playerId)));
 }
 
 function lookupHandRecord(root, engineState, handNo) {
@@ -328,7 +329,8 @@ function engineGameOver(root, expectedSessionToken) {
  * 게시자가 주장하는 handNo·machine item으로 핸드를 고르지 않으며(같은 POST에서 위조
  * 가능하다) 캐시하지도 않는다 — `hands/`는 그대로인 채 `state.json`의 진행 중 핸드나
  * `players.json`만 바뀌는 갱신을 놓치기 때문이다. 자료를 하나라도 읽지 못하거나 수집
- * 결과가 0건이면 throw한다(호출자가 fail-closed로 거부한다).
+ * 결과가 0건이면 throw한다(호출자가 fail-closed로 거부한다). 단 AI 좌석이 없는 세션의
+ * 0건은 검증된 입력의 정당한 답이므로 빈 목록을 돌려준다(#289, emptyPrivateLiteralsAllowed).
  */
 function collectDenyLiterals(root, expectedSessionToken) {
   const players = readSecurityJson(root, ['players.json']);
@@ -373,7 +375,7 @@ function collectDenyLiterals(root, expectedSessionToken) {
   }
 
   const literals = collectPrivateLiterals({ players, engineState, records });
-  if (literals.length === 0) {
+  if (literals.length === 0 && !emptyPrivateLiteralsAllowed({ players, engineState })) {
     throw coded('DENY_LITERALS_EMPTY', 'deny literal 목록이 비어 있습니다.');
   }
   return literals;
@@ -453,7 +455,7 @@ function migrateLoadedTraining(rawTraining, { legacyProvenance = {} } = {}) {
 // `valueSha256`이 재계산값과 일치 ② `payloadSha256`이 존재하고 복원된 machine item과
 // 일치 ③ 최종 상태에 같은 digest로 존재(set-once) ④ explanation은 deny-literal
 // ⑤ exploit은 엔진 `gameOver`. 하나라도 어긋나면 드롭한다.
-function restoreAnnotationRow(row, { machine, literals, gate }) {
+function restoreAnnotationRow(row, { machine, literals, gate, hostTextLeaks = () => false }) {
   if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
   if (!machine) return null;
   let projected;
@@ -468,10 +470,25 @@ function restoreAnnotationRow(row, { machine, literals, gate }) {
     return null;
   }
   if (projected.field === 'explanation') {
-    if (!literals || textLeaksPrivate(projected.value, literals)) return null;
+    if (!literals || textLeaksPrivate(projected.value, literals) || hostTextLeaks(projected)) return null;
   }
   if (projected.field === 'exploit' && !gate.gameOver) return null;
   return projected;
+}
+
+// #289: in a multiplayer session a restored explanation meets the live publish rule for
+// other participants' hidden cards (assertHostText). Unreadable material drops them all.
+function restoredHostTextGate(gameDir, expectedSessionToken) {
+  try {
+    if (!sessionHasParticipants(readPlayers(gameDir))) return () => false;
+    const engineState = validatePrivateEngineState(
+      readSecurityJson(gameDir, ['state.json']),
+      { expectedSessionToken },
+    );
+    return (row) => hostAnnotationLeaks(row, (handNo) => lookupHandRecord(gameDir, engineState, handNo));
+  } catch {
+    return () => true;
+  }
 }
 
 function restoreHistory(rawHistory, context) {
@@ -614,6 +631,7 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       literals = null;
     }
     const gate = { gameOver: engineGameOver(gameDir, expectedSessionToken) };
+    const hostTextLeaks = restoredHostTextGate(gameDir, expectedSessionToken);
 
     const restoredAnnotations = Object.create(null);
     let droppedAnnotations = migrated.dropped;
@@ -634,7 +652,7 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
         continue;
       }
       const machine = machineById.get(row?.evaluationId);
-      const projected = restoreAnnotationRow(row, { machine, literals, gate });
+      const projected = restoreAnnotationRow(row, { machine, literals, gate, hostTextLeaks });
       if (!projected
         || (outerId !== null && outerId !== projected.evaluationId)
         || (outerField !== null && outerField !== projected.field)) {
@@ -660,7 +678,7 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       engineState = null;
     }
     const replay = restoreHistory(raw.history, {
-      machineById, literals, gate, annotations: restoredAnnotations, legacyProvenance,
+      machineById, literals, gate, hostTextLeaks, annotations: restoredAnnotations, legacyProvenance,
       root: gameDir, engineState, assertNoStudyCapability: assertRaw,
     });
     if (droppedAnnotations || replay.dropped) {

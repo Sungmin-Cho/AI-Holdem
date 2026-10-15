@@ -17,6 +17,7 @@ import {
 import * as pipeline from '../tools/training-pipeline.js';
 import {
   FIXTURE_POLICY_ID,
+  handRecordFixture,
   writeSecurityFixtures,
 } from './helpers/security-fixtures.js';
 import {
@@ -32,15 +33,15 @@ const EPOCH = gameEpochOf(TOKEN);
 const OWNER = 'owner-q3';
 const SAFE_EXPLANATION = 'BTN에서 AJo는 레이즈가 주력이고 폴드는 낮은 빈도입니다.';
 
-function freshDir(t, prefix) {
+function freshDir(t, prefix, fixtures = {}) {
   const dir = tmpQ3(prefix);
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  writeSecurityFixtures(dir, { gameOver: true });
+  writeSecurityFixtures(dir, { gameOver: true, ...fixtures });
   return dir;
 }
 
-async function seedMachine(t, prefix = 'holdem-q3-machine-') {
-  const dir = freshDir(t, prefix);
+async function seedMachine(t, prefix = 'holdem-q3-machine-', fixtures = {}) {
+  const dir = freshDir(t, prefix, fixtures);
   const tc = createTrainingControl();
   const evaluation = q3Evaluation(EPOCH);
   await tc.acceptEvaluations(dir, {
@@ -56,8 +57,9 @@ async function seedAnnotation(t, {
   status = 'ready',
   value = SAFE_EXPLANATION,
   prefix = 'holdem-q3-annotation-',
+  fixtures = {},
 } = {}) {
-  const seeded = await seedMachine(t, prefix);
+  const seeded = await seedMachine(t, prefix, fixtures);
   const { dir, tc, evaluation } = seeded;
   let auth = tc.loadAuthority(dir);
   await tc.markPublished(dir, evaluation.evaluationId, auth.items[evaluation.evaluationId].payloadSha256);
@@ -311,6 +313,82 @@ test('Q3 exact-file recovery treats a valid current snapshot as response-lost wi
   assert.equal(after.annotationQueue[item.evaluationId], undefined);
   assert.equal(after.items[item.evaluationId].annotations.explanation.published, true);
   await assertRollbackUnblocked(dir);
+});
+
+// #289: with no AI seat and replay-all the recovery deny list is legitimately empty; the
+// snapshot proof must still restore the explanation instead of dropping it.
+function noAiFixtures() {
+  const players = [
+    { playerId: 'user', kind: 'human' },
+    { playerId: 'h1', kind: 'human', participantId: 'part-1' },
+  ];
+  const record = handRecordFixture(1, { holes: { user: ['Ah', 'Kh'], h1: ['7c', '2d'] } });
+  delete record.holes.p1;
+  delete record.startStacks.p1;
+  delete record.endStacks.p1;
+  return {
+    players,
+    hands: [record],
+    config: { replayReveal: 'all', aiCount: 0, humanCount: 2 },
+    state: {
+      policySeed: null,
+      seats: players.map((row) => ({ playerId: row.playerId, stack: 10_000, out: false, kind: 'human' })),
+    },
+  };
+}
+
+test('#289 AI 0명 replay-all 세션의 exact-file 복구는 빈 deny 목록으로 snapshot을 복원한다', async (t) => {
+  const { dir, tc, item, value } = await seedAnnotation(t, {
+    prefix: 'holdem-q3-recover-no-ai-',
+    fixtures: noAiFixtures(),
+  });
+  writeUiSnapshot(dir, item, projectTrainingAnnotation({
+    evaluationId: item.evaluationId,
+    payloadSha256: item.payloadSha256,
+    field: 'explanation',
+    status: 'ready',
+    value,
+  }));
+  fs.unlinkSync(exactFile(dir, item));
+  let posts = 0;
+
+  await pipeline.flushAnnotationPublish(dir, {
+    gameEpoch: EPOCH,
+    executePublish: async () => { posts += 1; },
+  });
+
+  assert.equal(posts, 0);
+  assert.equal(readAnnotationExactFile(dir, item.detailRef, 'explanation').value, value);
+  const after = tc.loadAuthority(dir);
+  assert.equal(after.items[item.evaluationId].annotations.explanation.publishFailed, undefined);
+  assert.equal(after.items[item.evaluationId].annotations.explanation.published, true);
+});
+
+test('#289 멀티 세션의 exact-file 복구는 다른 인간의 비공개 카드를 담은 snapshot을 복원하지 않는다', async (t) => {
+  const { dir, tc, item, value } = await seedAnnotation(t, {
+    prefix: 'holdem-q3-recover-participant-',
+    value: '상대는 7c2d를 들고 있었다',
+    fixtures: noAiFixtures(),
+  });
+  writeUiSnapshot(dir, item, projectTrainingAnnotation({
+    evaluationId: item.evaluationId,
+    payloadSha256: item.payloadSha256,
+    field: 'explanation',
+    status: 'ready',
+    value,
+  }));
+  fs.unlinkSync(exactFile(dir, item));
+  let posts = 0;
+
+  await pipeline.flushAnnotationPublish(dir, {
+    gameEpoch: EPOCH,
+    executePublish: async () => { posts += 1; },
+  });
+
+  assert.equal(posts, 0);
+  const after = tc.loadAuthority(dir);
+  assert.equal(after.items[item.evaluationId].annotations.explanation.publishFailed, 'exact-file-missing');
+  assert.notEqual(after.items[item.evaluationId].annotations.explanation.published, true);
 });
 
 test('Q3 exact-file recovery restores a stale machine-digest snapshot then posts current digest once', async (t) => {

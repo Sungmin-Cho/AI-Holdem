@@ -20,7 +20,7 @@ import {
   controlError,
 } from "../shared/session-control-contract.js";
 import { launchSession } from "./session-launcher.js";
-import { abortModeFor, neverDealt, validateAbortingCheckpoint } from './recovery-exit.js';
+import { abortModeFor, neverDealt, reviewWaivable, validateAbortingCheckpoint } from './recovery-exit.js';
 import { createRoomManager } from "./room-manager.js";
 import { projectNotices } from "./notice-projection.js";
 import { validateParticipantName } from "../shared/seat-roles.js";
@@ -310,14 +310,20 @@ export function createSessionManager({
       if (loop.sessionToken!==engine.sessionToken || loop.gameEpoch!==epoch) return null;
       if (loop.aborting) {
         const checkpoint=validateAbortingCheckpoint(current.sessionDir,engine,loop);
-        return checkpoint ? {mode:checkpoint.mode} : null;
+        // #288: a waiver interrupted before it was recorded is still a waiver.
+        const waived=loop.abandonedPendingDecision?.reason==='REVIEW_WAIVED';
+        return checkpoint ? {mode:checkpoint.mode,...(waived ? {reason:'REVIEW_WAIVED'} : {})} : null;
       }
       const mode=abortModeFor(engine,loop);
       if (ABORTABLE_ERROR_CODES.includes(error))
         return mode ? {mode,reason:error==='ROOM_UNBOUND' ? 'ROOM_UNBOUND' : 'BAD_PLAYER_RECOVERY'} : null;
       // #260: a committed game that never dealt a hand loses nothing by ending, so
       // it can end whatever made its start fail (the cause may not be removable).
-      return mode==='abort' && neverDealt(engine,loop) ? {mode,reason:'NEVER_DEALT'} : null;
+      if (mode==='abort' && neverDealt(engine,loop)) return {mode,reason:'NEVER_DEALT'};
+      // #288: a final result whose review stage halted can be settled without the
+      // review. Judged from the loop's halt, not this process's error code, so it
+      // holds after an app restart (SESSION_RECOVERABLE) as well.
+      return mode==='finalize' && reviewWaivable(engine,loop) ? {mode,reason:'REVIEW_WAIVED'} : null;
     } catch { return null; }
   }
   function snapshot() {
@@ -354,7 +360,8 @@ export function createSessionManager({
         || session.loop.gameOverPending === true))
       publicState = "finalizing";
     const exit=abortTarget();
-    const recoveryExit=exit ? {mode:exit.mode} : null;
+    // #288: the waiver settles the result without its review; the lobby names that.
+    const recoveryExit=exit ? {mode:exit.mode,...(exit.reason==='REVIEW_WAIVED' ? {waivesReview:true} : {})} : null;
     const progress = lobbyProgress(publicState, loopState);
     return {
       instanceId,
