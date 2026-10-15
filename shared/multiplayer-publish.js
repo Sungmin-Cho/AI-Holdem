@@ -14,11 +14,10 @@ const STREET = new Set(['preflop', 'flop', 'turn', 'river']);
 const ACTION = new Set(['fold', 'check', 'call', 'raise']);
 const DECISION_ID_RE = /^d-[1-9]\d*-(?:preflop|flop|turn|river)-\d+$/;
 const RESULT = new Set(['win', 'lose', 'completed', 'abort']);
-// #289: a suit letter is matched in either case ("7C" names the same card as "7c").
-const SUIT_CLASS = { s: '[sS♠♤]', h: '[hH♥♡]', d: '[dD♦♢]', c: '[cC♣♧]' };
 // #289: cards written together ("7c2d", "Ah7♣") are separate tokens, but only when the
-// whole run stands alone as a word: a run inside a longer word or a hex digest ("STACKS",
-// "…a7c2d9…") is not cards. Each run found is split so every card meets the boundary below.
+// whole run stands alone as a word: a run glued to a letter or digit ("STACKS", "7c2d9",
+// a hex digest) is not cards, as a single card glued to one ("x7c") is not. Each run
+// found is split so every card meets the boundary below.
 const CARD_TOKEN = '[2-9TJQKA][cdhsCDHS♠♥♦♣♤♡♢♧]';
 const CARD_RUN = new RegExp(`(?<![A-Za-z0-9])(?:${CARD_TOKEN}){2,}(?![A-Za-z0-9])`, 'gu');
 const CARD_IN_RUN = new RegExp(`(${CARD_TOKEN})(?=${CARD_TOKEN})`, 'gu');
@@ -336,6 +335,8 @@ export function sessionHasParticipants(players) {
   return list.some((row) => row?.playerId !== HOST_ID && (isHumanSeat(row) || /^h[1-8]$/.test(row?.playerId)));
 }
 
+const SUIT_SYMBOLS = { s: '♠♤', h: '♥♡', d: '♦♢', c: '♣♧' };
+
 export function cardTokenLeaks(text, cardList) {
   if (typeof text !== 'string' || !text) return false;
   text = text.replace(CARD_RUN, (run) => run.replace(CARD_IN_RUN, '$1 '));
@@ -343,14 +344,13 @@ export function cardTokenLeaks(text, cardList) {
     if (typeof card !== 'string' || !CARD_RE.test(card)) continue;
     const rank = card[0];
     const suit = card[1];
-    const latin = new RegExp(`(?<![A-Za-z0-9])${rank}[${suit}${suit.toUpperCase()}](?![A-Za-z0-9])`);
-    const unicode = new RegExp(`(?<![A-Za-z0-9])${rank}${SUIT_CLASS[suit]}(?![A-Za-z0-9])`, 'u');
-    if (unicode.test(text) && !latin.test(text) && /[♠♥♦♣♤♡♢♧]/.test(text)) return true;
-    if (latin.test(text)) {
-      if (card === 'As' && /(?<![A-Za-z0-9])As(?=\s+[a-z])/.test(text)
-        && !latin.test(text.replace(/(?<![A-Za-z0-9])As(?=\s+[a-z])/g, 'XX'))) {
-        continue;
-      }
+    // A suit symbol is checked on its own: an English "As" elsewhere never hides an "A♠".
+    if (new RegExp(`(?<![A-Za-z0-9])${rank}[${SUIT_SYMBOLS[suit]}](?![A-Za-z0-9])`, 'u').test(text)) return true;
+    // A suit letter in either case. Only "As" followed by a lower-case word is the English
+    // word; that exemption covers that occurrence alone.
+    const letter = new RegExp(`(?<![A-Za-z0-9])${rank}[${suit}${suit.toUpperCase()}](?![A-Za-z0-9])`, 'g');
+    for (const match of text.matchAll(letter)) {
+      if (match[0] === 'As' && /^\s+[a-z]/.test(text.slice(match.index + 2))) continue;
       return true;
     }
   }

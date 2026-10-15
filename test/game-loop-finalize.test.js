@@ -1943,10 +1943,28 @@ test('#288 멀티 토너먼트에서 호스트가 먼저 탈락해도 completed 
   const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
   assert.equal(typeof snapshot.review, 'string');
   assert.deepEqual(snapshot.coach.map((note) => note.handNo).sort((a, b) => a - b), [1, 2]);
-  // #289: h1 folded 7h 2c unseen in hand 1. The coach's substring check refuses either
-  // suit case, so it never accepts a note the relay would refuse.
-  const deny = readJson(path.join(gameDir, '.coach-deny-1.json'));
-  for (const literal of ['7h', '2c', '7H', '2C']) assert.equal(deny.includes(literal), true, literal);
+});
+
+// #289: h1 folded 7h 2c unseen in hand 1. A coach note quoting them with suit symbols
+// passes the coach's substring literals, but the relay refuses it; the coach applies the
+// relay's own rule first, so the note is refused here and the game still finishes.
+test('#289 멀티 세션의 코치는 relay가 거절할 참가자 카드 인용을 accept하지 않는다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedHostBustMultiGame(gameDir);
+  const leaking = { raw: JSON.stringify({ handNo: 1, text: '상대는 7♥ 2♣를 들고 폴드했습니다.' }) };
+  const upper = makeCoachAdapter({ rounds: [leaking, leaking] });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper, loopOpts: { controlProtocolVersion: 1 }, stateOverrides: { handNo: 2 },
+  });
+
+  await loop.resume();
+  await loop.run();
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.phase, 'done', JSON.stringify(state.halt ?? null));
+  const note = readJson(path.join(gameDir, 'ui-snapshot.json')).coach.find((row) => row.handNo === 1);
+  assert.equal(note.unavailable, true, JSON.stringify(note));
+  assert.equal(JSON.stringify(note).includes('7♥'), false);
 });
 
 test('#288 호스트가 먼저 탈락한 멀티 토너먼트는 상위 모델 없이도 기계 리뷰로 끝난다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {

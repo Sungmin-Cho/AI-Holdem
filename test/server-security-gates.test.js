@@ -1505,6 +1505,21 @@ test('#289 AI 0명 세션의 live 게시는 붙여 쓴 카드와 핸드를 알 �
   });
 });
 
+test('#289 영어 As 예외는 같은 해설의 A♠ 인용을 숨기지 않는다', async () => {
+  const dir = tmpDir();
+  noAiSessionFixtures(dir, { h1Holes: ['As', '2d'] });
+  const summary = summaryOf();
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const leak = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', 'As you can see: 상대의 A♠가 블로커입니다.')],
+    });
+    assert.equal(leak.status, 400, JSON.stringify(leak.json));
+    assert.equal(leak.json.code, 'FORBIDDEN_LITERAL');
+  });
+});
+
 test('#289 멀티 세션의 기계 행은 다이제스트 안의 카드 같은 글자 때문에 거절되지 않는다', async () => {
   const dir = tmpDir();
   noAiSessionFixtures(dir);

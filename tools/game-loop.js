@@ -46,6 +46,7 @@ import {
   RUNTIME_TABLE,
 } from './player-runtime.js';
 import {
+  assertHostText,
   coachNoteStrings,
   collectPrivateLiteralsDetailed,
   gameEpochOf,
@@ -57,6 +58,7 @@ import {
   recheckRejectionTupleOf,
   rejectionTupleOf,
   sanitizeRejectionFields,
+  sessionHasParticipants,
   validateActionAck,
   validateCoachDecisions,
 } from '../publish-contract.js';
@@ -3193,7 +3195,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const flushTrainingPublish = async () => {
     if (!trainingOn) return null;
-    if (machinePublishHalt) return { error: machinePublishHalt };
+    if (machinePublishHalt) return { error: machinePublishHalt, skipped: true };
     const loop = readLoopState();
     try {
       await flushMachinePublish(root, {
@@ -3221,7 +3223,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const flushAnnotationPublish = async () => {
     if (!trainingOn) return null;
-    if (annotationPublishHalt) return { error: annotationPublishHalt };
+    if (annotationPublishHalt) return { error: annotationPublishHalt, skipped: true };
     const loop = readLoopState();
     try {
       await flushAnnotationEnvelope(root, {
@@ -3249,7 +3251,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
 
   const retryUnresolvedTrainingAttempt = async () => {
-    if (machinePublishHalt || annotationPublishHalt) return { error: machinePublishHalt || annotationPublishHalt };
+    if (machinePublishHalt || annotationPublishHalt) return { error: machinePublishHalt || annotationPublishHalt, skipped: true };
     try {
       await retryTrainingAttempt(root, {
         executePublish, storeDir, retirePending: settleRejectedPendingAnnotation,
@@ -4380,11 +4382,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const coachForbiddenLiterals = (handNo) => {
     const { cards, others } = coachForbiddenDetailed(handNo);
-    // #289: the relay matches a hidden card's suit in either case. This substring check
-    // must refuse at least as much, or a note accepted here would be refused on publish.
-    const upper = [...cards].filter((card) => /^[2-9TJQKA][cdhs]$/.test(card))
-      .map((card) => `${card[0]}${card[1].toUpperCase()}`);
-    return [...new Set([...cards, ...upper, ...others])];
+    return [...new Set([...cards, ...others])];
   };
 
   const replayPublicCards = (replay) => {
@@ -4399,7 +4397,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const writeCoachDeny = (handNo) => {
     const literals = coachForbiddenLiterals(handNo);
     const players = readJsonOptional(playersPath, 'PLAYERS');
-    const aiCount = aiRowsOf(Array.isArray(players) ? players : []).length;
+    const roster = Array.isArray(players) ? players : (Array.isArray(players?.players) ? players.players : []);
+    const aiCount = aiRowsOf(roster).length;
     if (literals.length === 0 && aiCount !== 0) {
       throw codedError('BAD_COACH_DENY', `핸드 ${handNo} private literal deny 목록이 비어 있습니다.`);
     }
@@ -4574,7 +4573,28 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       throw codedError('INVALID_COACH_OUTPUT', '코치 출력이 replay 공개 범위 밖 카드를 인용합니다.');
     }
+    // #289: in a multiplayer session the relay refuses a note that quotes another
+    // participant's hidden card in any spelling (suit case or symbol, joined cards).
+    // The same rule refuses it here, so a note accepted is never one the relay refuses.
+    if (coachHostTextLeaks(note, handNo)) {
+      throw codedError('INVALID_COACH_OUTPUT', '코치 출력이 다른 참가자의 비공개 카드를 인용합니다.');
+    }
     return note;
+  };
+
+  const coachHostTextLeaks = (note, handNo) => {
+    const players = readJsonOptional(playersPath, 'PLAYERS');
+    if (!sessionHasParticipants(players)) return false;
+    const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+    try {
+      assertHostText({ coach: [{ ...note, handNo }] }, (n) => {
+        const record = fullHandRecord(n);
+        return record ? { ...record, seats: engine?.seats } : null;
+      });
+      return false;
+    } catch {
+      return true;
+    }
   };
 
   const readCoachAuthority = () => readJsonOptional(coachAuthorityPath, 'COACH_AUTHORITY');
@@ -7181,15 +7201,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         ['annotations', flushAnnotationPublish],
         ['training-consume', consumeTrainingNow],
       ]) {
-        let code = null;
+        let outcome = null;
         try {
-          code = (await settle())?.error ?? null;
+          outcome = await settle();
         } catch (error) {
-          code = error.code ?? 'ERROR';
+          outcome = { error: error.code ?? 'ERROR' };
         }
-        if (code) {
-          failedSteps.push(`${step}:${code}`);
-          log('review-waived-step-error', { step, code });
+        if (outcome?.error) {
+          // A step an earlier halt stopped is named once, as skipped, not as a new failure.
+          failedSteps.push(outcome.skipped ? `${step}:skipped` : `${step}:${outcome.error}`);
+          log('review-waived-step-error', { step, code: outcome.error, skipped: outcome.skipped === true });
         }
         if (stopRequested) break;
       }

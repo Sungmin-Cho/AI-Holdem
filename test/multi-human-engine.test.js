@@ -567,23 +567,29 @@ test('emptyPrivateLiteralsAllowed는 players·seats·config가 모두 AI 0명일
 
 // #289: the hand-scoped participant-card rule holds for joined cards and names every hand.
 test('cardTokenLeaks는 붙여 쓴 카드도 잡고 핸드 클래스는 카드로 보지 않는다', () => {
-  for (const text of ['7c2d', '상대는 7c2d', 'Ah7c', '2d7c였다', '7♣2♦']) {
-    assert.equal(cardTokenLeaks(text, ['7c']) || cardTokenLeaks(text, ['2d']), true, text);
+  for (const text of ['7c2d', '상대는 7c2d', '2d7c였다', '7♣2♦', '(7c2d)', '"7c2d"', '카드\n7c2d\n', '7C2D', '7c2D', '7♧2♢']) {
+    for (const card of ['7c', '2d']) assert.equal(cardTokenLeaks(text, [card]), true, `${text} ${card}`);
   }
-  assert.equal(cardTokenLeaks('7c2d', ['7c']), true);
-  assert.equal(cardTokenLeaks('7c2d', ['2d']), true);
-  for (const text of ['AKs로 오픈', 'QJs', 'T9s 콜', 'As you can see', 'AKS', 'Ace', 'STACKS', 'TASKS', 'aa7c2d', '7c2d9a1b']) {
-    assert.equal(cardTokenLeaks(text, ['Ks', 'Js', '9s', 'As', '7c', '2d']), false, text);
+  assert.equal(cardTokenLeaks('Ah7c', ['Ah']), true);
+  assert.equal(cardTokenLeaks('Ah7c', ['7c']), true);
+  // The English-word exemption for "As" covers that occurrence only, never a suit symbol
+  // or another "As" in the same text.
+  assert.equal(cardTokenLeaks('As you can see: 상대의 A♠가 블로커입니다.', ['As']), true);
+  assert.equal(cardTokenLeaks('As you can see, As가 블로커입니다.', ['As']), true);
+  assert.equal(cardTokenLeaks('As you can see', ['As']), false);
+  // A run of cards glued to a letter or digit is not cards, as a single card glued to one
+  // is not ("x7c"): the same word-boundary rule for one card and for a run.
+  for (const text of ['AKs로 오픈', 'QJs', 'T9s 콜', 'As you can see', 'AKS', 'Ace', 'STACKS', 'TASKS', 'OUTS', 'NUTS', 'aa7c2d', '7c2d9a1b', '7c2d9', 'AKs7c2d', '7♣2♦a', 'x7c']) {
+    assert.equal(cardTokenLeaks(text, ['Ks', 'Js', '9s', 'Ts', 'As', '7c', '2d']), false, text);
   }
   // A run of cards counts only when it stands alone: a hex digest holds no cards.
   for (let i = 0; i < 2000; i += 1) {
     const digest = createHash('sha256').update(`digest-${i}`).digest('hex');
     assert.equal(cardTokenLeaks(digest, ['7c', '2d', '9c', '3d', '5c', '8d', '4c', '6d']), false, digest);
   }
-  // A suit letter in either case names the same card, alone or joined.
-  for (const [text, card] of [['7C', '7c'], ['7c2D', '7c'], ['7c2D', '2d'], ['7C2D', '7c'], ['7C2D', '2d'], ['7c2dAh', 'Ah'], ['ah', 'Ah']]) {
-    assert.equal(cardTokenLeaks(text, [card]), card !== 'Ah' || text !== 'ah', `${text} ${card}`);
-  }
+  // A suit letter in either case names the same card, alone or joined; the rank stays upper.
+  for (const [text, card] of [['7C', '7c'], ['7c2dAh', 'Ah'], ['AS', 'As']]) assert.equal(cardTokenLeaks(text, [card]), true, `${text} ${card}`);
+  assert.equal(cardTokenLeaks('ah', ['Ah']), false);
 });
 
 test('assertHostText는 핸드를 알 수 없는 annotation을 건너뛰지 않고 거부한다', () => {
