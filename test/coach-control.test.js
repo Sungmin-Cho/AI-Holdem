@@ -160,6 +160,58 @@ test('Gate A: cutoff는 live publisher lock 해제 후 missing 전체를 한 tra
   assert.equal(completeness.reviewGateOpen, true);
 });
 
+// #288: a host who busted early holds fewer hands than the game completed. The seal
+// range is the completed count; the host sample is only bounded by it.
+test('#288 cutoff는 호스트 표본이 completed보다 작아도 completed 전 범위를 봉인한다', async () => {
+  const { dir, owner, cc, snapshotFile, statsFile } = setup();
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.3 } } }));
+  const started = await reserveAll(cc, { dir, owner, completed: 2, statsFile, snapshotFile });
+  const d1 = started.descriptors.find((d) => d.handNo === 1);
+  writeResult(d1.exactResultPath, { handNo: 1, text: '무난한 콜입니다.' });
+  assert.equal((await cc.accept({ gameDir: dir, owner, handNo: 1, generation: d1.generation })).ok, true);
+
+  const out = await cc.finalizeCutoff({
+    gameDir: dir, owner, completed: 2, snapshotFile, statsFile, host: publisherHost(),
+  });
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.deepEqual(out.sealed, [2]);
+  assert.equal(out.reviewGate, 'open');
+  const auth = cc.loadAuthority(dir);
+  assert.deepEqual(auth.finalization, { status: 'SEALED', completed: 2 });
+  assert.equal(auth.publishQueue['2'].noteKind, 'unavailable');
+  assert.equal(cc.completeness(dir, 2).reviewGateOpen, true);
+});
+
+test('#288 cutoff는 호스트 표본이 completed보다 크면 COMPLETED_MISMATCH로 봉인하지 않는다', async () => {
+  const { dir, owner, cc, snapshotFile, statsFile } = setup();
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 3, vpip: 0.3 } } }));
+  await reserveAll(cc, { dir, owner, completed: 2, statsFile, snapshotFile });
+
+  const out = await cc.finalizeCutoff({
+    gameDir: dir, owner, completed: 2, snapshotFile, statsFile, host: publisherHost(),
+  });
+  assert.equal(out.ok, false);
+  assert.equal(out.code, 'FINALIZATION_ABORTED');
+  assert.equal(out.reason, 'COMPLETED_MISMATCH');
+  assert.equal(out.reviewGate, 'closed');
+  const auth = cc.loadAuthority(dir);
+  assert.deepEqual(auth.publishQueue, {});
+  assert.equal(auth.finalization, null);
+});
+
+test('#288 completed 없는 legacy cutoff는 stats 표본을 봉인 범위로 쓴다', async () => {
+  const { dir, owner, cc, snapshotFile, statsFile } = setup();
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.3 } } }));
+  await reserveAll(cc, { dir, owner, completed: 2, statsFile, snapshotFile });
+
+  const out = await cc.finalizeCutoff({
+    gameDir: dir, owner, completed: Number(undefined), snapshotFile, statsFile, host: publisherHost(),
+  });
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.deepEqual(out.sealed, [1]);
+  assert.deepEqual(cc.loadAuthority(dir).finalization, { status: 'SEALED', completed: 1 });
+});
+
 test('Gate A: publisher termination 미확인은 FINALIZATION_ABORTED이고 missing을 숨기지 않는다', async () => {
   const { dir, owner, cc, snapshotFile, statsFile } = setup();
   fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.4 } } }));

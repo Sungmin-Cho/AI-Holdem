@@ -19,6 +19,9 @@ import {
 import {
   collectPrivateLiterals,
   detailRefOf,
+  emptyPrivateLiteralsAllowed,
+  hostAnnotationLeaks,
+  sessionHasParticipants,
   gameEpochOf,
   isAnnotationOnlyAttempt,
   isRetirableAnnotationRejection,
@@ -349,10 +352,28 @@ function collectRecoveryDenyLiterals(sessionDir, auth) {
     throw coded('HAND_ARCHIVE_MISSING', '완료된 hand archive 연속성이 깨졌습니다.');
   }
   const literals = collectPrivateLiterals({ players, engineState, records });
-  if (literals.length === 0) {
+  if (literals.length === 0 && !emptyPrivateLiteralsAllowed({ players, engineState })) {
     throw coded('DENY_LITERALS_EMPTY', 'deny literal 목록이 비어 있습니다.');
   }
   return literals;
+}
+
+// #289: in a multiplayer session a reconstructed explanation meets the live publish rule
+// for other participants' hidden cards (assertHostText), hand by hand.
+function recoveryHostTextLeaks(sessionDir, auth, projected) {
+  const players = readSecurityJson(sessionDir, ['players.json']);
+  if (!sessionHasParticipants(players)) return false;
+  const engineState = readSecurityEngineState(sessionDir, auth);
+  return hostAnnotationLeaks(projected, (handNo) => {
+    if (engineState.hand && engineState.handNo === handNo) return { ...engineState.hand, handNo, seats: engineState.seats };
+    if (engineState.lastHand?.handNo === handNo) return { ...engineState.lastHand, seats: engineState.seats };
+    try {
+      const name = `hand-${String(handNo).padStart(4, '0')}.json`;
+      return { ...readSecurityJson(sessionDir, ['hands', name]), seats: engineState.seats };
+    } catch {
+      return null;
+    }
+  });
 }
 
 // The publisher appends one line per refusal it retired (tools/publish.js) through
@@ -648,7 +669,8 @@ function validateRecoverySnapshotRow(sessionDir, auth, item, field, annotation, 
     )) return null;
   try {
     if (field === 'explanation'
-      && textLeaksPrivate(projected.value, collectRecoveryDenyLiterals(sessionDir, auth))) {
+      && (textLeaksPrivate(projected.value, collectRecoveryDenyLiterals(sessionDir, auth))
+        || recoveryHostTextLeaks(sessionDir, auth, projected))) {
       return null;
     }
     if (field === 'exploit' && readSecurityEngineState(sessionDir, auth).gameOver !== true) {

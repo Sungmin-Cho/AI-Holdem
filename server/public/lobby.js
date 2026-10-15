@@ -221,7 +221,9 @@ function render() {
     }
   }
   $("result-restart").disabled = busy || !snapshot.allowedCommands.includes("restart");
-  $("result-end").textContent = snapshot.recoveryExit?.mode === 'finalize' ? '기록을 버리고 결과 정리' : '게임 종료';
+  // #288: a waiver settles the result without the review; the button says so.
+  $("result-end").textContent = snapshot.recoveryExit?.waivesReview ? '리뷰 없이 결과 정리'
+    : snapshot.recoveryExit?.mode === 'finalize' ? '기록을 버리고 결과 정리' : '게임 종료';
   $("result-modes").hidden = !snapshot.allowedCommands.includes("start");
   // #286: "back" leaves the setup screen for what it was opened over: the
   // pause menu of a paused game, or the result of a finished one.
@@ -664,6 +666,15 @@ function confirm(fn) {
   confirmation = fn;
   $("confirm-dialog").showModal();
 }
+// #288: an error-state exit that waives the review says so; every other confirmation
+// shows the default message, restored whenever the dialog closes.
+const CONFIRM_END_MESSAGE = $("confirm-message").textContent;
+const CONFIRM_WAIVE_MESSAGE = "게임 결과는 그대로 확정됩니다. 종합 리뷰는 만들지 않으며, 이 게임의 리뷰를 다시 시도할 수 없습니다.";
+function confirmExit(fn) {
+  if (snapshot?.recoveryExit?.waivesReview) $("confirm-message").textContent = CONFIRM_WAIVE_MESSAGE;
+  confirm(fn);
+}
+$("confirm-dialog").addEventListener("close", () => { $("confirm-message").textContent = CONFIRM_END_MESSAGE; });
 $("confirm-yes").onclick = () => {
   $("confirm-dialog").close();
   const fn = confirmation;
@@ -722,8 +733,8 @@ $("restart").onclick = () => confirm(() => command("restart"));
 $("end").onclick = () => confirm(() => command("end"));
 $("modes").onclick = chooseMode;
 $("result-modes").onclick = chooseMode;
-$("result-restart").onclick = () => snapshot.state === 'error' ? confirm(() => command('restart')) : command('restart');
-$("result-end").onclick = () => confirm(() => command('end'));
+$("result-restart").onclick = () => snapshot.state === 'error' ? confirmExit(() => command('restart')) : command('restart');
+$("result-end").onclick = () => confirmExit(() => command('end'));
 $("close-menu").onclick = () => $("pause-dialog").close();
 $("back").onclick = () => {
   selecting = false;

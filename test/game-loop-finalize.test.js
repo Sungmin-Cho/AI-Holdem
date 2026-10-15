@@ -80,8 +80,10 @@ import {
   cliJson,
   putUserOnTheButton,
   seedFinishedGame,
+  seedHostBustMultiGame,
   expandFinishedGameToTwoHands,
   sha256Text,
+  seedGameOverSnapshot,
   finalizingLoop,
   coachInvocations,
   publishInvocations,
@@ -1916,6 +1918,310 @@ test('Task 7A full review: engine lastHand.handNo와 stats user.sample 불일치
   assert.equal(state.finalization.cutoff.terminationConfirmed, true);
   assert.equal(coachInvocations(calls, 'finalize-cutoff').length, 0);
   assert.equal(upper.evaluatorStarts.length + upper.synthesizerStarts.length, 0);
+});
+
+test('#288 멀티 토너먼트에서 호스트가 먼저 탈락해도 completed 전 범위를 봉인하고 리뷰까지 끝낸다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedHostBustMultiGame(gameDir);
+  const upper = makeCoachAdapter();
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper, loopOpts: { controlProtocolVersion: 1 }, stateOverrides: { handNo: 2 },
+  });
+
+  await loop.resume();
+  await loop.run();
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.phase, 'done', JSON.stringify(state.halt ?? null));
+  assert.equal(state.halt, undefined);
+  const cutoff = coachInvocations(calls, 'finalize-cutoff');
+  assert.equal(cutoff.length, 1);
+  assert.equal(flagValue(cutoff[0], '--completed'), '2');
+  const auth = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.deepEqual(auth.finalization, { status: 'SEALED', completed: 2 });
+  const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  assert.equal(typeof snapshot.review, 'string');
+  assert.deepEqual(snapshot.coach.map((note) => note.handNo).sort((a, b) => a - b), [1, 2]);
+});
+
+test('#288 멀티 토너먼트도 호스트가 받은 핸드 수와 stats user.sample이 다르면 fail closed한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedHostBustMultiGame(gameDir);
+  const enginePath = path.join(gameDir, 'state.json');
+  const engine = readJson(enginePath);
+  engine.stats.user.hands = 0;
+  fs.writeFileSync(enginePath, JSON.stringify(engine));
+  const upper = makeCoachAdapter();
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper, loopOpts: { controlProtocolVersion: 1 }, stateOverrides: { handNo: 2 },
+  });
+
+  await loop.resume();
+  await assert.rejects(loop.run(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.halt.code, 'FINALIZATION_ABORTED');
+  assert.match(state.halt.message, /stats user\.sample\(0\)/);
+  assert.match(state.halt.message, /\(1\)/);
+  assert.equal(state.finalization.cutoff.reason, 'completed_stats_disagreement');
+  assert.equal(coachInvocations(calls, 'finalize-cutoff').length, 0);
+  assert.equal(upper.evaluatorStarts.length + upper.synthesizerStarts.length, 0);
+});
+
+test('#288 호스트가 받지 않은 핸드까지 센 stats user.sample은 completed와 같아도 fail closed한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedHostBustMultiGame(gameDir);
+  const enginePath = path.join(gameDir, 'state.json');
+  const engine = readJson(enginePath);
+  engine.stats.user.hands = 2;
+  fs.writeFileSync(enginePath, JSON.stringify(engine));
+  const upper = makeCoachAdapter();
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper, loopOpts: { controlProtocolVersion: 1 }, stateOverrides: { handNo: 2 },
+  });
+
+  await loop.resume();
+  await assert.rejects(loop.run(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.finalization.cutoff.reason, 'completed_stats_disagreement');
+  assert.match(state.halt.message, /호스트가 받은 핸드\(1\)와 stats user\.sample\(2\)/);
+  assert.equal(coachInvocations(calls, 'finalize-cutoff').length, 0);
+  assert.equal(upper.evaluatorStarts.length + upper.synthesizerStarts.length, 0);
+});
+
+test('#288 호스트가 받은 핸드를 기록에서 셀 수 없으면 추측하지 않고 fail closed한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  expandFinishedGameToTwoHands(gameDir);
+  const enginePath = path.join(gameDir, 'state.json');
+  const engine = readJson(enginePath);
+  engine.stats.user.hands = 1;
+  fs.writeFileSync(enginePath, JSON.stringify(engine));
+  const archivePath = path.join(gameDir, 'hands', 'hand-0001.json');
+  const archived = readJson(archivePath);
+  archived.handNo = 7;
+  fs.writeFileSync(archivePath, JSON.stringify(archived));
+  const upper = makeCoachAdapter();
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, { upper, stateOverrides: { handNo: 2 } });
+
+  await loop.resume();
+  await assert.rejects(loop.run(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.finalization.cutoff.reason, 'host_dealt_unavailable');
+  assert.match(state.halt.message, /호스트가 받은 핸드 수/);
+  assert.equal(coachInvocations(calls, 'finalize-cutoff').length, 0);
+  assert.equal(upper.evaluatorStarts.length + upper.synthesizerStarts.length, 0);
+});
+
+// #288: a result-final game halted in the review stage, as the app sees it: a real
+// finalize that stopped on a review-gate check (here a stats sample the host never had).
+async function haltedReviewStage(t) {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const enginePath = path.join(gameDir, 'state.json');
+  const engine = readJson(enginePath);
+  engine.stats.user.hands = 0;
+  fs.writeFileSync(enginePath, JSON.stringify(engine));
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper: makeCoachAdapter() });
+  await loop.resume();
+  await assert.rejects(loop.run(), (error) => error.code === 'FINALIZATION_ABORTED');
+  await loop.requestStop();
+  return { gameDir, init, engineBytes: fs.readFileSync(enginePath) };
+}
+
+function waiverLoop(t, gameDir, { operationId = null, upper = makeCoachAdapter() } = {}) {
+  const calls = [];
+  const loop = createGameLoop({
+    gameDir,
+    resolver: async ({ need }) => {
+      assert.equal(need, 'upper-only');
+      return { player: null, upper, notices: [] };
+    },
+    opts: {
+      port: 0,
+      waitMs: 0,
+      onCoachInvoke: (args) => calls.push({ kind: 'coach', args }),
+      onPublishInvoke: (args) => calls.push({ kind: 'publish', args }),
+      scanCoachRuntimeProcesses: TEST_DEFAULT_SCAN_COACH_RUNTIME_PROCESSES,
+      ...(operationId ? { abortUnrecoverable: { operationId, reason: 'REVIEW_WAIVED' } } : {}),
+    },
+  });
+  t.after(() => loop.requestStop().catch(() => {}));
+  return { loop, calls, upper };
+}
+
+test('#288 REVIEW_WAIVED는 리뷰 단계에서 멈춘 결과 확정 게임을 결과 그대로 리뷰 없이 done으로 끝낸다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  const { gameDir, engineBytes } = await haltedReviewStage(t);
+  const halted = fs.readFileSync(path.join(gameDir, 'loop-state.json'));
+  const { loop, calls, upper } = waiverLoop(t, gameDir, { operationId: 'waive-1' });
+
+  await loop.resume();
+  await loop.run();
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.phase, 'done');
+  assert.equal(state.halt, undefined);
+  assert.equal(state.aborting, undefined);
+  assert.equal(state.reviewWaiver.operationId, 'waive-1');
+  assert.equal(state.reviewWaiver.haltCode, 'FINALIZATION_ABORTED');
+  assert.equal(state.abandonedPendingDecision.reason, 'REVIEW_WAIVED');
+  assert.equal(state.abandonedPendingDecision.mode, 'finalize');
+  assert.deepEqual(fs.readFileSync(path.join(gameDir, state.abandonedPendingDecision.sidecar)), halted);
+  assert.equal(state.finalization.cutoff.reason, 'review_waived');
+  assert.equal(state.finalization.cutoff.reviewGate, 'waived');
+  assert.ok(state.notices.some((notice) => notice.startsWith('종합 리뷰 없이 결과를 확정했습니다')));
+  // The coach authority is still sealed — without the stats comparison the review relies on.
+  const cutoff = coachInvocations(calls, 'finalize-cutoff');
+  assert.equal(cutoff.length, 1);
+  assert.equal(flagValue(cutoff[0], '--stats-file'), null);
+  assert.equal(flagValue(cutoff[0], '--termination-confirmed'), 'true');
+  const authority = readJson(path.join(gameDir, '.coach-authority.json'));
+  assert.deepEqual(authority.finalization, { status: 'SEALED', completed: 1 });
+  assert.equal(authority.noNewPlayTimePublishers, true);
+  assert.equal(upper.evaluatorStarts.length + upper.synthesizerStarts.length, 0);
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).review, undefined);
+  assert.deepEqual(fs.readFileSync(path.join(gameDir, 'state.json')), engineBytes);
+  assert.ok(readLoopLog(gameDir).some((row) => row.event === 'review-waived' && row.operationId === 'waive-1'));
+});
+
+test('#288 REVIEW_WAIVED는 리뷰 단계 halt가 없는 게임을 아무것도 쓰지 않고 거부한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  writeLoopStateFixture(gameDir, init.sessionToken, { phase: 'finalizing', handNo: 1 });
+  const before = fs.readFileSync(path.join(gameDir, 'loop-state.json'));
+  const { loop, upper } = waiverLoop(t, gameDir, { operationId: 'waive-2' });
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'BAD_LOOP_PHASE');
+
+  assert.deepEqual(fs.readFileSync(path.join(gameDir, 'loop-state.json')), before);
+  assert.equal(fs.readdirSync(gameDir).some((name) => name.startsWith('loop-state.abandoned.')), false);
+  assert.equal(upper.evaluatorStarts.length + upper.synthesizerStarts.length, 0);
+});
+
+test('#288 REVIEW_WAIVED checkpoint만 남긴 crash는 다음 resume이 waiver로 이어 끝낸다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  const { gameDir } = await haltedReviewStage(t);
+  const loopFile = path.join(gameDir, 'loop-state.json');
+  const rename = fs.renameSync;
+  let cut = false;
+  fs.renameSync = function (from, to) {
+    if (!cut && to === loopFile && Object.hasOwn(readJson(from), 'reviewWaiver')) {
+      cut = true;
+      throw Object.assign(new Error('waiver write cut'), { code: 'WAIVER_WRITE_CUT' });
+    }
+    return rename.apply(this, arguments);
+  };
+  try {
+    const { loop } = waiverLoop(t, gameDir, { operationId: 'waive-3' });
+    await assert.rejects(loop.resume(), (error) => error.code === 'WAIVER_WRITE_CUT');
+  } finally {
+    fs.renameSync = rename;
+  }
+  const checkpoint = readJson(loopFile);
+  assert.deepEqual(checkpoint.aborting, { operationId: 'waive-3', mode: 'finalize' });
+  assert.equal(checkpoint.reviewWaiver, undefined);
+
+  const { loop, upper } = waiverLoop(t, gameDir);
+  await loop.resume();
+  await loop.run();
+
+  const state = readJson(loopFile);
+  assert.equal(state.phase, 'done');
+  assert.equal(state.aborting, undefined);
+  assert.equal(state.reviewWaiver.operationId, 'waive-3');
+  assert.equal(state.reviewWaiver.haltCode, 'FINALIZATION_ABORTED');
+  assert.equal(upper.evaluatorStarts.length + upper.synthesizerStarts.length, 0);
+});
+
+async function reviewGeneratedHalt(gameDir, { closed = true } = {}) {
+  const init = await seedFinishedGame(gameDir);
+  seedGameOverSnapshot(gameDir);
+  writeLoopStateFixture(gameDir, init.sessionToken, {
+    phase: 'review_generated',
+    handNo: 1,
+    playerRuntime: null,
+    upperRuntime: 'coach-fake',
+    reviewSha256: sha256Text(VALID_REVIEW),
+    halt: { code: 'REVIEW_FAILED', message: '종합 리뷰 게시를 완료하지 못했습니다.' },
+    ...(closed ? { coachRuntimeClosures: [{ ownerSessionId: 'old-owner', confirmedAt: '2026-10-15T00:00:00.000Z' }] } : {}),
+  });
+  fs.writeFileSync(path.join(gameDir, 'review.md'), VALID_REVIEW);
+}
+
+test('#288 review_generated에서 멈춘 게임의 REVIEW_WAIVED는 생성된 리뷰를 게시하지 않고 done으로 끝낸다', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  await reviewGeneratedHalt(gameDir);
+  const { loop, calls } = waiverLoop(t, gameDir, { operationId: 'waive-4' });
+
+  await loop.resume();
+  await loop.run();
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.phase, 'done');
+  assert.equal(state.reviewWaiver.haltCode, 'REVIEW_FAILED');
+  assert.equal(publishInvocations(calls).some((args) => path.basename(flagValue(args, '--from') ?? '') === '.review.json'), false);
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).review, undefined);
+});
+
+test('#288 멈춘 loop owner의 코치 런타임 종료 영수증이 없으면 REVIEW_WAIVED를 거부한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  await reviewGeneratedHalt(gameDir, { closed: false });
+  const before = fs.readFileSync(path.join(gameDir, 'loop-state.json'));
+  const { loop } = waiverLoop(t, gameDir, { operationId: 'waive-5' });
+
+  await assert.rejects(loop.resume(), (error) => error.code === 'BAD_LOOP_PHASE');
+
+  assert.deepEqual(fs.readFileSync(path.join(gameDir, 'loop-state.json')), before);
+  assert.equal(fs.readdirSync(gameDir).some((name) => name.startsWith('loop-state.abandoned.')), false);
+});
+
+test('#288 REVIEW_WAIVED도 종료를 확인하지 못한 코치가 있으면 done으로 끝내지 않는다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  t.after(() => release());
+  const upper = makeCoachAdapter({
+    rounds: [{
+      gate,
+      raw: JSON.stringify({ handNo: 1, text: '종료를 확인할 수 없는 코치' }),
+      terminate: { confirmed: false, reason: 'still-alive' },
+    }],
+  });
+  const clock = createJumpClock();
+  const resultWaitMs = 5_000 * WIN32_SCALE;
+  const leadMs = 4_300 * WIN32_SCALE;
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: {
+      halt: { code: 'FINALIZATION_ABORTED', message: '리뷰 게이트를 열지 않습니다.' },
+      coachRuntimeClosures: [{ ownerSessionId: 'old-owner', confirmedAt: '2026-10-15T00:00:00.000Z' }],
+    },
+    loopOpts: {
+      finalizeBudgetMs: resultWaitMs + leadMs,
+      finalizeCutoffLeadMs: leadMs,
+      monotonicNs: clock.monotonicNs,
+      abortUnrecoverable: { operationId: 'waive-6', reason: 'REVIEW_WAIVED' },
+    },
+  });
+
+  await loop.resume();
+  await waitFor(
+    () => readJson(path.join(gameDir, '.coach-authority.json')).hands?.['1']?.agentHandle,
+    'tracked coach was not bound before the cutoff',
+  );
+  clock.jumpBy(resultWaitMs);
+  await assert.rejects(loop.run(), (error) => error.code === 'FINALIZATION_ABORTED');
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.phase, 'finalizing');
+  assert.equal(state.halt.code, 'FINALIZATION_ABORTED');
+  assert.equal(state.reviewWaiver.operationId, 'waive-6', 'the waiver stays for a later retry');
+  assert.equal(state.finalization.cutoff.reason, 'termination_unconfirmed');
+  assert.equal(state.finalization.cutoff.terminationConfirmed, false);
+  assert.equal(coachInvocations(calls, 'finalize-cutoff').length, 0);
+  assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).finalization, null);
 });
 
 test('종료: finalizing resume은 새 owner로 begin-owner를 한 번만 실행하고 봉인된 핸드를 재스폰하지 않는다', { timeout: 40_000 }, async (t) => {

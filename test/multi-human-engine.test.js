@@ -14,7 +14,11 @@ import { checkHintResume } from '../tools/hint-control.js';
 import { HOST_ID, humanIdsOf, isHumanSeat, seatLabel } from '../shared/seat-roles.js';
 import { replayRecord, canonicalHandReplayJson } from '../shared/hand-replay.js';
 import {
+  assertHostText,
+  cardTokenLeaks,
   collectPrivateLiteralsDetailed,
+  emptyPrivateLiteralsAllowed,
+  hostAnnotationLeaks,
   participantHiddenCards,
   validatePrivateEngineState,
   validatePrivateRecord,
@@ -528,6 +532,61 @@ test('validatePrivateRecord 조건부 holes.user와 alwaysDenyHumanSeats', () =>
     ...Object.entries(cur.lastHand.holes).flatMap(([pid, cards]) => (pid === 'h1' ? [] : cards)),
   ]);
   assert.equal(hidden.some((card) => others.has(card)), false);
+});
+
+// #289: an empty deny list is truthful only when neither players nor seats have an AI.
+test('emptyPrivateLiteralsAllowed는 players·seats·config가 모두 AI 0명일 때만 참이다', () => {
+  const humans = [{ playerId: 'user', kind: 'human' }, { playerId: 'h1', kind: 'human' }];
+  const seats = humans.map((row) => ({ ...row, stack: 100, out: false }));
+  const config = { aiCount: 0, humanCount: 2 };
+  assert.equal(emptyPrivateLiteralsAllowed({ players: humans, engineState: { seats, config } }), true);
+  assert.equal(emptyPrivateLiteralsAllowed({ players: { players: humans }, engineState: { seats, config } }), true);
+  // A legacy single-human state: seats without kind are AI unless they are the host.
+  assert.equal(emptyPrivateLiteralsAllowed({
+    players: humans,
+    engineState: { seats: [{ playerId: 'user' }, { playerId: 'h1' }], config },
+  }), false);
+  assert.equal(emptyPrivateLiteralsAllowed({
+    players: [{ playerId: 'user' }, { playerId: 'p1' }],
+    engineState: { seats, config },
+  }), false);
+  assert.equal(emptyPrivateLiteralsAllowed({
+    players: [...humans, { playerId: 'p2', kind: 'ai' }],
+    engineState: { seats, config },
+  }), false);
+  // Rows relabelled human while the config still counts an AI, or a missing config.
+  assert.equal(emptyPrivateLiteralsAllowed({ players: humans, engineState: { seats, config: { aiCount: 1, humanCount: 1 } } }), false);
+  assert.equal(emptyPrivateLiteralsAllowed({ players: humans, engineState: { seats, config: { aiCount: 0, humanCount: 3 } } }), false);
+  assert.equal(emptyPrivateLiteralsAllowed({ players: humans, engineState: { seats } }), false);
+  assert.equal(emptyPrivateLiteralsAllowed({ players: [], engineState: { seats: [], config } }), false);
+  assert.equal(emptyPrivateLiteralsAllowed({ players: humans, engineState: null }), false);
+  assert.equal(emptyPrivateLiteralsAllowed(), false);
+});
+
+// #289: the hand-scoped participant-card rule holds for joined cards and names every hand.
+test('cardTokenLeaks는 붙여 쓴 카드도 잡고 핸드 클래스는 카드로 보지 않는다', () => {
+  for (const text of ['7c2d', '상대는 7c2d', 'Ah7c', '2d7c였다', '7♣2♦']) {
+    assert.equal(cardTokenLeaks(text, ['7c']) || cardTokenLeaks(text, ['2d']), true, text);
+  }
+  assert.equal(cardTokenLeaks('7c2d', ['7c']), true);
+  assert.equal(cardTokenLeaks('7c2d', ['2d']), true);
+  for (const text of ['AKs로 오픈', 'QJs', 'T9s 콜', 'As you can see']) {
+    assert.equal(cardTokenLeaks(text, ['Ks', 'Js', '9s', 'As']), false, text);
+  }
+});
+
+test('assertHostText는 핸드를 알 수 없는 annotation을 건너뛰지 않고 거부한다', () => {
+  const record = { handNo: 1, holes: { user: ['Ah', 'Kh'], h1: ['7c', '2d'] }, seats: [{ playerId: 'user', kind: 'human' }, { playerId: 'h1', kind: 'human' }] };
+  const lookup = (handNo) => (handNo === 1 ? record : null);
+  const row = (decision, value) => ({ evaluationId: `${'ab'.repeat(32)}:${decision}:ref@1.0.0`, value });
+  assert.doesNotThrow(() => assertHostText({ trainingAnnotations: [row('d-1-preflop-0', '깨끗한 해설')] }, lookup));
+  assert.throws(() => assertHostText({ trainingAnnotations: [row('d-1-preflop-0', '상대 7c2d')] }, lookup), { code: 'FORBIDDEN_LITERAL' });
+  for (const decision of ['d-0-preflop-0', 'nodecision', 'd--1-flop-0']) {
+    assert.throws(() => assertHostText({ trainingAnnotations: [row(decision, '깨끗한 해설')] }, lookup), { code: 'FORBIDDEN_LITERAL_UNAVAILABLE' }, decision);
+  }
+  assert.equal(hostAnnotationLeaks(row('d-1-preflop-0', '깨끗한 해설'), lookup), false);
+  assert.equal(hostAnnotationLeaks(row('d-1-preflop-0', '상대 7c 2d'), lookup), true);
+  assert.equal(hostAnnotationLeaks(row('d-0-preflop-0', '깨끗한 해설'), lookup), true);
 });
 
 test('participantHiddenCards 100핸드 물리 카드 유일성', () => {

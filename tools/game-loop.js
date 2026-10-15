@@ -12,7 +12,7 @@ import { execFile, spawn } from 'node:child_process';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { resolveSessionReference } from './reference-source.js';
 import { openContained, writeContained } from './training-store.js';
-import { ABANDON_REASONS, abortModeFor, neverDealt, validateAbortingCheckpoint, validRecoveryOperation } from './recovery-exit.js';
+import { ABANDON_REASONS, abortModeFor, neverDealt, reviewWaivable, validateAbortingCheckpoint, validRecoveryOperation } from './recovery-exit.js';
 import { createHintControl, checkHintResume } from './hint-control.js';
 import fs from 'node:fs';
 import {sealPreparation, readPreparation} from './session-preparation.js';
@@ -4337,6 +4337,26 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return readJsonOptional(archivePath, 'HAND_RECORD');
   };
 
+  // #288: the hands the host was dealt, counted the way engine stats count them (a
+  // player is in a hand's sample when the hand dealt them holes). A host who busted
+  // while others played on holds fewer than the completed hands. A record that cannot
+  // be read is not guessed at: the count is then unavailable (null).
+  const hostDealtHandsThrough = (completed) => {
+    let dealt = 0;
+    for (let handNo = 1; handNo <= completed; handNo += 1) {
+      let record;
+      try {
+        record = fullHandRecord(handNo);
+      } catch {
+        return null;
+      }
+      const holes = record?.holes;
+      if (record?.handNo !== handNo || !holes || typeof holes !== 'object' || Array.isArray(holes)) return null;
+      if (Object.hasOwn(holes, HOST_ID)) dealt += 1;
+    }
+    return dealt;
+  };
+
   // 규칙 자체는 게시 계약이 갖는다 — 서버의 deny 수집기와 같은 코드여야 한다.
   const coachForbiddenDetailed = (handNo) => collectPrivateLiteralsDetailed({
     players: readJsonOptional(playersPath, 'PLAYERS'),
@@ -6713,14 +6733,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         || cutoff.completed !== completed || engine.lastHand?.handNo !== completed) {
         throw codedError('BAD_REVIEW_EVIDENCE', '종료 체크포인트와 기계 리뷰의 핸드 수가 일치하지 않습니다.');
       }
-      const hostDealtHands = Array.from({ length: completed }, (_, i) => i + 1)
-        .filter((handNo) => {
-          try {
-            const record = fullHandRecord(handNo);
-            return record && Object.hasOwn(record.holes ?? {}, HOST_ID);
-          } catch { return false; }
-        }).length;
-      if (stats.user.sample !== hostDealtHands) {
+      const hostDealtHands = hostDealtHandsThrough(completed);
+      if (hostDealtHands === null || stats.user.sample !== hostDealtHands) {
         throw codedError('BAD_REVIEW_EVIDENCE', '종료 체크포인트와 기계 리뷰의 핸드 수가 일치하지 않습니다.');
       }
       // Read derived evidence before optional sections can downgrade its errors.
@@ -7077,10 +7091,21 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         terminationConfirmed,
       );
     }
-    if (sample !== completed) {
+    // #288: the sample counts only hands the host was dealt. In a multiplayer session
+    // the others play on after the host busts, so it is compared with the dealt count —
+    // always, since a corrupt sample can equal the completed count by accident.
+    const dealt = hostDealtHandsThrough(completed);
+    if (dealt === null) {
+      throw abortCompletedHandAuthority(
+        'host_dealt_unavailable',
+        `1..${completed} 핸드 기록에서 호스트가 받은 핸드 수를 확인하지 못해 리뷰 게이트를 열지 않습니다.`,
+        terminationConfirmed,
+      );
+    }
+    if (sample !== dealt) {
       throw abortCompletedHandAuthority(
         'completed_stats_disagreement',
-        `engine lastHand.handNo(${completed})와 stats user.sample(${sample})이 일치하지 않아 리뷰 게이트를 열지 않습니다.`,
+        `engine lastHand.handNo(${completed}) 중 호스트가 받은 핸드(${dealt})와 stats user.sample(${sample})이 일치하지 않아 리뷰 게이트를 열지 않습니다.`,
         terminationConfirmed,
       );
     }
@@ -7092,8 +7117,69 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return abortExpiredFinalization({ cause: error.cause ?? null });
   };
 
+  // #288: the review is waived, its safety is not. Every worker must be confirmed ended,
+  // and the coach authority is still sealed (no new play-time publisher, missing hands
+  // sealed unavailable) — only without the stats comparison the review gate relies on.
+  // What is left to publish is attempted once; a failure there is a notice, not a halt.
+  const settleWaivedFinalization = async ({ checkpoint, owner, terminationConfirmed, finalDeadlineNs }) => {
+    const closeWaived = (cutoff) => writeLoopState({
+      finalization: { ...checkpoint, cutoff: { at: isoNow(now), terminationConfirmed, ...cutoff } },
+    });
+    if (!terminationConfirmed) {
+      closeWaived({ reason: 'termination_unconfirmed', reviewGate: 'closed' });
+      throw haltFinalization(
+        'FINALIZATION_ABORTED',
+        '종료를 확인하지 못한 코치·학습 작업이 있어 리뷰 없이도 결과를 정리하지 않습니다.',
+      );
+    }
+    const completed = completedHandFromEngine(terminationConfirmed);
+    let sealed;
+    try {
+      sealed = await runCoach([
+        'finalize-cutoff',
+        '--owner', owner,
+        '--completed', String(completed),
+        '--snapshot-file', coachSnapshotPath,
+        '--termination-confirmed', 'true',
+      ]);
+    } catch (error) {
+      if (error.code !== 'FINALIZATION_ABORTED') throw error;
+      const reason = error.envelope?.reason ?? 'unknown';
+      closeWaived({ reason, reviewGate: 'closed' });
+      throw haltFinalization(
+        'FINALIZATION_ABORTED',
+        `코치 finalization이 ${reason}로 중단돼 리뷰 없이도 결과를 정리하지 않습니다.`,
+      );
+    }
+    closeWaived({ completed, sealed: sealed.sealed ?? [], reason: 'review_waived', reviewGate: 'waived' });
+    publishDeadlineNs = finalDeadlineNs;
+    try {
+      for (const [step, settle] of [
+        ['training-attempt', retryUnresolvedTrainingAttempt],
+        ['game-over-view', ensureGameOverViewPublished],
+        ['coach-queue', drainQueuedCoachPublications],
+        ['training', flushTrainingPublish],
+        ['annotations', flushAnnotationPublish],
+        ['training-consume', consumeTrainingNow],
+      ]) {
+        try {
+          await settle();
+        } catch (error) {
+          appendNotice(`리뷰 없는 결과 정리 중 ${step} 단계를 마치지 못했습니다 (${error.code ?? 'ERROR'}).`);
+          log('review-waived-step-error', { step, code: error.code ?? 'ERROR' });
+        }
+        if (stopRequested) break;
+      }
+    } finally {
+      publishDeadlineNs = null;
+    }
+    return readLoopState();
+  };
+
   // 종료 시퀀스 §5/§9.2. Phase는 이미 finalizing이고, 각 단계가 loop-state 체크포인트다.
-  const finalize = async () => {
+  // #288 waiveReview: the cutoff (1)–(3) still runs — it closes explanation admission and
+  // ends every worker — but the review stage (4)–(6) is not entered.
+  const finalize = async ({ waiveReview = false } = {}) => {
     if (readLoopState()?.phase !== 'finalizing') {
       throw codedError(
         'BAD_LOOP_PHASE',
@@ -7202,6 +7288,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       && coachAttempts.size === 0
       && coachTasks.size === 0;
     assertFinalizationDeadline();
+
+    if (waiveReview) return settleWaivedFinalization({ checkpoint, owner, terminationConfirmed, finalDeadlineNs });
 
     // (4) 한 transaction으로 missing 전체를 fence + unavailable Q seal.
     const completed = completedHandFromEngine(terminationConfirmed);
@@ -8231,6 +8319,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         ? opts.abortUnrecoverable.reason : 'BAD_PLAYER_RECOVERY';
       // The app judged NEVER_DEALT before this launch; a game played since then is not one.
       if (reason==='NEVER_DEALT' && !neverDealt(engineState,state)) throw codedError('BAD_LOOP_PHASE','무핸드 종료 대상이 아닙니다.');
+      // #288: likewise a waiver needs a final result still halted in the review stage.
+      if (reason==='REVIEW_WAIVED' && !reviewWaivable(engineState,state)) throw codedError('BAD_LOOP_PHASE','리뷰 없이 결과를 정리할 대상이 아닙니다.');
       const snapshotPath=path.join(root,'loop-state.unverified.json');
       const unverifiedSnapshot=fs.existsSync(snapshotPath);
       const bytes=unverifiedSnapshot ? openContained(root,['loop-state.unverified.json'],{maxBytes:Number.MAX_SAFE_INTEGER}) : fs.readFileSync(loopStatePath);
@@ -8256,7 +8346,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         await runCli(['end','--result','abort','--operation-id',checkpoint.operationId]);
         await adoptAbortedRelay(engineState);
         writeLoopState({phase:'aborted',result:'abort',endedAt:isoNow(now),aborting:undefined});
-      } else writeLoopState({aborting:undefined});
+      } else {
+        // #288: the waiver rides the same write that clears the checkpoint, so a crash
+        // leaves either the checkpoint (finished by the next resume) or the waiver.
+        const audit=readLoopState()?.abandonedPendingDecision;
+        const waived=audit?.reason==='REVIEW_WAIVED' && audit.operationId===checkpoint.operationId;
+        writeLoopState({aborting:undefined,
+          ...(waived ? {reviewWaiver:{operationId:checkpoint.operationId,haltCode:state?.halt?.code ?? null,at:isoNow(now)}} : {})});
+      }
     } finally {unit.finish();}
     if (checkpoint.mode==='abort') {
       await publishAbortEndView();
@@ -8387,7 +8484,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (engineState.result === 'abort') return finishAbortedLifecycle(engineState, state);
       openLog();
       lifecycleStarted = true;
-      if (opts.abortUnrecoverable || state?.aborting) {
+      // #288: an app that crashed after this operation's waiver was recorded runs the same
+      // command again. The waiver already is its abandonment; it is not taken twice.
+      const replayedWaiver = opts.abortUnrecoverable?.reason === 'REVIEW_WAIVED' && !state?.aborting
+        && state?.reviewWaiver?.operationId === opts.abortUnrecoverable.operationId;
+      if (replayedWaiver) log('review-waiver-replayed', { operationId: opts.abortUnrecoverable.operationId });
+      else if (opts.abortUnrecoverable || state?.aborting) {
         const ended=await abandonUnverifiedRecovery(engineState,state);
         if (ended) return ended;
         state=readLoopState();
@@ -8656,9 +8758,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  // #288: the user chose to settle the result without its review. A review already
+  // generated stays unpublished; the cutoff ran before it was generated.
+  const finishWithoutReview = async (state) => {
+    if (state.phase === 'finalizing') {
+      await finalize({ waiveReview: true });
+      if (stopRequested) return readLoopState();
+    }
+    const waiver = readLoopState()?.reviewWaiver;
+    appendNotice(`종합 리뷰 없이 결과를 확정했습니다 (사유: ${waiver?.haltCode ?? '확인 불가'}).`);
+    log('review-waived', { operationId: waiver?.operationId ?? null, haltCode: waiver?.haltCode ?? null, phase: state.phase });
+    return finishDoneLifecycle();
+  };
+
   const runFinalization = async () => {
     try {
       let state = readLoopState();
+      if (state?.reviewWaiver && FINAL_PHASES.has(state.phase)) return await finishWithoutReview(state);
       if (state?.phase === 'finalizing') {
         await finalize();
         state = readLoopState();

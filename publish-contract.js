@@ -8,7 +8,7 @@ import {
 } from './shared/free-text.js';
 import { replayRecord } from './shared/hand-replay.js';
 import { coachingClaimAllowed, isCoverageReferenceSource } from './shared/reference.js';
-import { HOST_ID, humanIdsOf, isHumanSeat } from './shared/seat-roles.js';
+import { HOST_ID, aiRowsOf, humanIdsOf, isHumanSeat } from './shared/seat-roles.js';
 
 export { HOST_ID, humanIdsOf, isHumanSeat };
 export {
@@ -21,6 +21,8 @@ export {
   hostTextFieldsOf,
   cardTokenLeaks,
   assertHostText,
+  hostAnnotationLeaks,
+  sessionHasParticipants,
   projectForSeat,
   nextDecisionFromViews,
   EVENT_SCHEMAS,
@@ -737,9 +739,27 @@ export function collectPrivateLiterals(args) {
 }
 
 /**
+ * #289: 수집기가 검증을 통과한 입력에서 빈 목록을 돌려줬을 때, 그것이 정당한 답인지 판정한다.
+ * AI 좌석이 하나도 없으면(players 목록과 engine seats 둘 다) 비공개 persona/policy literal이
+ * 없고, replay-all 세션의 핸드 사이에는 deny 범위에 숨은 카드도 없다. AI 좌석이 있는데
+ * 목록이 비면 수집이 깨진 것이므로 호출자는 계속 fail-closed로 거부한다.
+ */
+export function emptyPrivateLiteralsAllowed({ players, engineState } = {}) {
+  const list = Array.isArray(players) ? players : players?.players;
+  const seats = engineState?.seats;
+  const config = engineState?.config;
+  // The roster must agree with the game config too: rows relabelled human while the
+  // config still counts an AI are not a session without AI.
+  return Array.isArray(list) && list.length > 0 && aiRowsOf(list).length === 0
+    && Array.isArray(seats) && seats.length > 0 && aiRowsOf(seats).length === 0
+    && config?.aiCount === 0 && config.humanCount === seats.length;
+}
+
+/**
  * 수집된 literal 하나라도 들어 있거나 절대 경로·저장소 표지가 보이면 참.
  * `literals`가 비어 있어도 경로 계열은 검사한다 — 다만 호출자는 빈 목록 자체를
- * fail-closed 조건으로 다뤄야 한다(수집에 실패한 것과 구별되지 않기 때문).
+ * fail-closed 조건으로 다뤄야 한다(수집에 실패한 것과 구별되지 않기 때문). 예외는
+ * `emptyPrivateLiteralsAllowed`가 참인 AI 0명 세션뿐이다(#289).
  */
 export function textLeaksPrivate(text, literals) {
   if (typeof text !== 'string' || !text) return false;

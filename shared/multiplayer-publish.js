@@ -15,6 +15,9 @@ const ACTION = new Set(['fold', 'check', 'call', 'raise']);
 const DECISION_ID_RE = /^d-[1-9]\d*-(?:preflop|flop|turn|river)-\d+$/;
 const RESULT = new Set(['win', 'lose', 'completed', 'abort']);
 const SUIT_CLASS = { s: '[s♠♤]', h: '[h♥♡]', d: '[d♦♢]', c: '[c♣♧]' };
+// #289: two cards written together ("7c2d", "Ah7♣") are two tokens. Splitting them lets
+// each one meet the token boundary below, while a hand class ("AKs") stays one word.
+const ADJACENT_CARDS = /([2-9TJQKA][cdhs♠♥♦♣♤♡♢♧])(?=[2-9TJQKA][cdhs♠♥♦♣♤♡♢♧])/gu;
 
 function coded(code, message) {
   return Object.assign(new Error(message || code), { code });
@@ -309,17 +312,28 @@ export function hostTextFieldsOf(body) {
   const annotations = body.trainingAnnotations;
   const rows = Array.isArray(annotations) ? annotations : Object.values(annotations ?? {}).flatMap((fieldsMap) => Object.values(fieldsMap ?? {}));
   for (const row of rows) {
-    const evaluationId = row?.evaluationId;
-    const handNo = typeof evaluationId === 'string'
-      ? Number(/:d-([1-9]\d*)-/.exec(evaluationId)?.[1])
-      : row?.handNo;
-    if (typeof row?.value === 'string') fields.push({ handNo, text: row.value });
+    // #289: an annotation always names its hand; one that does not is checked, not skipped.
+    if (typeof row?.value === 'string') fields.push({ handNo: annotationHandNo(row?.evaluationId), text: row.value, strict: true });
   }
   return fields;
 }
 
+// #289: the decision segment of an evaluationId names the hand. A hand that cannot be read
+// from it (d-0, no decision segment) is null, which fails closed like a missing record.
+function annotationHandNo(evaluationId) {
+  const match = typeof evaluationId === 'string' ? /:d-(\d+)-/.exec(evaluationId) : null;
+  const handNo = match ? Number(match[1]) : NaN;
+  return Number.isSafeInteger(handNo) && handNo >= 1 ? handNo : null;
+}
+
+export function sessionHasParticipants(players) {
+  return (Array.isArray(players) ? players : [])
+    .some((row) => row?.playerId !== HOST_ID && (isHumanSeat(row) || /^h[1-8]$/.test(row?.playerId)));
+}
+
 export function cardTokenLeaks(text, cardList) {
   if (typeof text !== 'string' || !text) return false;
+  text = text.replace(ADJACENT_CARDS, '$1 ');
   for (const card of cardList) {
     if (typeof card !== 'string' || !CARD_RE.test(card)) continue;
     const rank = card[0];
@@ -351,13 +365,27 @@ function hiddenParticipantCards(record, humanIds) {
 
 export function assertHostText(body, lookupRecord) {
   for (const field of hostTextFieldsOf(body)) {
-    if (!Number.isInteger(field.handNo)) continue;
+    if (!Number.isInteger(field.handNo)) {
+      if (field.strict) fail('FORBIDDEN_LITERAL_UNAVAILABLE', 'annotation hand');
+      continue;
+    }
     const record = lookupRecord(field.handNo);
     if (!record) fail('FORBIDDEN_LITERAL_UNAVAILABLE', `hand ${field.handNo}`);
     const ids = humanIdsOf(record.seats ?? []).filter((id) => id !== HOST_ID);
     if (cardTokenLeaks(field.text, hiddenParticipantCards(record, ids.length ? ids : undefined))) {
       fail('FORBIDDEN_LITERAL', 'host text');
     }
+  }
+}
+
+// #289: an annotation restored from a snapshot, its history or the training queue meets
+// the same hand-scoped participant-card rule as one published live. True means drop it.
+export function hostAnnotationLeaks(row, lookupRecord) {
+  try {
+    assertHostText({ trainingAnnotations: [row] }, lookupRecord);
+    return false;
+  } catch {
+    return true;
   }
 }
 

@@ -325,6 +325,10 @@ test('#197 finalize preserves terminal engine results and never asks for a playe
   assert.deepEqual(fs.readFileSync(engineFile),before);
   assert.ok(needs.every(need=>need==='upper-only'));
   assert.equal(read(f.file).abandonedPendingDecision.mode,'finalize');
+  // #288: this finalize exit resumes the review; only REVIEW_WAIVED settles without it.
+  assert.equal(read(f.file).reviewWaiver,undefined);
+  assert.equal(read(f.file).abandonedPendingDecision.reason,'BAD_PLAYER_RECOVERY');
+  assert.equal(fs.existsSync(path.join(f.root,'review.md')),true);
 });
 test('#197 abort preserves a real completed hand and active action while changing only engine abort fields',{timeout:TIMEOUT},async t=>{
   const f=await fixture(t);
