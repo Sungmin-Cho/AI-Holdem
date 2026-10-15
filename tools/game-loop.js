@@ -3155,16 +3155,21 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
+  // Failures are logged and returned (the review waiver reports them); callers that only
+  // need the attempt ignore the result.
   const consumeTrainingNow = async () => {
-    if (!trainingOn || !storeDir) return;
+    if (!trainingOn || !storeDir) return null;
     try {
       const consumed = await createTrainingControl({ storeDir })
         .consumeTrainingItems(root, { storeDir });
       if ((consumed.failed ?? 0) > 0) {
         log('training-consume-failed', { failed: consumed.failed });
+        return { error: `FAILED_${consumed.failed}` };
       }
+      return null;
     } catch (error) {
       log('training-consume-error', { code: error.code ?? 'ERROR' });
+      return { error: error.code ?? 'ERROR' };
     }
   };
 
@@ -3187,8 +3192,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let annotationPublishHalt = null;
 
   const flushTrainingPublish = async () => {
-    if (!trainingOn) return;
-    if (machinePublishHalt) return;
+    if (!trainingOn) return null;
+    if (machinePublishHalt) return { error: machinePublishHalt };
     const loop = readLoopState();
     try {
       await flushMachinePublish(root, {
@@ -3209,12 +3214,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         machinePublishHalt = error.code;
         appendNotice(`training machine publish halt: ${error.code}`);
       }
+      return { error: error.code ?? 'ERROR' };
     }
+    return null;
   };
 
   const flushAnnotationPublish = async () => {
-    if (!trainingOn) return;
-    if (annotationPublishHalt) return;
+    if (!trainingOn) return null;
+    if (annotationPublishHalt) return { error: annotationPublishHalt };
     const loop = readLoopState();
     try {
       await flushAnnotationEnvelope(root, {
@@ -3236,17 +3243,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         annotationPublishHalt = error.code;
         appendNotice(`training annotation publish halt: ${error.code}`);
       }
+      return { error: error.code ?? 'ERROR' };
     }
+    return null;
   };
 
   const retryUnresolvedTrainingAttempt = async () => {
-    if (machinePublishHalt || annotationPublishHalt) return;
+    if (machinePublishHalt || annotationPublishHalt) return { error: machinePublishHalt || annotationPublishHalt };
     try {
       await retryTrainingAttempt(root, {
         executePublish, storeDir, retirePending: settleRejectedPendingAnnotation,
       });
     } catch (error) {
-      if (error.code === 'NO_ATTEMPT') return;
+      if (error.code === 'NO_ATTEMPT') return null;
       log('training-attempt-retry-error', {
         code: error.code ?? 'ERROR',
         ...rejectionFieldsOf(error),
@@ -3259,7 +3268,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         appendNotice(`training retry publish halt: ${error.code}`);
         throw error;
       }
+      return { error: error.code ?? 'ERROR' };
     }
+    return null;
   };
 
   const solveInFlight = new Set();
@@ -4369,7 +4380,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
   const coachForbiddenLiterals = (handNo) => {
     const { cards, others } = coachForbiddenDetailed(handNo);
-    return [...new Set([...cards, ...others])];
+    // #289: the relay matches a hidden card's suit in either case. This substring check
+    // must refuse at least as much, or a note accepted here would be refused on publish.
+    const upper = [...cards].filter((card) => /^[2-9TJQKA][cdhs]$/.test(card))
+      .map((card) => `${card[0]}${card[1].toUpperCase()}`);
+    return [...new Set([...cards, ...upper, ...others])];
   };
 
   const replayPublicCards = (replay) => {
@@ -7155,7 +7170,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       );
     }
     closeWaived({ completed, sealed: sealed.sealed ?? [], reason: 'review_waived', reviewGate: 'waived' });
-    const unsettled = [];
+    const failedSteps = [];
     publishDeadlineNs = finalDeadlineNs;
     try {
       for (const [step, settle] of [
@@ -7166,36 +7181,46 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         ['annotations', flushAnnotationPublish],
         ['training-consume', consumeTrainingNow],
       ]) {
+        let code = null;
         try {
-          await settle();
+          code = (await settle())?.error ?? null;
         } catch (error) {
-          unsettled.push(`${step}:${error.code ?? 'ERROR'}`);
-          log('review-waived-step-error', { step, code: error.code ?? 'ERROR' });
+          code = error.code ?? 'ERROR';
+        }
+        if (code) {
+          failedSteps.push(`${step}:${code}`);
+          log('review-waived-step-error', { step, code });
         }
         if (stopRequested) break;
       }
     } finally {
       publishDeadlineNs = null;
     }
-    // Several steps log a refused publish and return: what is left is counted, not
-    // inferred from what threw.
-    if (fs.existsSync(publishAttemptPath)) unsettled.push('publish-attempt');
+    // A step can also leave work behind without failing outright: what is left is counted.
+    const leftovers = [];
+    if (fs.existsSync(publishAttemptPath)) leftovers.push('publish-attempt');
     const queuedCoach = Object.keys(readCoachAuthority()?.publishQueue ?? {}).length;
-    if (queuedCoach) unsettled.push(`coach-queue:${queuedCoach}`);
+    if (queuedCoach) leftovers.push(`coach-queue:${queuedCoach}`);
     if (trainingOn) {
       try {
         const training = createTrainingControl({ storeDir }).loadAuthority(root);
-        const queuedAnnotations = Object.keys(training?.annotationQueue ?? {}).length;
-        const pending = Object.keys(training?.pending ?? {}).length;
-        if (queuedAnnotations) unsettled.push(`annotation-queue:${queuedAnnotations}`);
-        if (pending) unsettled.push(`training-pending:${pending}`);
+        for (const [kind, map] of [
+          ['training-queue', training?.publishQueue],
+          ['annotation-queue', training?.annotationQueue],
+          ['training-pending', training?.pending],
+        ]) {
+          const count = Object.keys(map ?? {}).length;
+          if (count) leftovers.push(`${kind}:${count}`);
+        }
       } catch (error) {
-        unsettled.push(`training-authority:${error.code ?? 'ERROR'}`);
+        leftovers.push(`training-authority:${error.code ?? 'ERROR'}`);
       }
     }
-    if (unsettled.length) appendNotice(`리뷰 없는 결과 정리 뒤 게시하지 못한 항목이 남았습니다: ${unsettled.join(', ')}.`);
+    if (failedSteps.length || leftovers.length) {
+      appendNotice(`리뷰 없는 결과 정리에서 마치지 못한 게시가 있습니다: ${[...failedSteps, ...leftovers].join(', ')}.`);
+    }
     const waiver = readLoopState()?.reviewWaiver;
-    if (waiver) writeLoopState({ reviewWaiver: { ...waiver, unsettled } });
+    if (waiver) writeLoopState({ reviewWaiver: { ...waiver, failedSteps, leftovers } });
     return readLoopState();
   };
 
@@ -8798,7 +8823,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (stopRequested) return readLoopState();
     }
     const waiver = readLoopState()?.reviewWaiver;
-    appendNotice(`종합 리뷰 없이 결과를 확정했습니다 (사유: ${waiver?.haltCode ?? '확인 불가'}).`);
+    appendNotice(`종합 리뷰 없이 결과를 정리합니다 (사유: ${waiver?.haltCode ?? '확인 불가'}).`);
     log('review-waived', { operationId: waiver?.operationId ?? null, haltCode: waiver?.haltCode ?? null, phase: state.phase });
     return finishDoneLifecycle();
   };

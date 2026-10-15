@@ -31,6 +31,7 @@ import {
   scanCoachRuntimeProcesses,
 } from '../tools/game-loop.js';
 import { gameEpochOf } from '../publish-contract.js';
+import { reviewWaivable } from '../tools/recovery-exit.js';
 import { createCoachControl } from '../tools/coach-control.js';
 import { defaultEvaluate } from '../tools/training-pipeline.js';
 import { createSessionManager } from '../tools/session-manager.js';
@@ -1942,6 +1943,10 @@ test('#288 멀티 토너먼트에서 호스트가 먼저 탈락해도 completed 
   const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
   assert.equal(typeof snapshot.review, 'string');
   assert.deepEqual(snapshot.coach.map((note) => note.handNo).sort((a, b) => a - b), [1, 2]);
+  // #289: h1 folded 7h 2c unseen in hand 1. The coach's substring check refuses either
+  // suit case, so it never accepts a note the relay would refuse.
+  const deny = readJson(path.join(gameDir, '.coach-deny-1.json'));
+  for (const literal of ['7h', '2c', '7H', '2C']) assert.equal(deny.includes(literal), true, literal);
 });
 
 test('#288 호스트가 먼저 탈락한 멀티 토너먼트는 상위 모델 없이도 기계 리뷰로 끝난다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
@@ -2028,7 +2033,7 @@ test('#288 호스트가 받은 핸드를 기록에서 셀 수 없으면 추측�
 
   const state = readJson(path.join(gameDir, 'loop-state.json'));
   assert.equal(state.finalization.cutoff.reason, 'host_dealt_unavailable');
-  assert.match(state.halt.message, /호스트가 받은 핸드 수/);
+  assert.match(state.halt.message, /^핸드 1 기록을 읽지 못해 호스트가 받은 핸드 수를/);
   assert.equal(coachInvocations(calls, 'finalize-cutoff').length, 0);
   assert.equal(upper.evaluatorStarts.length + upper.synthesizerStarts.length, 0);
 });
@@ -2107,7 +2112,7 @@ test('#288 REVIEW_WAIVED는 리뷰 단계에서 멈춘 결과 확정 게임을 �
   assert.deepEqual(fs.readFileSync(path.join(gameDir, state.abandonedPendingDecision.sidecar)), halted);
   assert.equal(state.finalization.cutoff.reason, 'review_waived');
   assert.equal(state.finalization.cutoff.reviewGate, 'waived');
-  assert.ok(state.notices.some((notice) => notice.startsWith('종합 리뷰 없이 결과를 확정했습니다')));
+  assert.ok(state.notices.some((notice) => notice.startsWith('종합 리뷰 없이 결과를 정리합니다')));
   // The coach authority is still sealed — without the stats comparison the review relies on.
   const cutoff = coachInvocations(calls, 'finalize-cutoff');
   assert.equal(cutoff.length, 1);
@@ -2121,7 +2126,8 @@ test('#288 REVIEW_WAIVED는 리뷰 단계에서 멈춘 결과 확정 게임을 �
   assert.deepEqual(fs.readFileSync(path.join(gameDir, 'state.json')), engineBytes);
   assert.ok(readLoopLog(gameDir).some((row) => row.event === 'review-waived' && row.operationId === 'waive-1'));
   assert.equal(resolverCalls(), 0, 'a waiver run starts no model probe');
-  assert.deepEqual(state.reviewWaiver.unsettled, []);
+  assert.deepEqual(state.reviewWaiver.failedSteps, []);
+  assert.deepEqual(state.reviewWaiver.leftovers, []);
 });
 
 test('#288 REVIEW_WAIVED는 게시하지 못한 항목을 세어 reviewWaiver와 notice에 남기고 done으로 끝낸다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
@@ -2143,9 +2149,39 @@ test('#288 REVIEW_WAIVED는 게시하지 못한 항목을 세어 reviewWaiver와
 
   const state = readJson(path.join(gameDir, 'loop-state.json'));
   assert.equal(state.phase, 'done');
-  assert.ok(state.reviewWaiver.unsettled.length > 0, JSON.stringify(state.reviewWaiver));
-  assert.ok(state.reviewWaiver.unsettled.some((row) => row.startsWith('coach-queue')), JSON.stringify(state.reviewWaiver.unsettled));
-  assert.ok(state.notices.some((notice) => notice.startsWith('리뷰 없는 결과 정리 뒤 게시하지 못한 항목이 남았습니다')));
+  // The refused coach Q is counted as left behind, whether or not its step threw.
+  assert.ok(state.reviewWaiver.leftovers.some((row) => row.startsWith('coach-queue:')), JSON.stringify(state.reviewWaiver));
+  assert.ok(state.notices.some((notice) => notice.startsWith('리뷰 없는 결과 정리에서 마치지 못한 게시가 있습니다')));
+});
+
+test('#288 waiver가 기록된 게임은 정리 단계에서 다시 멈춘 뒤 일반 resume으로도 리뷰 없이 이어서 끝난다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const solverRecord = path.join(gameDir, '.solver-child.json');
+  fs.writeFileSync(solverRecord, '{');
+  const first = waiverLoop(t, gameDir, {
+    operationId: 'waive-8',
+    loopOpts: { trainingEnabled: true, finalizeBudgetMs: 6_000, finalizeCutoffLeadMs: 2_000 },
+    seed: () => finalizingStateWithHalt(gameDir, init.sessionToken),
+  });
+  await first.loop.resume();
+  await assert.rejects(first.loop.run(), (error) => error.code === 'FINALIZATION_ABORTED');
+  await first.loop.requestStop();
+  const halted = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(halted.reviewWaiver.operationId, 'waive-8');
+  // The waiver run stopped cleanly, so the app may offer the waiver again.
+  assert.equal(reviewWaivable(readJson(path.join(gameDir, 'state.json')), halted), true);
+
+  fs.unlinkSync(solverRecord);
+  const plain = waiverLoop(t, gameDir, { loopOpts: { trainingEnabled: true, finalizeBudgetMs: 6_000, finalizeCutoffLeadMs: 2_000 } });
+  await plain.loop.resume();
+  await plain.loop.run();
+
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.phase, 'done');
+  assert.equal(state.reviewWaiver.operationId, 'waive-8');
+  assert.equal(plain.resolverCalls(), 0, 'the continued waiver still starts no model probe');
+  assert.equal(readJson(path.join(gameDir, 'ui-snapshot.json')).review, undefined);
 });
 
 test('#288 REVIEW_WAIVED는 리뷰 단계 halt가 없는 게임을 아무것도 쓰지 않고 거부한다', { timeout: 20_000 * WIN32_SCALE }, async (t) => {

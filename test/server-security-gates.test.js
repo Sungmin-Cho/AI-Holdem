@@ -1505,6 +1505,46 @@ test('#289 AI 0명 세션의 live 게시는 붙여 쓴 카드와 핸드를 알 �
   });
 });
 
+test('#289 멀티 세션의 기계 행은 다이제스트 안의 카드 같은 글자 때문에 거절되지 않는다', async () => {
+  const dir = tmpDir();
+  noAiSessionFixtures(dir);
+  // h1 hides 7c 2d, and this evaluationId opens with those letters: a digest, not a card.
+  const summary = summaryOf({ gameEpoch: `7c2d${'ab'.repeat(30)}` });
+  await withServer(dir, async ({ port }) => {
+    const published = await post(port, { publishId: 1, training: [summary] });
+    assert.equal(published.status, 200, JSON.stringify(published.json));
+  });
+});
+
+test('#289 래퍼 roster의 세션도 참가자 카드 검사를 받는다', async () => {
+  const dir = tmpDir();
+  // An AI keeps the deny list non-empty, so only the participant check stands between
+  // h1's hidden card and the host text.
+  const rows = [
+    { playerId: 'user', kind: 'human' },
+    { playerId: 'h1', kind: 'human', participantId: 'part-1' },
+    { playerId: 'p1', kind: 'ai', archetype: FIXTURE_ARCHETYPE },
+  ];
+  const record = handRecordFixture(1, { holes: { user: ['Ah', 'Kh'], h1: ['7c', '2d'], p1: ['9s', '9h'] } });
+  writeSecurityFixtures(dir, {
+    players: rows,
+    hands: [record],
+    config: { replayReveal: 'all', aiCount: 1, humanCount: 2 },
+    state: { seats: rows.map((row) => ({ playerId: row.playerId, stack: 10_000, out: false, kind: row.kind })) },
+  });
+  fs.writeFileSync(path.join(dir, 'players.json'), JSON.stringify({ players: rows }));
+  const summary = summaryOf();
+  await withServer(dir, async ({ port }) => {
+    await post(port, { publishId: 1, training: [summary] });
+    const leak = await post(port, {
+      publishId: 2,
+      trainingAnnotations: [annotationRow(summary, 'explanation', '상대는 7c 2d를 들고 있었다')],
+    });
+    assert.equal(leak.status, 400, JSON.stringify(leak.json));
+    assert.equal(leak.json.code, 'FORBIDDEN_LITERAL');
+  });
+});
+
 test('#289 핸드 클래스 표기는 숨은 카드와 글자가 겹쳐도 카드로 막지 않는다', async () => {
   const dir = tmpDir();
   // h1 hides Ks: "AKs" contains the letters "Ks" but names a hand class, not that card.

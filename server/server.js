@@ -257,7 +257,10 @@ function readSecurityJson(root, segments) {
 function readPlayers(root) {
   try {
     const players = readSecurityJson(root, ['players.json']);
-    return Array.isArray(players) ? players : [];
+    // #289: the same roster shapes the literal collector accepts, so a session it treats
+    // as having participants is never published or restored without their card check.
+    if (Array.isArray(players)) return players;
+    return Array.isArray(players?.players) ? players.players : [];
   } catch {
     return [];
   }

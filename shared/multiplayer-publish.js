@@ -16,9 +16,12 @@ const DECISION_ID_RE = /^d-[1-9]\d*-(?:preflop|flop|turn|river)-\d+$/;
 const RESULT = new Set(['win', 'lose', 'completed', 'abort']);
 // #289: a suit letter is matched in either case ("7C" names the same card as "7c").
 const SUIT_CLASS = { s: '[sS♠♤]', h: '[hH♥♡]', d: '[dD♦♢]', c: '[cC♣♧]' };
-// #289: two cards written together ("7c2d", "Ah7♣") are two tokens. Splitting them lets
-// each one meet the token boundary below, while a hand class ("AKs") stays one word.
-const ADJACENT_CARDS = /([2-9TJQKA][cdhsCDHS♠♥♦♣♤♡♢♧])(?=[2-9TJQKA][cdhsCDHS♠♥♦♣♤♡♢♧])/gu;
+// #289: cards written together ("7c2d", "Ah7♣") are separate tokens, but only when the
+// whole run stands alone as a word: a run inside a longer word or a hex digest ("STACKS",
+// "…a7c2d9…") is not cards. Each run found is split so every card meets the boundary below.
+const CARD_TOKEN = '[2-9TJQKA][cdhsCDHS♠♥♦♣♤♡♢♧]';
+const CARD_RUN = new RegExp(`(?<![A-Za-z0-9])(?:${CARD_TOKEN}){2,}(?![A-Za-z0-9])`, 'gu');
+const CARD_IN_RUN = new RegExp(`(${CARD_TOKEN})(?=${CARD_TOKEN})`, 'gu');
 
 function coded(code, message) {
   return Object.assign(new Error(message || code), { code });
@@ -335,7 +338,7 @@ export function sessionHasParticipants(players) {
 
 export function cardTokenLeaks(text, cardList) {
   if (typeof text !== 'string' || !text) return false;
-  text = text.replace(ADJACENT_CARDS, '$1 ');
+  text = text.replace(CARD_RUN, (run) => run.replace(CARD_IN_RUN, '$1 '));
   for (const card of cardList) {
     if (typeof card !== 'string' || !CARD_RE.test(card)) continue;
     const rank = card[0];
