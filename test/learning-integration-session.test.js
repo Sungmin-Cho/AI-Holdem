@@ -422,9 +422,22 @@ test('S8 full: relay recovery restarts a stopped study service and publishes its
   fs.mkdirSync(gameDir, { mode: 0o700 });
   const loop = createGameLoop({ gameDir, lockDir: storeDir,
     resolver: async () => ({ player: null, upper: null, notices: [] }),
-    opts: { port: 0, waitMs: 40, storeDir, trainingEnabled: true, opponentRuntime: 'policy' } });
+    // Bound each relay wait. The controlled first human turn below prevents
+    // AI-only completion before the recovery snapshot can be observed.
+    opts: { port: 0, waitMs: scaled(30_000), storeDir, trainingEnabled: true, opponentRuntime: 'policy' } });
   t.after(async () => { await loop.requestStop(); await stopOwnedStudy(storeDir); });
   await loop.bootstrap(resolve(...STORE_ARGS));
+  // Controlled initial input only (same pattern as default20 and the CLI port test):
+  // the run's first hand deals button 3/SB4/BB5, so the user acts first and no AI can
+  // fold or walk hand 1 away before the human decision window below.
+  const stateFile = path.join(gameDir, 'state.json');
+  const initialized = JSON.parse(fs.readFileSync(stateFile));
+  assert.equal(initialized.handNo, 0);
+  assert.equal(initialized.config.aiCount, 5);
+  assert.equal(initialized.seats.length, 6);
+  assert.equal(initialized.seats[0].playerId, 'user');
+  initialized.button = 2;
+  fs.writeFileSync(stateFile, JSON.stringify(initialized));
   const firstService = await inspectStudyService(storeDir);
   const oldPid = loop.serverPid;
   await stopStudyService(storeDir, { expectedInstanceId: firstService.instanceId });
@@ -438,7 +451,8 @@ test('S8 full: relay recovery restarts a stopped study service and publishes its
     const lock = JSON.parse(fs.readFileSync(file));
     if (lock.serverPid === oldPid) return null;
     const snapshot = await relayRequest(lock, '/api/snapshot');
-    return snapshot.body.view?.legal?.decisionId ? { lock, snapshot } : null;
+    const legal = snapshot.body.view?.legal;
+    return legal?.toAct === 'user' && legal.decisionId ? { lock, snapshot } : null;
   }, studyBudget({ coldStarts: 1 }));
   const service = await inspectStudyService(storeDir);
   assert.notEqual(service.instanceId, firstService.instanceId);

@@ -80,6 +80,8 @@ npm run app -- /absolute/path/to/game --player-runtime codex
 
 `--player-runtime` selects the CLI integration. Choose **LLM** in the lobby to use it for opponents. The same integration can provide coaching in local-policy or JEV games. Runtime compatibility and isolation are checked before use. Grok's player integration is currently unsupported on Windows. Provider authentication, model access, and usage limits apply.
 
+With the Codex runtime, LLM players use the Sol model family (falling back to `gpt-6.1-sol`) at low reasoning effort, and coaching uses Sol at medium effort. These are operational defaults, not a claim that Sol plays better poker. Coaching's opponent range estimate is an uncalibrated heuristic built only from actions visible before the decision, so treat simulated equity as a rough guide rather than a solver result. Pot odds and required-equity thresholds are public price arithmetic; neither establishes action EV. Local policy v3 raises on the river only for value, so it never bluff-raises there; LLM bluff and persona frequencies are likewise uncalibrated. Do not generalize either to real opponents.
+
 ### JEV players
 
 Set `TYPESAFE_API_KEY` in your shell before starting the app, then select **JEV 플레이어 (테이블 전체)** in advanced settings. If the app is already running, stop it and relaunch it from that environment. `npm ci` installs the pinned JavaScript SDK; Python is not required.
@@ -111,6 +113,7 @@ The study room's **Play history** opens completed hands from managed sessions, i
 
 If an older study service is running, stop it with `npm run study:stop -- /absolute/store`, then open the study room again. Reopening alone reuses the existing service.
 
+The study room suggests one explicit next step from your verified summary: due review, a delayed retest of a completed assessment, practice on an observed leak, or a fresh assessment. Nothing starts until you press the button, and it never replaces a run in progress. Practice is not a measured run; only assessments and retests are. When few game decisions can be compared directly with the reference, it says so and suggests more fixed-100BB cash-training games, which may add comparable preflop examples but does not guarantee coverage or improvement.
 
 New sessions use preflop reference v3: opens, facing an open and facing a 3-bet at 80–150BB for 2–9 players, plus push/fold and calling a shove at 15BB or less (earlier sessions keep reference v1/v2). Unsupported spots are not treated as solved. Scores and frequency comparisons do not establish profitability or poker skill. See the [training data notes](training/data/README.md) for coverage and provenance.
 

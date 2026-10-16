@@ -689,12 +689,36 @@ export async function readSpotChart(storeDir, { spotKey, source: requested } = {
   });
 }
 
+// A run is provably finished only when its whole shape says so. Anything else
+// (a foreign shape, a non-list queue, a bad index, a pending answer) is treated as
+// unfinished by a protected start.
+function runProvenFinished(session) {
+  return object(session) && Array.isArray(session.queue) && Number.isSafeInteger(session.index)
+    && session.index === session.queue.length && !session.pending;
+}
+
+/** protectUnfinished: the next-step start never discards a run that is not
+ * finished. It is decided here, under the drill lock, because a client's cached
+ * state can be stale (another tab may have started a run). The same request
+ * replayed (same idempotencyKey) is still answered with its own run; an
+ * ordinary start, without the condition, replaces as before. */
 export async function startDrill(storeDir, {
   mode = 'free', seed = '0', idempotencyKey, spotKey, handClass,
-  assessmentId, source: requestedSource,
+  assessmentId, source: requestedSource, protectUnfinished,
 } = {}) {
+  if (protectUnfinished !== undefined && typeof protectUnfinished !== 'boolean') {
+    throw coded('USAGE', 'protectUnfinished must be a boolean');
+  }
+  const unfinished = () => coded('UNFINISHED_RUN', 'an unfinished practice run exists; replace it with the ordinary start');
   return withDrillLock(storeDir, async () => {
-    const existing = loadSession(storeDir);
+    let existing;
+    try { existing = loadSession(storeDir); }
+    catch (error) {
+      // An unreadable session cannot be proven finished.
+      if (protectUnfinished === true) throw unfinished();
+      throw error;
+    }
+    if (protectUnfinished === true && existing !== null && !object(existing)) throw unfinished();
     const serverNow = new Date().toISOString();
     let defaultSource = CANONICAL_REFERENCE_SOURCE;
     if (!requestedSource && !spotKey) {
@@ -738,6 +762,7 @@ export async function startDrill(storeDir, {
       assertSession(existing, serverNow);
       return existing;
     }
+    if (protectUnfinished === true && existing && !runProvenFinished(existing)) throw unfinished();
     const history = studyHistory(existingProof?.events ?? await loadProfileEvents(storeDir), serverNow);
     let assessment = null;
     let questionSet;
