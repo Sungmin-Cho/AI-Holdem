@@ -231,3 +231,36 @@ replay22/22 and learning19/19; original next-step15/15 remains unchanged.
 The historical whole run remains non-green in evidence. Exact-final-SHA full
 CI is still required in the PR before merge; a partial local rerun is never
 reported as a completed whole-suite pass.
+
+## CI platform follow-up: comparison cwd lifetime
+
+A separate CI-only lineage reviews the actual Linux/Windows ENOENT from
+resolving a deleted temp cwd. Frozen ci-platform-fix-snapshot and
+ci-fix-r1-manifest bind the test-only patch. Fresh Opus/high PASS0.85 and
+Astra/high PASS0.95 confirm sequential child-log index/PID correlation, native
+Windows aliases, capture before adapter completion and all14 non-vacuous
+child observations. Both have valid receipts and confirmed termination.
+Host comparison tests28/28 passed. Production runtime/runner are unchanged.
+The optional extra explicit index field is diagnostic only; no blocker remains.
+
+The initial PR workflow separately exposed a40-minute Linux job cap. A bounded
+CI-only maker/review slice divides Linux into two complete partitions without
+changing timeouts or product tests. Parent caught the first maker's top-level
+inventory omission: old Node auto-discovery also executed helper/browser
+modules. The follow-up retains the complete recursive executable inventory.
+This finding is a concrete coverage correction, not a passing initial maker.
+
+CI partition R1: Opus/high PASS_WITH_CHANGES0.80 found the required Linux
+contexts would disappear; parent independently verified current live rules
+and added a strict aggregate preserving both original names. Astra/high
+PASS0.94 found the297-module partition complete. No rule or required check is
+removed. R2 reviews only the aggregate/workflow test delta: fresh Opus/high
+PASS0.86 and Astra/high PASS0.94. Failed/cancelled/skipped/empty dependencies
+all fail the aggregate; every Windows shard remains unchanged.
+
+Non-blocking scope: all current tests live under test/, including the53
+previously auto-discovered helper/browser/fixture modules, which the parent
+matched against prior actual TAP logs. Future root-wide tests outside that
+tree are not covered by this runner and must be placed in test/. Native
+Node20/22 CI must establish the partition timing and actual check publication.
+Final host checks75/75 pass; final source hashes match both CI review manifests.

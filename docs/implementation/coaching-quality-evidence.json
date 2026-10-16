@@ -3,9 +3,9 @@
   "auditBaseline": "b239dd72261070f8834ee36d3d7129f40f0fb546",
   "integratedBase": "edb0b57bdb07d46718776f0a30446062521455a9",
   "branch": "Sungmin-Cho/holdem-coaching-quality",
-  "recordedAt": "2026-10-16T07:04:01.796998Z",
+  "recordedAt": "2026-10-16T08:00:25.165916Z",
   "receiptMeaning": "CLI process/envelope status, not correctness; dispositions and host tests are separate.",
-  "reviewBasis": "Original core R3 plus integration R1 and single-line wording R2; comparison R3. Source hashes below match delivered files.",
+  "reviewBasis": "Original core R3 plus integration R1 and single-line wording R2; comparison R3; CI-only comparison cwd fix R1 and Linux complete partition R1 plus required-context aggregate R2. Source hashes below match delivered files.",
   "supervisorReceipts": [
     {
       "attemptId": "design-r1",
@@ -388,10 +388,148 @@
       "servedModels": [
         "claude-opus-5-5"
       ]
+    },
+    {
+      "attemptId": "ci-fix-r1-a",
+      "decisionFingerprint": "1119b6a1609a33582f0d3ba8dc643589dfe6cac00e3e62ac60076af942734fc4",
+      "requestedModelId": "claude-opus-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "read-only",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "8fbbe612f40706507ca9ff55e2b148701a763a6b7c651ccfd86db15eace683d9",
+      "state": "SUCCEEDED",
+      "verdict": "PASS",
+      "terminationConfirmed": true,
+      "outputSha256": "0fa541984fa9c88b128f1620bdd3c41158298e490c4cc469a90b7729ba48e40c",
+      "servedModels": [
+        "claude-opus-5-5"
+      ]
+    },
+    {
+      "attemptId": "ci-fix-r1-b",
+      "decisionFingerprint": "1119b6a1609a33582f0d3ba8dc643589dfe6cac00e3e62ac60076af942734fc4",
+      "requestedModelId": "gpt-6-astra",
+      "requestedEffort": "high",
+      "transportId": "codex.native",
+      "permissionMode": "read-only",
+      "outputEnvelope": "codex-exec-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "8413adfc2f8049b7ea5ef2d58a6beff3f8557aee3d7011be2ce8f1ba56120b48",
+      "state": "SUCCEEDED",
+      "verdict": "PASS",
+      "terminationConfirmed": true,
+      "outputSha256": "1f10574e651198438a166d2ea65dcc2be12adfd31e63e15fec3efce339364d0a",
+      "servedModels": null
+    },
+    {
+      "attemptId": "ci-linux-maker",
+      "decisionFingerprint": "ddf1918167d58c6fa5daa2fbe8ac59e10fc1bb410693939ed45b288d20206e5c",
+      "requestedModelId": "claude-haiku-5-5",
+      "requestedEffort": "medium",
+      "transportId": "codex.to_claude",
+      "permissionMode": "write",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "b86e7cf2514d9d11171b4bb6976840586f9b007251e6b28494e1f87c9321c544",
+      "state": "SUCCEEDED",
+      "verdict": null,
+      "terminationConfirmed": true,
+      "outputSha256": "38be0b2d6b570b2a6535fb3427f4f0bf3efb55d3e14bb49c0fe99e3838558dca",
+      "servedModels": [
+        "claude-haiku-5-5"
+      ]
+    },
+    {
+      "attemptId": "ci-linux-coverage",
+      "decisionFingerprint": "9e4716d1fdc8915aa5c2c15316f335948230fc65f8e27e2b2275c7f1664ce4dc",
+      "requestedModelId": "claude-sonnet-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "write",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "7a98f1951bff4a5d8860c36d214ca490e3a30c32e5f83af0c005d387c6ff5f2b",
+      "state": "SUCCEEDED",
+      "verdict": null,
+      "terminationConfirmed": true,
+      "outputSha256": "1d5f39e1f0136aef3c922213605a54e4cdd2ab07fcefa850898fd42491fc093c",
+      "servedModels": [
+        "claude-sonnet-5-5"
+      ]
+    },
+    {
+      "attemptId": "ci-linux-r1-a",
+      "decisionFingerprint": "508521035ab1457e7c64530869faa2446e0e5761dc539b4ae37c48a7abfe97b8",
+      "requestedModelId": "claude-opus-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "read-only",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "e2b2c04d133ba71f48c01dc430621e14eb329a17a0f17b96e435ac0d41e2bb05",
+      "state": "SUCCEEDED",
+      "verdict": "PASS_WITH_CHANGES",
+      "terminationConfirmed": true,
+      "outputSha256": "df6b02ecd66f900ae4bd25ddd6750edb9629e3a1cbd51dc52fa49adecbd417c9",
+      "servedModels": [
+        "claude-opus-5-5"
+      ]
+    },
+    {
+      "attemptId": "ci-linux-r1-b",
+      "decisionFingerprint": "508521035ab1457e7c64530869faa2446e0e5761dc539b4ae37c48a7abfe97b8",
+      "requestedModelId": "gpt-6-astra",
+      "requestedEffort": "high",
+      "transportId": "codex.native",
+      "permissionMode": "read-only",
+      "outputEnvelope": "codex-exec-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "88aed038e83559119ae61d35dbe46c55d3c76d6cef3447f32f64bec7bc6fb449",
+      "state": "SUCCEEDED",
+      "verdict": "PASS",
+      "terminationConfirmed": true,
+      "outputSha256": "6c5064bee4afb5cbdd0073ca5e239d4818fc0f81a3226685c2315615980765f0",
+      "servedModels": null
+    },
+    {
+      "attemptId": "ci-linux-r2-a",
+      "decisionFingerprint": "897ade21c2940f397580e8beba3fcf7162dcc4cc35c66b586839b38f3bacd38a",
+      "requestedModelId": "claude-opus-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "read-only",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "921fe530d6416fd0765d16a1beec3184eafcd841d2c3458c1e0f31e77c1d5ca3",
+      "state": "SUCCEEDED",
+      "verdict": "PASS",
+      "terminationConfirmed": true,
+      "outputSha256": "36d7339b9be1d376e10adefd2a6f5af7a3c836094f0b95497f00676ef1bdfb10",
+      "servedModels": [
+        "claude-opus-5-5"
+      ]
+    },
+    {
+      "attemptId": "ci-linux-r2-b",
+      "decisionFingerprint": "897ade21c2940f397580e8beba3fcf7162dcc4cc35c66b586839b38f3bacd38a",
+      "requestedModelId": "gpt-6-astra",
+      "requestedEffort": "high",
+      "transportId": "codex.native",
+      "permissionMode": "read-only",
+      "outputEnvelope": "codex-exec-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "ecea5fc86151bac4717ae454c0b080a980f6cd9a988b95ce817b879b339225ae",
+      "state": "SUCCEEDED",
+      "verdict": "PASS",
+      "terminationConfirmed": true,
+      "outputSha256": "898e7b8e23c1db588a24eb4d4c0cbc48b3967b8dd3417234ef8ac22012b7b0d9",
+      "servedModels": null
     }
   ],
   "reviewedSourceSha256": {
-    ".github/workflows/test.yml": "1650c6b962cd121ac4abfeda5c586a73d419c65c3e28be9f25045e1569fb257c",
+    ".github/workflows/test.yml": "9a4e483b0d552645202c6422ec688fbe81ad08ae3af752a3ab97fce05d6a1bc2",
     "server/drill-public/drill.css": "eb7eb98928188e235e7f0e311891abc9fe54cd02f3a14a326f5fad37b73ca42c",
     "server/drill-public/drill.html": "2239cdcb8e4377e45377984ad25922f19f7185ffcb5fc4bef3d0c8040d1ea7f5",
     "server/drill-public/drill.js": "50ca3d2cc1f064f1966317ff4b07f03bcb976f0d4a60dd5307230741054c3be7",
@@ -421,8 +559,10 @@
     "README.ko.md": "9484f2c639a141dc9db67b3a7027bd89ca7a3d8a8027f6756c7b680a2e8c331b",
     "README.md": "987fdc25026d48c13b2e9cadb6755e6a914da9f338149a9550a5d3071f92afde",
     "docs/operations.ko.md": "6ae5441c29e3c2bda5d4fbb9f0499e598d06fef3a159379f7271272a16791b3a",
-    "test/codex-player-comparison.test.js": "029a99e76af3db136e0dd4decab72ab9c4dd82dde0b9c0a2e7d05f12fd6695d1",
-    "tools/compare-codex-players.js": "432ff665cb032f1b7ce416db43319dea8581eb420c35c7b447b8e9332ee0a566"
+    "test/codex-player-comparison.test.js": "79b4bf5a050619aa9e12ddb0e2ad5a3665960696bd1c4eeda99b4b86df557f07",
+    "tools/compare-codex-players.js": "432ff665cb032f1b7ce416db43319dea8581eb420c35c7b447b8e9332ee0a566",
+    "test/helpers/ci-linux-partitions.mjs": "4efba2f14f339c91b02f67bcba1f6189fc89af9494da9012b552fd3356b4c48e",
+    "test/ci-linux-partitions.test.js": "d00379d5be95e8df70d99a7c34e0aa6187d8fadad2fd0818ba8b11a5f0403212"
   },
   "preservedPolicyReferenceSha256": {
     "training/data/README.md": "f9d1919fc6a48314f6ad8ee99c8b9dd3c7f050308d7534af32ee46c3e5b2ee76",
@@ -475,6 +615,66 @@
     "resolution": "Strict projection/DOM tests unchanged; shared simulation caveat changed to equivalent neutral wording. All affected fact/coach/replay modules rerun."
   },
   "finalCompleteCiGate": "Exact final PR SHA GitHub CI is required before merge; this pre-PR local receipt does not assert that future result.",
+  "ciInitialFailure": {
+    "runId": 38865017268,
+    "attempt": 1,
+    "headSha": "c930a46d9e3afb822ee022090bcb621b1177f2f9",
+    "status": "completed",
+    "conclusion": "failure",
+    "dispositions": [
+      {
+        "issue": "Comparison positive test resolves deleted cwd after runner cleanup",
+        "observed": "Linux22 and Windows20/22 rest ENOENT at test line315; macOS fallback was vacuous",
+        "action": "Capture each actual child-reported cwd before forwarding done; native canonicalization; assert containment and post-cleanup absence. Production unchanged. Opus/high PASS0.85 and Astra/high PASS0.95; host28/28."
+      },
+      {
+        "issue": "Windows22 loop bootstrap listener probe deadline5s exhausted",
+        "observed": "Unchanged repair-bookkeeping test/helper before target assertion; Windows20 loop passed same SHA",
+        "action": "No timeout/assertion/source changes; exact new-SHA CI must pass; root cause unknown."
+      },
+      {
+        "issue": "Linux22 existing held-back pipeline test120s timeout",
+        "observed": "Test file unchanged vs integrated base; host targeted test ran1/pass1 in2.489s",
+        "action": "No threshold/assertion/source changes; root cause unknown; exact new-SHA CI required."
+      },
+      {
+        "issue": "Linux20 complete job40min cap cancelled at test3475",
+        "action": "Split Linux complete inventory into services/rest partitions; retain timeouts/concurrency and platform gate, prove disjoint coverage. New complete CI required."
+      }
+    ],
+    "logSha256": {
+      "github-ci-initial.json": "809aec0b233d22bdfa7112986086c3f6f56edca2ac7165ded435aa8b3779a4ed",
+      "linux20-cancelled.log": "23b12acc81f551c78bc93ac9dc7852c275694638a5a8598812c421e69c20c204",
+      "linux22-failed.log": "12b126f0d28afdeec5517f0630c65a19c3d5b1dd61c1ffbe5997b6fedc963da9",
+      "windows20-rest-failed.log": "c9e3600ede3cfe2c1162138850106262b4d504c3220ce1c068bdca8d5e749158",
+      "windows22-rest-failed.log": "3cff779606fad818a5338696e09831acaeea33d7a684800c482b26cc85a0769c",
+      "windows22-loop-failed.log": "6a8eed841a55cd51e179610548056247d3303d309d768c365b2da49c603a9391",
+      "ci-async-targeted.log": "5a5064002f94ca9829a1656c2c03dbe82468a85723aab7acd33656d615e90070"
+    }
+  },
+  "ciLinuxInventoryConservation": {
+    "priorLinuxAutoDiscoveredNonTestModules": 53,
+    "allRetainedInRest": true,
+    "inventory": 297,
+    "services": 28,
+    "rest": 268,
+    "gateSeparate": 1,
+    "outsideTestTreeTrackedTestFiles": []
+  },
+  "ciPlatformFinalHostSuite": {
+    "tests": 75,
+    "pass": 75,
+    "fail": 0,
+    "exitCode": 0,
+    "logSha256": "a03c66d8e5b72b18a193491f4a18225922697607991e47b240676b0a22009de8"
+  },
+  "ciCwdFixHostSuite": {
+    "tests": 28,
+    "pass": 28,
+    "fail": 0,
+    "exitCode": 0,
+    "logSha256": "619b7b14ae99d44db3700ad8747015e2f04c82b8fe90338c0099907cc352bd3c"
+  },
   "browserJourneys": {
     "studyNextStep": {
       "pass": true,

@@ -33,8 +33,8 @@ The one fenced Opus R2 output was INVALID_OUTPUT and is not counted as a pass.
 
 [Structured evidence](coaching-quality-evidence.json) preserves supervisor
 receipt/output hashes, requested model/effort, actual envelope model metadata,
-32 final source hashes, 25 preserved policy/reference hashes and test summaries.
-The final source matches the original-core, integration and wording snapshots.
+34 final source hashes, 25 preserved policy/reference hashes and test summaries.
+The final source matches the original-core, integration, wording and scoped CI platform snapshots.
 Separate processes and fixed inputs were used; Codex read-only reviews did not
 use the Darwin receipt guard. No stronger isolation property is claimed.
 
@@ -130,3 +130,45 @@ stopped, and all observed processes confirmed dead. Its partial run is not a
 passing result. The complete integrated run and final checks above supersede
 that checkpoint. Raw local transcripts and browser artifacts remain outside
 the repository; durable hashes are committed in the structured evidence.
+
+## PR CI platform corrections
+
+Initial PR run38865017268 on c930a46 completed with failure. Linux22 and
+Windows20/22 rest exposed a new comparison-test bug: it resolved the child's
+temporary cwd after the runner had removed it. macOS had hidden this through
+an alias-prefix fallback that inspected os.tmpdir instead. The test now records
+every actual fake-CLI child's reported cwd before forwarding its done promise,
+canonicalizes all compared paths with realpathSync.native while alive, verifies
+it is inside the owned temp root and outside the repo, then verifies both
+reported and canonical paths are absent after cleanup. Runtime and comparison
+production code do not change. Original model/effort, same-input, negative-gate
+and cleanup assertions remain. Host comparison suite:28/28, exit0. Fresh
+Opus/high PASS0.85 and Astra/high PASS0.95 independently reviewed these bytes.
+
+Windows22 loop also hit SERVER_LISTENER_UNAVAILABLE in an unchanged bootstrap
+listener probe before the target repair-bookkeeping assertion; Windows20 loop
+passed the same SHA. Linux22's unchanged held-back pipeline test hit its120s
+outer timeout; a targeted host run executed that one test and passed in2.489s.
+Neither root cause is established, and no assertion or timeout is relaxed.
+Linux20's complete job was cancelled at its40-minute cap near test3475.
+Linux CI now splits the complete recursive test inventory into services/rest
+per Node20/22, preserves the platform gate and15-minute per-file/40-minute job
+caps, and tests exactly-once coverage including helper/browser/fixture modules.
+All Windows shards remain intact. Final exact-SHA whole CI remains mandatory.
+Failure log hashes and dispositions are retained in the structured evidence.
+
+Linux partition review: Opus/high PASS_WITH_CHANGES0.80 identified required
+check-name preservation, independently caught by the parent through the live
+branch rules. The strict two-name aggregate fixes it without changing rules.
+Astra/high PASS0.94 found no coverage issue. The final aggregate delta then
+passed fresh Opus/high0.86 and Astra/high0.94 reviews. All receipts have confirmed
+termination. Host CI/comparison/platform checks:75/75, exit0, no skips.
+The parent separately compared the prior Linux TAP's53 auto-discovered
+non-test modules with the new rest inventory: all retained. Current recursive
+inventory297 = services28 + rest268 + GATE1. A tracked-file search found no
+Node test-pattern file outside test/. Future tests must remain under test/ for
+this runner; root-wide auto-discovery outside that tree is not claimed. Each
+Linux version still executes the platform gate before both partitions. The
+original required names succeed only when all four Linux partitions succeed.
+Final PR CI now has25 jobs; its exact-SHA outcome is recorded on the PR after
+completion rather than embedding an unexecuted success in this commit.

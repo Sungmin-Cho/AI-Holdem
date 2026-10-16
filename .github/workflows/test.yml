@@ -100,8 +100,11 @@ jobs:
         run: node test/helpers/windows-privacy-probe.mjs
       - name: Verify publisher exit on the reported Node version
         run: node --test --test-name-pattern="publish shutdown:" test/publish.test.js
+  # Linux runs the full suite as two complete partitions (services, rest) per
+  # Node version, each under the 40 minute job cap. A partition with a file
+  # list is run by test/helpers/ci-linux-partitions.mjs; GATE runs first.
   test:
-    name: Node ${{ matrix.node-version }} (${{ matrix.os }})
+    name: Node ${{ matrix.node-version }} (${{ matrix.os }}, ${{ matrix.partition }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
@@ -112,6 +115,9 @@ jobs:
         node-version:
           - 20.x
           - 22.x
+        partition:
+          - services
+          - rest
     steps:
       - name: Check out repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -126,7 +132,25 @@ jobs:
       - name: Verify learning runtime on the runner platform
         run: node --test --test-concurrency=1 test/platform-learning-runtime.test.js
       - name: Run tests
-        run: npm run test:ci
+        run: node test/helpers/ci-linux-partitions.mjs run ${{ matrix.partition }}
+  # Keep the existing required status-check names. Both succeed only after
+  # every Linux Node/version partition succeeds, including on retry/cancellation.
+  linux-suite:
+    name: Node ${{ matrix.node-version }} (ubuntu-latest)
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - 20.x
+          - 22.x
+    steps:
+      - name: Require every Linux partition
+        env:
+          PARTITION_RESULT: ${{ needs.test.result }}
+        run: test "$PARTITION_RESULT" = "success"
   windows:
     name: Node ${{ matrix.node-version }} (windows-latest, ${{ matrix.shard }})
     runs-on: windows-latest

@@ -233,7 +233,26 @@ test('공개 스냅샷: 스팟은 다양하고 엔진이 만든 합법 요약이
 test('실행: 두 설정이 같은 스냅샷·같은 컨테인먼트 argv로 돌고, 모델/effort는 설정마다 정확히 하나씩 실린다', async (t) => {
   const spots = buildComparisonSpots(3);
   const f = fixture(t, { script: { matchers: decisionMatchers(spots, { invalidSpot: spots[1].id }) } });
-  const report = await runComparison({ samples: 3, timeoutMs: 20_000, budgetMs: 120_000 }, f.deps);
+  const liveCwds = [];
+  const tmpRootReal = fs.realpathSync.native(f.tmpRoot);
+  const repoRootReal = fs.realpathSync.native(REPO_ROOT);
+  const report = await runComparison({ samples: 3, timeoutMs: 20_000, budgetMs: 120_000 }, {
+    ...f.deps,
+    exec: (spec) => {
+      const index = f.calls().length;
+      const child = f.deps.exec(spec);
+      return { ...child, done: child.done.then((result) => {
+        // The child's own reported cwd is resolved while it still exists, before
+        // completion reaches the adapter and cleanup can remove the directory.
+        const call = f.calls()[index];
+        assert.equal(call?.pid, child.pid);
+        const realCwd = fs.realpathSync.native(call.cwd);
+        liveCwds.push({ pid: child.pid, reportedCwd: call.cwd, realCwd,
+          wasDirectory: fs.statSync(realCwd).isDirectory() });
+        return result;
+      }) };
+    },
+  });
   assert.equal(report.schema, 'codex-player-comparison/3');
   // 불법 응답이 하나 있어도 관측은 끝까지 모았다(complete) — 하지만 합격(ok)은 아니다.
   assertGates(report, { executionOk: true, complete: true, allDecisionsLegal: false });
@@ -311,10 +330,18 @@ test('실행: 두 설정이 같은 스냅샷·같은 컨테인먼트 argv로 돌
   assert.deepEqual(decides.map((call) => modelOf(call.argv)), [LUNA, SOL, SOL, LUNA, LUNA, SOL]);
 
   // 임시 cwd/카나리는 레포 밖이었고 끝나면 사라진다.
-  for (const call of calls) {
-    const rel = path.relative(REPO_ROOT, fs.realpathSync(call.cwd.startsWith(os.tmpdir()) ? call.cwd : os.tmpdir()));
+  assert.equal(liveCwds.length, calls.length, 'every actual child cwd was observed before cleanup');
+  for (const [index, call] of calls.entries()) {
+    const captured = liveCwds[index];
+    assert.equal(captured.pid, call.pid);
+    assert.equal(captured.reportedCwd, call.cwd);
+    assert.equal(captured.wasDirectory, true);
+    const rel = path.relative(repoRootReal, captured.realCwd);
     assert.ok(rel.startsWith('..') || path.isAbsolute(rel), `cwd가 레포 안이다: ${call.cwd}`);
+    const tempRel = path.relative(tmpRootReal, captured.realCwd);
+    assert.ok(tempRel && tempRel !== '..' && !tempRel.startsWith(`..${path.sep}`) && !path.isAbsolute(tempRel), 'cwd was inside the owned temporary root');
     assert.equal(fs.existsSync(call.cwd), false, '임시 cwd가 남았다');
+    assert.equal(fs.existsSync(captured.realCwd), false, '정규화된 임시 cwd가 남았다');
   }
   assert.deepEqual(report.cleanup, { disposed: true, removed: true, tmp: null, errors: [] });
   assert.deepEqual(fs.readdirSync(f.tmpRoot), [], '임시 디렉터리가 남았다');
