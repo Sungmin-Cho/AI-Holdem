@@ -62,3 +62,10 @@ R7 검토는 Astra PASS·Opus PASS_WITH_CHANGES였고, Opus의 추가 ABA·조�
 최종 보강 집중 실행은 리플레이·UI 149개와 정체 공개 API 4개를 합쳐 153 pass, 실패·취소·skip 0이다. 이전 3836개 로컬 전체 실행은 보정 전 이력이며 보정 후 최종 커밋의 전체·플랫폼 검증은 새 PR CI를 요구한다. 최종 리뷰 및 전달 결과는 전달 영수증에 기록한다.
 
 R9 최종 보강 검토는 Opus 5.5/high·GPT-6-Astra/high 모두 PASS다. 두 guarded 영수증·라우팅 fingerprint와 최종 제품 38개 파일 manifest 불변을 검증했다. 전체 범위 검토와 후속 증분 검토를 합쳐 코드·테스트 검토를 완료한 것으로 판단하고 최종 커밋 CI로 진행한다.
+
+
+## 2026-10-16 study descriptor 폴링 검증 보정
+
+두 번째 CI 38851394953(2a1217d)은 리플레이 writer 검사와 UI를 통과했다. Linux20 전체는3839개 중3830 pass·실패/취소0·skip9였고 Linux22 writer도 통과했다. 다만 Linux22의 기존 study-service identity 테스트가 소유자 checkpoint의 제자리 truncate/write 중 descriptor를 JSON.parse하다 실패했다. 제품 study-service와 공용 readDescriptor·until은 수정하지 않았다.
+
+해당 복구 대기 predicate 안에서만 SyntaxError를 아직 수렴하지 않은 상태로 취급한다. PID 복원·위조 descriptor 거부·잘못된 instanceId 거부·마지막 실제 instance 확인 단언과3.5초 제한·skip은 유지한다. 한 번의 부분 JSON 주입은 수정 전 같은 SyntaxError 스택으로 실패하고 수정 후 통과했다. 영구 부분 JSON 주입은 원래 제한에서 여전히 수렴 실패로 끝났다. 해당 파일 전체33개가 pass, 실패/취소/skip0이다. model-router MEDIUM이 배정한 독립 Fable5.1/high 검토는 PASS이며 guarded 영수증과 수정 파일 해시를 검증했다. 이 테스트 한 파일 이외의 제품38개 파일은 R9 검토 바이트와 동일하다. 최종 커밋 전체 CI를 다시 요구한다.

@@ -254,9 +254,28 @@
           "headerModel": "gpt-6-astra"
         }
       ]
+    },
+    {
+      "round": "ci-poll-review",
+      "scope": "one test-only convergence poll",
+      "target": "1df342fd2c0d108a3ba375b3af89c91d4e6708321876a9c484e1fe846ce64026",
+      "decisionFingerprint": "0767528516a53f3f2db0fe93a6f0b3db0e540f74dc0e813c55cdef1590331a66",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "seats": [
+        {
+          "attemptId": "ci-poll-review-reviewer-1",
+          "receiptSha256": "660cdb390ad37a4ae4aadeb8ed233dcf02ef091f810e1d6287296c739a1195d5",
+          "state": "SUCCEEDED",
+          "verdict": "PASS",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-fable-5-1"
+          ]
+        }
+      ]
     }
   ],
-  "currentReviewState": "R4/R5 full scope and R6 incremental reviewed; CI race correction R7/R8 findings addressed; final R9 PASS/PASS, guarded receipts verified, final38-file product manifest unchanged",
+  "currentReviewState": "R4/R5 full scope and R6 incremental reviewed; CI race correction R7/R8 findings addressed; final R9 PASS/PASS, guarded receipts verified, final38-file product manifest unchanged; test-only study descriptor poll increment independently PASS with guarded Fable5.1/high receipt",
   "localChecks": {
     "focused": {
       "pass": 153,
@@ -324,11 +343,24 @@
       "pass": 10,
       "fail": 0,
       "scope": "after initial nlink correction; later final focused also passes writer"
+    },
+    "studyServiceCorrected": {
+      "tests": 33,
+      "pass": 33,
+      "fail": 0,
+      "skip": 0
+    },
+    "descriptorPollProbe": {
+      "beforeFixSyntaxError": true,
+      "onePartialReadPass": true,
+      "persistentPartialReadsStillFailOriginalDeadline": true,
+      "timeoutUnchanged": true,
+      "globalHelpersUnchanged": true
     }
   },
   "resumedRouterVersion": "1.23.1",
   "historicalRawReceipts": "R1-R3 temp files were cleaned before 2026-10-16 resume; retained summaries above are historical, not newly authenticated receipts",
-  "finalProductTarget": "cc986af356c76416d475cce745e55febfe28f8b43da04436d1938884f6d7cf94",
+  "finalProductTarget": "33f6e4af924ce2c2762b10c0d8a7d5e07b32ee7c44c62c804e1a4d80a2885406",
   "userReviewLimitOverride": "2026-10-16 explicit instruction: proceed until evidence-based judgment says stop, irrespective of numeric review cap",
   "initialCiFailure": {
     "runId": 38846891317,
@@ -341,5 +373,20 @@
       "Windows20 host-insights fixture atomic producer parity corrected",
       "Windows20 unchanged finalize4.5second boundary requires final CI rerun"
     ]
+  },
+  "secondCiObservation": {
+    "runId": 38851394953,
+    "head": "2a1217dd7505bd7047b27fd808702d6215b661f4",
+    "linux20Full": {
+      "tests": 3839,
+      "pass": 3830,
+      "fail": 0,
+      "skip": 9
+    },
+    "linux22Failure": "existing study-service identity test convergence poll JSON.parse read races owned checkpoint truncate/write",
+    "replayWriterLinux20And22": "PASS",
+    "uiReplay": "22/22 PASS",
+    "windows20LoopB": "PASS with unchanged4.5second assertions",
+    "supersededByTestOnlyPollFix": true
   }
 }
