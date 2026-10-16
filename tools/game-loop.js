@@ -95,6 +95,7 @@ import { modelsFromPlayers } from '../training/exploit/policy-model.js';
 import { buildProcessInput } from '../training/process-review.js';
 import { coachingClaimAllowed, sanitizeCoachingText } from '../shared/reference.js';
 import { coachNotesDigest, decisionFactsLines, detectorLinesKo, processDetectors, vpipBand } from './review-facts.js';
+import { applyProspectiveNoteContract, buildProspectiveCoachPrompt, selectCoachTarget } from './coach-prompt.js';
 import { preserveReviewFailure, sanitizeReviewDiagnostic } from './review-diagnostics.js';
 import { killGroup as killSolverGroup, readPersistedSolver } from './solver-runtime.js';
 import {
@@ -4468,57 +4469,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return `과정 판정 불가: ${hands.length ? `핸드 ${hands.join(', ')}` : '일부 결정'}의 결정 시점 증거가 없거나 올바르지 않아 해당 결정은 평가에서 제외했습니다.`;
   };
 
-  // Engine-computed facts for the user's decisions in the captured hand. A
-  // capture that cannot be parsed yields no facts rather than a failure.
-  const coachFactsLines = (inputs) => {
-    try {
-      const lines = decisionFactsLines(parseCapturedHand(inputs.hand.raw));
-      return lines.length ? lines.slice(0, 12) : ['(사용자 결정 없음)'];
-    } catch {
-      return ['(계산 불가)'];
-    }
-  };
-
-  const buildCoachPrompt = ({ handNo, inputs, overfoldReserved, retry = false }) => {
-    const practiceFocus = processPracticeFocus(readInstalledPracticeFocus(root) ?? 'null');
-    const prompt = [
-      '너는 공정한 홀덤 코치다. 아래에 인라인된 입력만 사용한다. 다른 파일·도구·네트워크를 조회하지 마라.',
-      '입력에 없는 상대 홀카드·덱·아키타입·스타일을 추측하거나 언급하지 마라.',
-      '',
-      `hand ${handNo} (redacted):`,
-      inputs.hand.raw,
-      '',
-      `hand ${handNo} (replay):`,
-      inputs.replay.raw,
-      '',
-      '결정 사실 카드(엔진 계산, 사용자 결정별 — 수치는 이 값만 인용):',
-      ...coachFactsLines(inputs),
-      '',
-      'practiceFocus:',
-      practiceFocus,
-      '',
-      `과폴드 코멘트: ${overfoldReserved ? '허용' : '금지'}`,
-      '',
-      '할 일: 이 핸드에서 사용자의 가장 비싼(결정적인) 결정 1개를 골라 한국어 1~2줄로 평가한다. 프리플랍 폴드도 예외가 아니다.',
-      '(a) 결정 시점 판단: 사실 카드의 수치 1개 이상(필요 승률·SPR·에퀴티·선택 크기 등)을 근거로 든다. note가 있으면 인용하고 자기 해석과 구분한다.',
-      '(b) 결과: 공개된 카드·보드·액션만으로 한 줄. 결과로 결정의 옳고 그름을 판정하지 않는다.',
-      '(c) 대안 라인 한 줄과 근거.',
-      'reasonKind가 model인 상대 사유는 "모델이 밝힌 사유"로 인용한다.',
-      '폴드가 타당했다면 그 이유를 한 문장으로 구체적으로 쓴다. 판에 박힌 칭찬 문구는 쓰지 않는다.',
-      '수치는 사실 카드에 있는 값만 인용하고 새 숫자를 만들지 마라. 추정 레인지 에퀴티는 "추정"이라고 밝힌다.',
-      '기대값(EV)은 숫자 없이 개념으로만 쓴다. 검증된 최적·GTO 정답·확정 누수를 주장하지 마라.',
-      overfoldReserved
-        ? '이 핸드는 과폴드 누수 코멘트를 한 번 사용할 수 있고, 사용하면 "overfold":true를 추가한다.'
-        : '이 핸드에서는 과폴드 누수 코멘트를 사용하지 마라.',
-      '',
-      `출력은 JSON 한 줄만: {"handNo":${handNo},"text":"...","decisions":[{"decisionId":"d-${handNo}-<street>-<k>","why":"...","outcome":"...","alternative":"..."}]}`,
-      'decisions는 선택이며 최대 12개다. 각 필드는 비어 있지 않은 문자열이다.',
-      'text.trim()은 비어 있으면 안 되고, 설명·마크다운·코드펜스·추가 필드는 금지한다.',
-    ].join('\n');
-    return retry
-      ? `${prompt}\n재시도 사유: 직전 출력이 기계적 JSON 계약을 만족하지 못했다. 부분 출력은 무시하고 동일 입력으로 새로 작성하라.`
-      : prompt;
-  };
+  // The coach prompt is prospective: one target decision chosen by committed cost, its own
+  // validated snapshot and facts (tools/coach-prompt.js). The completed redacted/replay
+  // captures stay on disk for validation and publication but are never model input.
+  const buildCoachPrompt = ({ handNo, selection, overfoldReserved, retry = false }) => buildProspectiveCoachPrompt({
+    handNo,
+    selection,
+    practiceFocus: processPracticeFocus(readInstalledPracticeFocus(root) ?? 'null'),
+    overfoldReserved,
+    retry,
+  });
 
   // D9: drop out-of-bounds sentences from a fresh model note before it is
   // validated, sealed and proved; a decision row left empty is dropped.
@@ -4534,15 +4494,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         for (const field of ['why', 'outcome', 'alternative']) {
           if (typeof out[field] === 'string') out[field] = sanitizeCoachingText(out[field]).text;
         }
+        // A removed outcome claim must not discard otherwise valid advice.
+        // Missing outcome is filled by the prospective contract; a surviving
+        // model outcome still passes through the existing private-card checks.
+        if (out.outcome === '') delete out.outcome;
         return out;
       }).filter((row) => !row || typeof row !== 'object'
-        || ['why', 'outcome', 'alternative'].every((field) => typeof row[field] !== 'string' || row[field].trim() !== ''));
+        || ['why', 'alternative'].every((field) => typeof row[field] !== 'string' || row[field].trim() !== ''));
       if (!clean.decisions.length) delete clean.decisions;
     }
     return clean;
   };
 
-  const validateCoachNote = (raw, handNo, { forbiddenDetailed, replay } = {}) => {
+  const validateCoachNote = (raw, handNo, { forbiddenDetailed, replay, allowedDecisionIds = null } = {}) => {
     const note = typeof raw === 'string' ? extractJsonLine(raw) : raw;
     if (!note || typeof note !== 'object' || Array.isArray(note)) {
       throw codedError('INVALID_COACH_OUTPUT', '코치 출력이 JSON 객체가 아닙니다.');
@@ -4563,7 +4527,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (reason) {
         throw codedError('INVALID_COACH_OUTPUT', `코치 decisions 계약이 올바르지 않습니다 (${reason}).`);
       }
-      const allowedIds = new Set((replay?.decisions ?? []).map((row) => row.decisionId));
+      const allowedIds = allowedDecisionIds ?? new Set((replay?.decisions ?? []).map((row) => row.decisionId));
       for (const row of note.decisions) {
         if (!allowedIds.has(row.decisionId)) {
           throw codedError('INVALID_COACH_OUTPUT', 'decisionId가 replay user 결정 집합에 없습니다.');
@@ -5473,7 +5437,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     if (deferCoachIfPaused(handNo)) return;
     const processInput = buildProcessInput([parseCapturedHand(inputs.hand.raw)]);
-    if (eligibleProcessInput(processInput).hands.length === 0) {
+    // One target decision, chosen without the result. No valid decision-time snapshot (legacy
+    // or invalid legal evidence) is honestly unavailable; the model is never asked about raw data.
+    const coachSelection = selectCoachTarget(processInput, handNo);
+    if (!coachSelection) {
       await completeCoachUnavailable({ owner, handNo, generation: descriptor.generation,
         reason: 'process-evidence-unavailable', fallbackEnvelopePath: descriptor.exactEnvelopePath });
       return;
@@ -5493,7 +5460,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       const prompt = buildCoachPrompt({
         handNo,
-        inputs,
+        selection: coachSelection,
         overfoldReserved: currentDescriptor.overfoldReserved === true,
         retry: attempt === 2,
       });
@@ -5737,10 +5704,26 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         record.bound = true;
         const completed = await Promise.race([handle.done, interrupted]);
         assertBeforeResultWaitCutoff();
-        const note = validateCoachNote(sanitizeCoachOutput(completed?.raw), handNo, {
+        // The sidecar injects the fixed outcome before the note that is sealed and proved is
+        // validated, and only the target ID is accepted. No text is filtered here. A first
+        // pass keeps any outcome the model wrote anyway so the existing private-card
+        // validators still see every word it produced; a deferral from that pass carries the
+        // fixed outcome, never the model's.
+        const parsedNote = sanitizeCoachOutput(completed?.raw);
+        const noteChecks = {
           forbiddenDetailed: denyDetailed,
           replay: parseCapturedHand(inputs.replay.raw),
-        });
+          allowedDecisionIds: new Set([coachSelection.decision.decisionId]),
+        };
+        try {
+          validateCoachNote(applyProspectiveNoteContract(parsedNote, { keepModelOutcome: true }), handNo, noteChecks);
+        } catch (containmentError) {
+          if (containmentError.code === 'DEFER_COACH_OUTPUT' && containmentError.note) {
+            containmentError.note = applyProspectiveNoteContract(containmentError.note);
+          }
+          throw containmentError;
+        }
+        const note = validateCoachNote(applyProspectiveNoteContract(parsedNote), handNo, noteChecks);
         const unavailableNotice = unavailableProcessNotice(processInput);
         if (unavailableNotice) note.text += `\n${unavailableNotice}`;
         writeJsonAtomic(currentDescriptor.exactResultPath, note);
@@ -6712,7 +6695,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const band = vpipBand(seats);
     const found = processDetectors(records);
     const checks = detectorLinesKo(found);
-    const losses = found.biggestLosses.map((row) => `- 핸드 ${row.handNo}: ${row.lost}칩 손실. ${row.line ?? '사용자 결정 기록 없음'}`);
+    const losses = found.biggestLosses.map((row) => `- 핸드 ${row.handNo}: ${row.lost}칩 손실. ${row.line ?? '결정 시점 증거가 없거나 유효하지 않음'}`);
     const practice = [];
     if (found.foldWhenCheck.length) practice.push('- 체크할 수 있을 때는 폴드 대신 체크해 다음 카드를 무료로 본다.');
     if (found.minRaises.raises >= 3 && found.minRaises.count / found.minRaises.raises >= 0.5) {
@@ -6828,7 +6811,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         hands.push({ handNo, raw: JSON.stringify(captured) });
       }
       const processInput = buildProcessInput(hands.map(({ raw }) => parseCapturedHand(raw)));
-      const eligibleHands = new Set(eligibleProcessInput(processInput).hands.map((hand) => hand.handNo));
+      const eligibleInput = eligibleProcessInput(processInput);
+      const eligibleHands = new Set(eligibleInput.hands.map((hand) => hand.handNo));
       const unavailableNotice = unavailableProcessNotice(processInput);
       if (eligibleHands.size === 0) {
         return appendTrainingPendingToReview([
@@ -6838,13 +6822,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           '## 다음 게임에서 연습할 것', '다음 게임에서 결정 시점의 공개 정보와 합법 액션을 확인하세요.',
         ].join('\n'));
       }
-      const factsLines = hands.filter(({ handNo }) => eligibleHands.has(handNo)).flatMap(({ handNo, raw }) => {
-        try {
-          return decisionFactsLines(parseCapturedHand(raw)).map((line) => `핸드 ${handNo} ${line}`);
-        } catch {
-          return [];
-        }
-      }).slice(0, 160);
+      const factsLines = eligibleInput.hands.flatMap((hand) => (
+        decisionFactsLines(hand).map((line) => `핸드 ${hand.handNo} ${line}`)
+      )).slice(0, 160);
       const evaluatorPrompt = buildEvaluatorPrompt({ completed: eligibleHands.size, processInput, factsLines });
       const evaluator = await runReviewStage({
         stage: 'evaluator',

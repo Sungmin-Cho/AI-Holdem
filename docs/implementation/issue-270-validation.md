@@ -100,3 +100,10 @@ listener 기본 예산은 최대 3초, 동기 identity는 POSIX 10초 / Windows 
 
 선택적 잔여 사항: SSE의 응답 헤더가 오기 전 대기에는 별도 deadline이 없어 검증된 listener가 응답하지 않으면 downstream 이탈까지 기다릴 수 있다.
 state 파일 크기·전체 요청 시간·실제 동시 폴링 처리량에 새 보장을 부여하지 않는다. 단위 슬롯 상한과 실제 OS 3회 표본을 부하 시험으로 해석하지 않는다.
+
+## 최신 main 통합
+
+원격 검증 대기 중 PR #295가 main `5522876dca9437aea02c04e9d1658138cc632c99`에 병합되어 이를 통합했다.
+충돌 없이 합쳐졌으며 해당 main 대비 제품 변경은 위 relay capability·app proxy와 기존 테스트 조정 그대로다.
+새 Linux services/rest 분할·집계와 코칭 브라우저 여정을 유지하고 각 Linux 분할 및 Windows rest의 전용 proxy 검사를 유지했다.
+기존 HEAD `40b2432`의 CI 결과로 이 통합 커밋의 통과를 주장하지 않는다. 추가 독립 통합 리뷰, 집중 검증 및 통합 HEAD CI 결과·SHA는 PR #296/#270 최종 기록에 남긴다.

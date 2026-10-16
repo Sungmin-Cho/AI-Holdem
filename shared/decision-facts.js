@@ -105,8 +105,30 @@ export function equityFacts(snapshot, { ranges = null, samples = 1500 } = {}) {
   return round(100 * equity);
 }
 
+// Why a range equity was left out, in Korean (reasons come from the coaching estimator).
+const RANGE_OMIT_KO = Object.freeze({
+  'no-acted-opponent': '이번 스트리트에 행동한 상대가 없음',
+  'range-evidence-missing': '남아 있는 상대 중 레인지 근거가 없거나 불완전한 상대가 있음',
+  'no-estimate': '레인지 추정 불가',
+  'equity-failed': '호환되는 콤보가 없어 계산 불가',
+});
+
+// Label for the coaching range estimate: what it is, who it covers, what it omits.
+// `meta` is { acted, excluded, reason } (counts and a machine reason, no cards).
+export function rangeLabelKo(meta, equityRange) {
+  if (!meta) return null;
+  const scope = `공개 행동 기반 휴리스틱·미보정, 행동한 ${meta.acted ?? 0}명 대상${meta.excluded ? `, 아직 행동 전 ${meta.excluded}명 제외` : ''}`;
+  if (equityRange !== null && equityRange !== undefined) return `(${scope})`;
+  return `레인지 에퀴티 생략(${RANGE_OMIT_KO[meta.reason] ?? '근거 부족'}${meta.excluded ? `, 아직 행동 전 ${meta.excluded}명 제외` : ''})`;
+}
+
+// Always shown beside a simulated equity: it is a showdown simulation, not an
+// action EV, and a price comparison cannot settle what future betting does.
+export const EQUITY_CAVEAT_KO = '에퀴티는 추가 베팅 없이 끝까지 패를 비교한다는 가정의 시뮬레이션이며 행동 EV가 아님(이후 베팅·멀티웨이·리오픈된 콜은 가격 비교만으로 판정 불가)';
+
 // Korean one-line summary used by coach/review prompts and the machine review.
-export function factsLineKo(snapshot, { equityRandom = null, equityRange = null } = {}) {
+// `rangeMeta` (optional) labels the range equity: see rangeLabelKo.
+export function factsLineKo(snapshot, { equityRandom = null, equityRange = null, rangeMeta = null } = {}) {
   const chips = chipFacts(snapshot);
   if (!chips) return null;
   const hand = handFacts(snapshot);
@@ -123,7 +145,9 @@ export function factsLineKo(snapshot, { equityRandom = null, equityRange = null 
   if (hand?.made) parts.push(`메이드 ${hand.made}`);
   if (hand?.outs) parts.push(`드로 아웃 ${hand.outs}장`);
   if (equityRandom !== null) parts.push(`무작위 ${chips.opponents}명 대비 에퀴티 ${equityRandom}%${chips.multiPot ? '(전원 상대, 참고)' : ''}`);
-  if (equityRange !== null) parts.push(`추정 레인지 대비 에퀴티 ${equityRange}%`);
+  if (equityRange !== null) parts.push(`추정 레인지 대비 에퀴티 ${equityRange}%${rangeMeta ? ` ${rangeLabelKo(rangeMeta, equityRange)}` : ''}`);
+  else if (rangeMeta) parts.push(rangeLabelKo(rangeMeta, null));
   if (chips.chosenPctOfPot !== undefined) parts.push(`선택 크기 ${chips.chosenPutBb}BB(팟의 ${chips.chosenPctOfPot}%)${chips.chosenAllIn ? ' 올인' : ''}`);
+  if (equityRandom !== null || equityRange !== null) parts.push(EQUITY_CAVEAT_KO);
   return parts.join(', ');
 }

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import {
   makeCoachAdapter,
@@ -65,4 +66,25 @@ test('D9/D10 the coach prompt is grounded in facts and an out-of-bounds sentence
   assert.match(upper.prompts[0], /가장 비싼\(결정적인\) 결정 1개/);
   assert.doesNotMatch(upper.prompts[0], /무난한 폴드/);
   assert.equal(note.text, '체크 후 레이즈는 팟을 키웠습니다. 기대값이 낮은 라인은 아닙니다.');
+});
+
+test('the evaluator facts exclude invalid evidence in an otherwise eligible hand', { timeout: 30_000 }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  expandFinishedGameToTwoHands(gameDir);
+  const file = path.join(gameDir, 'hands', 'hand-0001.json');
+  const record = readJson(file);
+  const good = record.decisions.find((decision) => decision.actorId === 'user');
+  assert.ok(good?.legal);
+  const bad = { ...structuredClone(good), decisionId: 'd-1-preflop-999' };
+  delete bad.legal;
+  record.decisions.push(bad);
+  fs.writeFileSync(file, JSON.stringify(record));
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, { upper, stateOverrides: { handNo: 2 } });
+  await loop.resume();
+  assert.equal((await loop.run()).phase, 'done');
+  const prompt = upper.evaluatorStarts[0].prompt;
+  assert.ok(prompt.includes(`핸드 1 ${good.decisionId}: 팟 `), 'valid evidence still reaches the actual evaluator');
+  assert.ok(!prompt.includes(`핸드 1 ${bad.decisionId}: 팟 `), 'an invalid decision cannot receive a facts-backed verdict');
 });

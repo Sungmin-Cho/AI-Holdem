@@ -8,7 +8,7 @@ export const NAMED = {
   'study-a': ['study-service.test.js', 'app-command-store.test.js', 'policy-loop.test.js', 'participant-api.test.js'],
   'study-b': ['study-service-recovery.test.js', 'room-manager.test.js', 'session-summary.test.js', 'session-summary-api.test.js', 'final-summary.test.js'],
   'learning-a': ['learning-integration.test.js', 'mistake-bank.test.js', 'publish.test.js', 'multi-human-engine.test.js'],
-  'learning-b': ['learning-integration-session.test.js', 'action-receipts.test.js', 'drill-generator.test.js', 'drill-cli.test.js'],
+  'learning-b': ['learning-integration-session.test.js', 'action-receipts.test.js', 'drill-generator.test.js', 'drill-cli.test.js', 'coach-prospective-input.test.js'],
   loop: ['game-loop.test.js'],
   'loop-b': ['game-loop-multiplayer.test.js', 'pace-loop.test.js', 'jev-loop.test.js', 'jev-session.test.js', 'game-loop-finalize.test.js'],
   recovery: ['app-recovery-exit.test.js', 'release-verifier.test.js', 'server-security-gates.test.js', 'relay-seat-scoping.test.js'],

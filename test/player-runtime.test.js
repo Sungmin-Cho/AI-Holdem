@@ -19,6 +19,9 @@ import {
   buildPlayerPrompt,
   createPlayerRuntime,
   createProductionResolver,
+  benchmarkPlayerPin,
+  BENCHMARK_PIN_MODELS,
+  BENCHMARK_PIN_EFFORTS,
   resolveRuntimes,
   spawnCli,
   CLAUDE_DISABLED_BUILTIN_PLUGINS,
@@ -82,6 +85,10 @@ const GROK_TAIL_LITERAL = [
   '--disable-web-search', '--sandbox', 'read-only', '--no-subagents',
 ];
 const GROK_CREATE_PREFIX = ['--no-auto-update', '--prompt-file', '/dev/stdin', ...GROK_TAIL_LITERAL];
+// Codex player calls pin low effort explicitly; the upper tier pins medium. Both tiers now share the
+// Sol model id, so tests tell the tier apart by this argument pair (and by call order), never by model id.
+const CODEX_LOW = ['-c', 'model_reasoning_effort="low"'];
+const CODEX_MEDIUM = ['-c', 'model_reasoning_effort="medium"'];
 const CLAUDE_CONTAINMENT_LITERAL = [
   '--safe-mode', '--restricted', '--strict-mcp-config', '--tools', '',
   '--settings', '{"enabledPlugins":{"cc-plugin-agents-md@builtin":false,"cc-plugin-telemetry@builtin":false,"cc-plugin-plugin-authoring@builtin":false}}',
@@ -237,13 +244,13 @@ test('RUNTIME_TABLE은 {player, upper, 각 tier 인자, watchdog}만 갖고 정�
   }
   assert.equal(RUNTIME_TABLE.claude.player, 'sonnet');
   assert.deepEqual(RUNTIME_TABLE.claude.playerArgs, ['--effort', 'medium']);
-  assert.deepEqual(RUNTIME_TABLE.codex.playerArgs, []);
+  assert.deepEqual(RUNTIME_TABLE.codex.playerArgs, CODEX_LOW);
   assert.deepEqual(RUNTIME_TABLE.grok.playerArgs, []);
   assert.deepEqual(RUNTIME_TABLE.claude.upperArgs, []);
-  assert.deepEqual(RUNTIME_TABLE.codex.upperArgs, ['-c', 'model_reasoning_effort="medium"']);
+  assert.deepEqual(RUNTIME_TABLE.codex.upperArgs, CODEX_MEDIUM);
   assert.deepEqual(RUNTIME_TABLE.grok.upperArgs, []);
   assert.equal(RUNTIME_TABLE.claude.upper, 'opus');
-  assert.equal(RUNTIME_TABLE.codex.player, 'gpt-6-luna');
+  assert.equal(RUNTIME_TABLE.codex.player, 'gpt-6.1-sol');
   assert.equal(RUNTIME_TABLE.codex.upper, 'gpt-6.1-sol');
   assert.equal(RUNTIME_TABLE.grok.player, 'grok-4.7');
   assert.deepEqual(RUNTIME_TABLE.claude.watchdog, { t1Ms: 25_000, t2Ms: 15_000 });
@@ -530,14 +537,14 @@ test('codex: no-tool prefix + --json, thread.started에서 세션 캡처, 최종
       '--disable', 'view_image', '--disable', 'hooks', '--disable', 'code_mode_host',
     ];
     assert.deepEqual(create.argv.slice(0, prefix.length), prefix);
-    assert.deepEqual(create.argv.slice(prefix.length), ['exec', '--ignore-user-config', '-m', 'gpt-6-luna', '--sandbox', 'read-only', '--skip-git-repo-check', '--json', '-']);
+    assert.deepEqual(create.argv.slice(prefix.length), [...CODEX_LOW, 'exec', '--ignore-user-config', '-m', 'gpt-6.1-sol', '--sandbox', 'read-only', '--skip-git-repo-check', '--json', '-']);
 
     const out = await f.rt.decide({ playerId: 'p1', sessionId, message: 'm', timeoutMs: 5000 });
     assert.equal(out.raw, '{"decisionId":"d1","action":"call"}');
     const resume = f.last();
     assert.deepEqual(resume.argv.slice(0, prefix.length), prefix);
     assert.deepEqual(resume.argv.slice(prefix.length), [
-      '-m', 'gpt-6-luna', '--sandbox', 'read-only', 'exec', 'resume', '--ignore-user-config', '--json', '--skip-git-repo-check', 'th-abc-123', '-',
+      ...CODEX_LOW, '-m', 'gpt-6.1-sol', '--sandbox', 'read-only', 'exec', 'resume', '--ignore-user-config', '--json', '--skip-git-repo-check', 'th-abc-123', '-',
     ]);
   } finally {
     f.cleanup();
@@ -679,8 +686,8 @@ test('probe(codex): --json JSONL fail-closed — 최종 agent_message가 없거�
     assert.equal(res.ok, false, 'plain 산문 스트림은 JSONL fail-closed에서 정상 응답이 아니다');
     assert.equal(res.containment, false);
     assert.deepEqual(plain.last().argv, [
-      ...prefix, 'exec', '--ignore-user-config', '-m', 'gpt-6-luna', '--sandbox', 'read-only', '--skip-git-repo-check', '--json', '-',
-    ], '컨테인먼트 probe argv는 생성과 같은 --json 형이다');
+      ...prefix, ...CODEX_LOW, 'exec', '--ignore-user-config', '-m', 'gpt-6.1-sol', '--sandbox', 'read-only', '--skip-git-repo-check', '--json', '-',
+    ], '컨테인먼트 probe argv는 생성과 같은 --json 형이고 플레이어 low effort를 싣는다');
   } finally {
     plain.cleanup();
   }
@@ -2689,9 +2696,9 @@ const GROK_MODELS_TEXT = [
   '  * grok-4.7 (default)', '  - grok-4.7-build-fast', '  - grok-4.6', '  - grok-4.5', '',
 ].join('\n');
 
-test('LATEST_MODEL_RULES: claude는 별칭(카탈로그 없음), codex는 luna/sol, grok은 기본 계열', () => {
+test('LATEST_MODEL_RULES: claude는 별칭(카탈로그 없음), codex는 두 tier 모두 sol, grok은 기본 계열', () => {
   assert.equal(LATEST_MODEL_RULES.claude, null);
-  assert.deepEqual({ ...LATEST_MODEL_RULES.codex }, { player: 'luna', upper: 'sol' });
+  assert.deepEqual({ ...LATEST_MODEL_RULES.codex }, { player: 'sol', upper: 'sol' });
   assert.deepEqual({ ...LATEST_MODEL_RULES.grok }, { player: 'grok', upper: 'grok' });
   for (const [kind, row] of Object.entries(RUNTIME_TABLE)) {
     assert.equal(isArgvSafeModelId(kind, row.player), true, `${kind} 폴백 player`);
@@ -2741,10 +2748,10 @@ test('latestGrokModel: 목록 줄의 순수 id 중 최신 — 접미사 변형·
   assert.equal(latestGrokModel(''), null);
 });
 
-test('codex 카탈로그: 첫 probe 직전 한 번 읽고 player=luna·upper=sol 최신을 모든 호출의 argv에 싣는다', async () => {
+test('codex 카탈로그: 첫 probe 직전 한 번 읽고 두 tier 모두 sol 최신을 고른다 — 더 새로운 luna가 있어도 플레이어는 luna로 돌아가지 않는다', async () => {
   const { file } = canary();
   const f = fakeRuntime('codex', {
-    matchers: [CODEX_WARMUP, { argvIncludes: 'debug', reply: codexCatalog(['gpt-7-luna'], ['gpt-7.2-sol'], ['gpt-6-luna'], ['gpt-6.1-sol']) }],
+    matchers: [CODEX_WARMUP, { argvIncludes: 'debug', reply: codexCatalog(['gpt-8-luna'], ['gpt-7.2-sol'], ['gpt-7-luna'], ['gpt-6.1-sol']) }],
     default: { reply: CODEX_REPLY_OK },
   });
   try {
@@ -2762,23 +2769,23 @@ test('codex 카탈로그: 첫 probe 직전 한 번 읽고 player=luna·upper=sol
     assert.equal(calls.indexOf(catalogCalls[0]), 0, '카탈로그가 첫 모델 호출보다 먼저다');
     const modelOf = (c) => c.argv[c.argv.indexOf('-m') + 1];
     const modelCalls = calls.filter((c) => !c.argv.includes('debug'));
-    assert.equal(modelOf(modelCalls[0]), 'gpt-7-luna');
-    assert.ok(modelCalls.slice(1).every((c) => modelOf(c) === 'gpt-7.2-sol'));
+    assert.ok(modelCalls.every((c) => modelOf(c) === 'gpt-7.2-sol'), modelCalls.map(modelOf).join());
     // 카탈로그 호출도 모델 호출과 같은 격리 cwd·env allowlist를 쓴다.
     assert.equal(catalogCalls[0].cwd, modelCalls[0].cwd);
     assert.deepEqual(catalogCalls[0].envKeys, modelCalls[0].envKeys);
     assert.deepEqual(f.rt.models, {
-      player: 'gpt-7-luna', upper: 'gpt-7.2-sol', source: { player: 'catalog', upper: 'catalog' },
+      player: 'gpt-7.2-sol', upper: 'gpt-7.2-sol', source: { player: 'catalog', upper: 'catalog' },
       replaced: { player: null, upper: null }, catalog: 'ok',
     });
     await f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 });
-    assert.equal(modelOf(f.last()), 'gpt-7-luna');
+    assert.equal(modelOf(f.last()), 'gpt-7.2-sol');
     await f.rt.decide({ playerId: 'p1', sessionId: 'th-latest-1', message: 'm', timeoutMs: 5000 });
-    assert.equal(f.last().argv[f.last().argv.indexOf('-m') + 1], 'gpt-7-luna');
+    assert.equal(modelOf(f.last()), 'gpt-7.2-sol');
     const coach = f.rt.oneshotStart({ tier: 'upper', prompt: '코치' });
     await coach.done;
     assert.equal(modelOf(f.last()), 'gpt-7.2-sol');
     assert.equal(f.calls().filter((c) => c.argv.includes('debug')).length, 1);
+    assert.equal(f.calls().some((c) => c.argv.some((a) => /luna/.test(a))), false, '어떤 호출도 luna를 싣지 않는다');
   } finally {
     f.cleanup();
   }
@@ -2789,7 +2796,8 @@ test('codex 카탈로그 실패(비정상 종료·깨진 출력·형식 위반)�
   const cases = [
     ['exit', { argvIncludes: 'debug', reply: '', exitCode: 2 }, 'error:EXIT_NONZERO'],
     ['garbage', { argvIncludes: 'debug', reply: 'not json at all' }, 'error:NO_MATCH'],
-    ['unsafe', { argvIncludes: 'debug', reply: codexCatalog(['gpt-7-luna --sandbox danger-full-access']) }, 'error:NO_MATCH'],
+    ['unsafe', { argvIncludes: 'debug', reply: codexCatalog(['gpt-7-sol --sandbox danger-full-access']) }, 'error:NO_MATCH'],
+    ['luna-only', { argvIncludes: 'debug', reply: codexCatalog(['gpt-7-luna'], ['gpt-6-luna']) }, 'error:NO_MATCH'],
   ];
   for (const [label, matcher, status] of cases) {
     const f = fakeRuntime('codex', { matchers: [matcher], default: { reply: CODEX_REPLY_OK } });
@@ -2797,7 +2805,7 @@ test('codex 카탈로그 실패(비정상 종료·깨진 출력·형식 위반)�
       const res = await f.rt.probe({ canaryAbsPath: file });
       assert.equal(res.containment, true, label);
       const probe = f.calls().find((c) => !c.argv.includes('debug'));
-      assert.equal(probe.argv[probe.argv.indexOf('-m') + 1], 'gpt-6-luna', label);
+      assert.equal(probe.argv[probe.argv.indexOf('-m') + 1], 'gpt-6.1-sol', label);
       assert.equal(f.rt.models.catalog, status, label);
       assert.deepEqual(f.rt.models.source, { player: 'fallback', upper: 'fallback' }, label);
     } finally {
@@ -2806,7 +2814,7 @@ test('codex 카탈로그 실패(비정상 종료·깨진 출력·형식 위반)�
   }
 });
 
-test('codex 카탈로그 일부만 찾으면 찾은 tier만 최신이고 나머지는 폴백', async () => {
+test('codex 카탈로그에 luna만 있으면 플레이어는 폴백 sol로 남는다 — 카탈로그가 조용히 luna로 되돌리지 못한다', async () => {
   const { file } = canary();
   const f = fakeRuntime('codex', {
     matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-7-luna']) }],
@@ -2814,23 +2822,25 @@ test('codex 카탈로그 일부만 찾으면 찾은 tier만 최신이고 나머�
   });
   try {
     await f.rt.probe({ canaryAbsPath: file });
-    assert.equal(f.rt.models.catalog, 'partial:player');
-    assert.equal(f.rt.models.player, 'gpt-7-luna');
+    assert.equal(f.rt.models.catalog, 'error:NO_MATCH');
+    assert.equal(f.rt.models.player, 'gpt-6.1-sol');
     assert.equal(f.rt.models.upper, 'gpt-6.1-sol');
-    assert.deepEqual(f.rt.models.source, { player: 'catalog', upper: 'fallback' });
+    assert.deepEqual(f.rt.models.source, { player: 'fallback', upper: 'fallback' });
+    const probe = f.calls().find((c) => !c.argv.includes('debug'));
+    assert.ok(probe.argv.includes('gpt-6.1-sol'));
+    assert.equal(probe.argv.some((a) => /luna/.test(a)), false);
   } finally {
     f.cleanup();
   }
 });
 
-test('probe: 카탈로그 모델이 정상 응답을 못 주면 폴백 고정값으로 한 번만 다시 돈다', async () => {
+test('probe: 카탈로그 모델이 정상 응답을 못 주면 폴백 고정값으로 한 번만 다시 돌고, 아직 검증 전인 같은 id의 upper도 함께 바뀐다', async () => {
   const { file } = canary();
   const f = fakeRuntime('codex', {
     matchers: [
       CODEX_WARMUP,
-      { argvIncludes: 'debug', reply: codexCatalog(['gpt-7-luna'], ['gpt-7-sol']) },
-      { argvIncludes: 'gpt-7-luna', reply: '', exitCode: 1 },
-      { argvIncludes: 'gpt-7-sol', reply: jsonl({ type: 'thread.started', thread_id: 'th-x' }) },
+      { argvIncludes: 'debug', reply: codexCatalog(['gpt-7-sol'], ['gpt-7-luna']) },
+      { argvIncludes: 'gpt-7-sol', reply: '', exitCode: 1 },
     ],
     default: { reply: CODEX_REPLY_OK },
   });
@@ -2842,11 +2852,12 @@ test('probe: 카탈로그 모델이 정상 응답을 못 주면 폴백 고정값
     const upper = await f.rt.probe({ upper: true, canaryAbsPath: file });
     assert.equal(upper.upper, true);
     const models = f.calls().filter((c) => !c.argv.includes('debug')).map((c) => c.argv[c.argv.indexOf('-m') + 1]);
-    assert.deepEqual(models, ['gpt-7-luna', 'gpt-6-luna', 'gpt-7-sol', 'gpt-6.1-sol', 'gpt-6.1-sol']);
+    assert.deepEqual(models, ['gpt-7-sol', 'gpt-6.1-sol', 'gpt-6.1-sol', 'gpt-6.1-sol']);
     assert.deepEqual(f.rt.models.source, { player: 'fallback', upper: 'fallback' });
-    assert.deepEqual(f.rt.models.replaced, { player: 'gpt-7-luna', upper: 'gpt-7-sol' });
+    assert.deepEqual(f.rt.models.replaced, { player: 'gpt-7-sol', upper: 'gpt-7-sol' });
     await f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 });
-    assert.equal(f.last().argv[f.last().argv.indexOf('-m') + 1], 'gpt-6-luna');
+    assert.equal(f.last().argv[f.last().argv.indexOf('-m') + 1], 'gpt-6.1-sol');
+    assert.ok(f.last().argv.join(' ').includes(CODEX_LOW.join(' ')), '폴백 재시도 뒤에도 플레이어 호출은 low effort다');
   } finally {
     f.cleanup();
   }
@@ -2855,14 +2866,14 @@ test('probe: 카탈로그 모델이 정상 응답을 못 주면 폴백 고정값
 test('probe: 폴백값도 실패하면 더 돌지 않고 부적격이다', async () => {
   const { file } = canary();
   const bothFail = fakeRuntime('codex', {
-    matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-7-luna']) }],
+    matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-7-sol']) }],
     default: { reply: '', exitCode: 1 },
   });
   try {
     const res = await bothFail.rt.probe({ canaryAbsPath: file });
     assert.equal(res.ok, false);
     const models = bothFail.calls().filter((c) => !c.argv.includes('debug')).map((c) => c.argv[c.argv.indexOf('-m') + 1]);
-    assert.deepEqual(models, ['gpt-7-luna', 'gpt-6-luna']);
+    assert.deepEqual(models, ['gpt-7-sol', 'gpt-6.1-sol']);
   } finally {
     bothFail.cleanup();
   }
@@ -2872,14 +2883,14 @@ test('probe: 컨테인먼트 실패(유출)는 폴백 근거가 아니다', asyn
   if (skipOnWin32(t, 'echoCanary matches a POSIX /path in stdin')) return;
   const { file } = canary();
   const leak = fakeRuntime('codex', {
-    matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-7-luna']) }],
+    matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-7-sol']) }],
     default: { reply: CODEX_REPLY_OK, echoCanary: true },
   });
   try {
     const res = await leak.rt.probe({ canaryAbsPath: file });
     assert.equal(res.containment, false);
     const models = leak.calls().filter((c) => c.argv.includes('-m')).map((c) => c.argv[c.argv.indexOf('-m') + 1]);
-    assert.deepEqual(models, ['gpt-7-luna'], '유출은 모델을 바꿔 재시도하지 않는다');
+    assert.deepEqual(models, ['gpt-7-sol'], '유출은 모델을 바꿔 재시도하지 않는다');
     assert.equal(leak.rt.models.source.player, 'catalog');
   } finally {
     leak.cleanup();
@@ -2961,26 +2972,27 @@ test('claude: 카탈로그를 부르지 않고 별칭을 싣되, probe 스트림
   }
 });
 
-test('재개 시 재해석: 어댑터마다 카탈로그를 새로 읽으므로 새 기동은 그 시점의 최신을 쓴다', async () => {
+test('재개 시 재해석: 어댑터마다 카탈로그를 새로 읽으므로 새 기동은 그 시점의 최신 sol을 쓴다', async () => {
   const { file } = canary();
   const before = fakeRuntime('codex', {
     matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-6-luna'], ['gpt-6.1-sol']) }],
     default: { reply: CODEX_REPLY_OK },
   });
   const after = fakeRuntime('codex', {
-    matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-6-luna'], ['gpt-7-luna'], ['gpt-6.1-sol']) }],
+    matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-6-luna'], ['gpt-8-luna'], ['gpt-6.1-sol'], ['gpt-7-sol']) }],
     default: { reply: CODEX_REPLY_OK },
   });
   try {
     await before.rt.probe({ canaryAbsPath: file });
     await after.rt.probe({ canaryAbsPath: file });
-    assert.equal(before.rt.models.player, 'gpt-6-luna');
-    assert.equal(after.rt.models.player, 'gpt-7-luna');
+    assert.equal(before.rt.models.player, 'gpt-6.1-sol');
+    assert.equal(after.rt.models.player, 'gpt-7-sol');
     // 이미 있는 세션도 새 어댑터의 모델로 이어진다(사용자 결정 U2).
     await after.rt.decide({ playerId: 'p1', sessionId: 'th-from-before', message: 'm', timeoutMs: 5000 });
     const resume = after.last();
-    assert.equal(resume.argv[resume.argv.indexOf('-m') + 1], 'gpt-7-luna');
+    assert.equal(resume.argv[resume.argv.indexOf('-m') + 1], 'gpt-7-sol');
     assert.ok(resume.argv.includes('th-from-before'));
+    assert.ok(resume.argv.join(' ').includes(CODEX_LOW.join(' ')), '재개된 세션의 결정도 low effort다');
   } finally {
     before.cleanup();
     after.cleanup();
@@ -3001,7 +3013,7 @@ test('카탈로그 자식의 종료를 확인하지 못하면 그 어댑터는 �
   const res = await rt.probe({ canaryAbsPath: file, timeoutMs: 50 });
   assert.equal(res.ok, false);
   assert.equal(res.containment, false);
-  assert.match(res.notice, /^플레이어 probe 실패\(codex\/gpt-6-luna\): CHILD_SIGNAL_FAILED$/);
+  assert.match(res.notice, /^플레이어 probe 실패\(codex\/gpt-6\.1-sol\): CHILD_SIGNAL_FAILED$/);
   assert.deepEqual(spawned, [['debug', 'models']], '모델 호출로 넘어가지 않는다');
   const upper = await rt.probe({ upper: true, canaryAbsPath: file, timeoutMs: 50 });
   assert.equal(upper.upper, false);
@@ -3020,14 +3032,14 @@ test('카탈로그 자식의 종료를 확인하지 못하면 그 어댑터는 �
 test('카탈로그 타임아웃이라도 종료가 확인되면 폴백 고정값으로 진행한다', async () => {
   const { file } = canary();
   const f = fakeRuntime('codex', {
-    matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-7-luna']), delayMs: 5_000 }],
+    matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-7-sol']), delayMs: 5_000 }],
     default: { reply: CODEX_REPLY_OK },
   });
   try {
     const res = await f.rt.probe({ canaryAbsPath: file, timeoutMs: 300 });
     assert.equal(res.containment, true);
     assert.equal(f.rt.models.catalog, 'error:TIMEOUT');
-    assert.equal(f.rt.models.player, 'gpt-6-luna');
+    assert.equal(f.rt.models.player, 'gpt-6.1-sol');
     assert.deepEqual(f.kills, ['SIGKILL']);
   } finally {
     f.cleanup();
@@ -3048,7 +3060,8 @@ test('probe(upper): 카나리 호출이 유출 없이 정상 응답을 못 줘�
     assert.equal(res.upper, true);
     const models = f.calls().filter((c) => !c.argv.includes('debug')).map((c) => c.argv[c.argv.indexOf('-m') + 1]);
     assert.deepEqual(models, ['gpt-7-sol', 'gpt-7-sol', 'gpt-6.1-sol', 'gpt-6.1-sol']);
-    assert.deepEqual(f.rt.models.replaced, { player: null, upper: 'gpt-7-sol' });
+    // The player tier shares the Sol catalog id and is unverified here, so it moves to the fallback too.
+    assert.deepEqual(f.rt.models.replaced, { player: 'gpt-7-sol', upper: 'gpt-7-sol' });
   } finally {
     f.cleanup();
   }
@@ -3373,7 +3386,7 @@ test('grok: upper 카나리 호출이 턴 없이 실패해도 카나리가 새�
   }
 });
 
-test('codex 상위 tier(probe-upper·oneshot upper)만 model_reasoning_effort="medium"을 exec 앞에 싣고, 플레이어 호출은 싣지 않는다', async () => {
+test('codex: 플레이어 경로(probe·create·resume·oneshot)는 전부 low, 상위 경로(probe-upper·oneshot)는 medium — 두 tier가 같은 모델 id여도 호출 목적으로 구분한다', async () => {
   const { file } = canary();
   const f = fakeRuntime('codex', { matchers: [CODEX_WARMUP], default: { reply: CODEX_REPLY_OK } });
   try {
@@ -3383,20 +3396,31 @@ test('codex 상위 tier(probe-upper·oneshot upper)만 model_reasoning_effort="m
     await f.rt.decide({ playerId: 'p1', sessionId, message: 'm', timeoutMs: 5000 });
     await f.rt.oneshotStart({ tier: 'upper', prompt: '코치' }).done;
     await f.rt.oneshotStart({ tier: 'player', prompt: '플레이어 단발' }).done;
-    const effortAt = (argv) => argv.findIndex((a, i) => a === '-c' && argv[i + 1] === 'model_reasoning_effort="medium"');
+    const effortArgs = (argv) => argv.flatMap((a, i) => (
+      a === '-c' && /^model_reasoning_effort=/.test(argv[i + 1] ?? '') ? [argv[i + 1]] : []));
     const modelOf = (argv) => argv[argv.indexOf('-m') + 1];
     const calls = f.calls().filter((c) => !c.argv.includes('debug'));
-    const upper = calls.filter((c) => modelOf(c.argv) === 'gpt-6.1-sol');
-    const player = calls.filter((c) => modelOf(c.argv) === 'gpt-6-luna');
-    assert.equal(upper.length, 3, 'probe-upper 왕복 2회 + 코치 oneshot 1회');
-    assert.equal(player.length, 4, 'probe + warmup + decide(resume) + 플레이어 oneshot');
-    for (const { argv } of upper) {
-      const at = effortAt(argv);
-      assert.ok(at > 0, `상위 호출에 effort가 없다: ${argv.join(' ')}`);
-      assert.ok(at < argv.indexOf('exec'), 'effort는 전역 옵션이라 exec 앞이다');
-      assert.equal(argv.filter((a) => a === 'model_reasoning_effort="medium"').length, 1);
-    }
-    for (const { argv } of player) assert.equal(effortAt(argv), -1, `플레이어 호출에 effort가 실렸다: ${argv.join(' ')}`);
+    // 호출 순서와 stdin이 목적을 고정한다: 모델 id는 두 tier가 같다.
+    const plan = [
+      ['플레이어 probe', (c) => c.stdin.includes(path.basename(file)), 'low', 'exec'],
+      ['상위 probe 1', (c) => c.stdin.startsWith('ok 한 단어만'), 'medium', 'exec'],
+      ['상위 probe 2(fresh 카나리)', (c) => c.stdin.includes('canary-upper-'), 'medium', 'exec'],
+      ['warmup(create)', (c) => c.stdin === '페르소나', 'low', 'exec'],
+      ['decide(resume)', (c) => c.stdin === 'm', 'low', 'resume'],
+      ['코치 oneshot(upper)', (c) => c.stdin === '코치', 'medium', 'exec'],
+      ['플레이어 oneshot', (c) => c.stdin === '플레이어 단발', 'low', 'exec'],
+    ];
+    assert.equal(calls.length, plan.length);
+    assert.equal(new Set(calls.map((c) => modelOf(c.argv))).size, 1, '두 tier는 같은 모델 id다');
+    assert.equal(modelOf(calls[0].argv), 'gpt-6.1-sol');
+    plan.forEach(([label, matches, effort, kindOfExec], index) => {
+      const { argv } = calls[index];
+      assert.ok(matches(calls[index]), `${label}: 호출 순서/입력이 어긋났다`);
+      assert.deepEqual(effortArgs(argv), [`model_reasoning_effort="${effort}"`], `${label}: effort ${argv.join(' ')}`);
+      const at = argv.findIndex((a, i) => a === '-c' && argv[i + 1] === `model_reasoning_effort="${effort}"`);
+      assert.ok(at < argv.indexOf('exec'), `${label}: effort는 전역 옵션이라 exec 앞이다`);
+      assert.equal(argv.includes('resume'), kindOfExec === 'resume', label);
+    });
   } finally {
     f.cleanup();
   }
@@ -3416,6 +3440,127 @@ test('oneshotStart reasoning: model-default면 상위 tier 인자 없이 모델 
       assert.throws(() => f.rt.oneshotStart({ tier: 'upper', prompt: 'x', reasoning: bad }), { code: 'BAD_REASONING' });
     }
     assert.equal(f.calls().length, before, '거부된 값은 자식을 띄우지 않는다');
+  } finally {
+    f.cleanup();
+  }
+});
+
+// ── 벤치마크 전용 어댑터 로컬 핀 ──────────────────────────────────────────────
+
+test('benchmarkPlayerPin: 닫힌 모델·effort 목록만 통과하고 그 밖의 값·키·런타임은 거부한다', () => {
+  assert.deepEqual([...BENCHMARK_PIN_MODELS.codex], ['gpt-6-luna', 'gpt-6.1-sol']);
+  assert.deepEqual(Object.keys(BENCHMARK_PIN_EFFORTS), ['model-default', 'low', 'medium']);
+  const ok = benchmarkPlayerPin('codex', { model: 'gpt-6-luna', effort: 'model-default' });
+  assert.deepEqual({ ...ok, playerArgs: [...ok.playerArgs] }, { kind: 'codex', model: 'gpt-6-luna', effort: 'model-default', playerArgs: [] });
+  assert.ok(Object.isFrozen(ok));
+  assert.deepEqual([...benchmarkPlayerPin('codex', { model: 'gpt-6.1-sol', effort: 'low' }).playerArgs], CODEX_LOW);
+  const bad = [
+    ['codex', { model: 'gpt-7-luna', effort: 'low' }], ['codex', { model: 'gpt-6-luna --sandbox danger-full-access', effort: 'low' }],
+    ['codex', { model: 'gpt-6.1-sol', effort: 'high' }], ['codex', { model: 'gpt-6.1-sol', effort: 'low"; x' }],
+    ['codex', { model: 'gpt-6.1-sol', effort: '__proto__' }], ['codex', { model: 'gpt-6.1-sol' }],
+    ['codex', { model: 'gpt-6.1-sol', effort: 'low', extra: 1 }], ['codex', null], ['codex', []],
+    ['claude', { model: 'gpt-6.1-sol', effort: 'low' }], ['grok', { model: 'gpt-6.1-sol', effort: 'low' }],
+    ['__proto__', { model: 'gpt-6.1-sol', effort: 'low' }],
+  ];
+  for (const [kind, spec] of bad) {
+    assert.throws(() => benchmarkPlayerPin(kind, spec), (error) => error.code === 'BAD_BENCHMARK_PIN' && !error.message.includes('danger'), JSON.stringify([kind, spec]));
+  }
+});
+
+test('createPlayerRuntime: 검증기를 거치지 않은 benchmarkPin(평범한 객체·복제본·다른 런타임용)은 자식을 띄우기 전에 거부한다', () => {
+  const spawned = [];
+  const exec = (spec) => { spawned.push(spec.args); throw new Error('spawn 금지'); };
+  const real = benchmarkPlayerPin('codex', { model: 'gpt-6-luna', effort: 'model-default' });
+  const forged = [
+    { kind: 'codex', model: 'gpt-6-luna', effort: 'model-default', playerArgs: [] },
+    { ...real }, structuredClone(real), 'gpt-6-luna', 7,
+    { kind: 'codex', model: 'gpt-6-luna --sandbox danger-full-access', effort: 'low', playerArgs: ['--dangerously-bypass-approvals-and-sandbox'] },
+  ];
+  for (const pin of forged) {
+    assert.throws(() => createPlayerRuntime('codex', { exec, benchmarkPin: pin }), { code: 'BAD_BENCHMARK_PIN' });
+  }
+  assert.throws(() => createPlayerRuntime('claude', { exec, benchmarkPin: real }), { code: 'BAD_BENCHMARK_PIN' }, '다른 런타임에는 쓸 수 없다');
+  assert.deepEqual(spawned, []);
+  assert.doesNotThrow(() => createPlayerRuntime('codex', { exec, benchmarkPin: real }));
+  assert.doesNotThrow(() => createPlayerRuntime('codex', { exec, benchmarkPin: null }), '핀 없음은 운영 경로다');
+});
+
+test('benchmarkPin luna/model-default: 모든 플레이어 경로가 luna 하나만 싣고 effort 인자는 없으며, 카탈로그를 읽지 않는다', async () => {
+  const { file } = canary();
+  const pin = benchmarkPlayerPin('codex', { model: 'gpt-6-luna', effort: 'model-default' });
+  const f = fakeRuntime('codex', {
+    matchers: [CODEX_WARMUP, { argvIncludes: 'debug', reply: codexCatalog(['gpt-9-sol']) }],
+    default: { reply: CODEX_REPLY_OK },
+  }, { benchmarkPin: pin });
+  try {
+    assert.deepEqual(f.rt.models.source, { player: 'pinned', upper: 'fallback' });
+    assert.equal(f.rt.models.player, 'gpt-6-luna');
+    const probe = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(probe.containment, true);
+    const { sessionId } = await f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 });
+    await f.rt.decide({ playerId: 'p1', sessionId, message: 'm', timeoutMs: 5000 });
+    await f.rt.oneshotStart({ tier: 'player', prompt: '단발' }).done;
+    const calls = f.calls();
+    assert.equal(calls.length, 4, '카탈로그 호출 없이 probe·create·resume·oneshot 네 번');
+    for (const { argv } of calls) {
+      assert.equal(argv[argv.indexOf('-m') + 1], 'gpt-6-luna');
+      assert.equal(argv.filter((a) => a === '-m').length, 1);
+      assert.equal(argv.some((a) => a.startsWith('model_reasoning_effort=')), false, argv.join(' '));
+      assert.ok(argv.includes('--sandbox') && argv.includes('mcp_servers={}'), '컨테인먼트 argv는 그대로다');
+    }
+    assert.equal(f.rt.models.source.player, 'pinned');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('benchmarkPin sol/low: 모든 플레이어 경로가 low 하나를 싣고, 핀 된 모델은 폴백 재시도로 바뀌지 않는다', async () => {
+  const { file } = canary();
+  const pin = benchmarkPlayerPin('codex', { model: 'gpt-6.1-sol', effort: 'low' });
+  const ok = fakeRuntime('codex', { matchers: [CODEX_WARMUP], default: { reply: CODEX_REPLY_OK } }, { benchmarkPin: pin });
+  try {
+    await ok.rt.probe({ canaryAbsPath: file });
+    const { sessionId } = await ok.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 5000 });
+    await ok.rt.decide({ playerId: 'p1', sessionId, message: 'm', timeoutMs: 5000 });
+    await ok.rt.oneshotStart({ tier: 'player', prompt: '단발' }).done;
+    assert.equal(ok.calls().length, 4);
+    for (const { argv } of ok.calls()) {
+      assert.equal(argv[argv.indexOf('-m') + 1], 'gpt-6.1-sol');
+      assert.deepEqual(argv.filter((a) => a.startsWith('model_reasoning_effort=')), ['model_reasoning_effort="low"']);
+    }
+  } finally {
+    ok.cleanup();
+  }
+  const failing = fakeRuntime('codex', { default: { reply: '', exitCode: 1 } }, { benchmarkPin: pin });
+  try {
+    const res = await failing.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, false);
+    assert.equal(failing.calls().length, 1, '핀 된 모델은 폴백 모델로 다시 돌지 않는다');
+    assert.equal(failing.rt.models.source.player, 'pinned');
+    assert.equal(failing.rt.models.player, 'gpt-6.1-sol');
+  } finally {
+    failing.cleanup();
+  }
+});
+
+test('benchmarkPin은 플레이어 tier에만 적용된다 — 상위 probe·단발은 카탈로그 Sol/medium 그대로다', async () => {
+  const { file } = canary();
+  const pin = benchmarkPlayerPin('codex', { model: 'gpt-6-luna', effort: 'model-default' });
+  const f = fakeRuntime('codex', {
+    matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-7-sol'], ['gpt-9-luna']) }],
+    default: { reply: CODEX_REPLY_OK },
+  }, { benchmarkPin: pin });
+  try {
+    const upper = await f.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(upper.upper, true);
+    await f.rt.oneshotStart({ tier: 'upper', prompt: '코치' }).done;
+    await f.rt.oneshotStart({ tier: 'player', prompt: '단발' }).done;
+    const calls = f.calls().filter((c) => !c.argv.includes('debug'));
+    const modelOf = (c) => c.argv[c.argv.indexOf('-m') + 1];
+    assert.deepEqual(calls.map(modelOf), ['gpt-7-sol', 'gpt-7-sol', 'gpt-7-sol', 'gpt-6-luna']);
+    assert.deepEqual(calls.map((c) => c.argv.includes('model_reasoning_effort="medium"')), [true, true, true, false]);
+    assert.equal(f.rt.models.catalog, 'ok');
+    assert.deepEqual(f.rt.models.source, { player: 'pinned', upper: 'catalog' });
   } finally {
     f.cleanup();
   }

@@ -38,9 +38,12 @@ export { provisionRuntimeHome, verifyRuntimeHome } from './runtime-home.js';
 // `upperArgs`는 상위 tier(코치·evaluator·종합자)의 probe-upper·oneshot에만 실린다. codex는
 // `--ignore-user-config`라 effort를 주지 않으면 CLI가 `reasoning effort: none`(모델 기본값)으로 부른다 —
 // 상위 tier는 medium으로 고정한다(2026-10-13 사용자 결정, codex-cli 0.162.1에서 배너로 적용 확인).
+// codex 플레이어도 같은 이유로 effort를 명시한다: Sol 계열에 low를 고정해 probe·create·resume·단발 호출이
+// 모두 같은 추론 강도를 쓴다. 플레이어와 상위가 같은 모델 id가 되므로 tier는 id가 아니라 이 인자로 갈린다.
+// 운영 기본값일 뿐 포커 실력이 더 낫다는 주장이 아니다(비교 도구: tools/compare-codex-players.js).
 export const RUNTIME_TABLE = {
   claude: { player: 'sonnet', playerArgs: ['--effort', 'medium'], upper: 'opus', upperArgs: [], watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
-  codex: { player: 'gpt-6-luna', playerArgs: [], upper: 'gpt-6.1-sol', upperArgs: ['-c', 'model_reasoning_effort="medium"'], watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
+  codex: { player: 'gpt-6.1-sol', playerArgs: ['-c', 'model_reasoning_effort="low"'], upper: 'gpt-6.1-sol', upperArgs: ['-c', 'model_reasoning_effort="medium"'], watchdog: { t1Ms: 25_000, t2Ms: 15_000 } },
   // Task 0: low effort 핀이 실패했다(기본 effort 유지) → 스펙 D8의 60s/30s를 그대로 쓴다.
   grok: { player: 'grok-4.7', playerArgs: [], upper: 'grok-4.7', upperArgs: [], watchdog: { t1Ms: 60_000, t2Ms: 30_000 } },
 };
@@ -48,7 +51,7 @@ export const RUNTIME_TABLE = {
 // 카탈로그에서 찾을 계열. claude는 별칭(`sonnet`·`opus`)이 이미 최신으로 풀리므로 카탈로그를 부르지 않는다.
 export const LATEST_MODEL_RULES = Object.freeze({
   claude: null,
-  codex: Object.freeze({ player: 'luna', upper: 'sol' }),
+  codex: Object.freeze({ player: 'sol', upper: 'sol' }),
   grok: Object.freeze({ player: 'grok', upper: 'grok' }),
 });
 
@@ -98,6 +101,33 @@ export function latestGrokModel(stdout) {
     if (!best || newerVersion(version, best.version)) best = { id: match[1], version };
   }
   return best?.id ?? null;
+}
+
+// ── 벤치마크 전용 어댑터 로컬 핀 ─────────────────────────────────────────────
+// `tools/compare-codex-players.js`가 옛 Luna/모델 기본값과 Sol/low를 같은 컨테인먼트로 나란히 재기 위한
+// 읽기 전용 옵션이다. 운영 모델 선택(카탈로그 → Sol)은 그대로이고, 이 핀은 `createPlayerRuntime`의
+// `benchmarkPin` 옵션으로만 들어간다 — argv를 가로채 모델을 바꾸는 길은 없다. 핀은 이 함수가 닫힌 목록
+// (모델·effort)으로 검증해 낸 동결 객체뿐이며, 평범한 객체나 설정 JSON은 어댑터가 받지 않는다.
+// 핀은 플레이어 tier에만 적용된다(상위 tier·카탈로그·폴백은 그대로). 폴백 재시도도 핀을 바꾸지 않는다.
+export const BENCHMARK_PIN_MODELS = Object.freeze({ codex: Object.freeze(['gpt-6-luna', 'gpt-6.1-sol']) });
+export const BENCHMARK_PIN_EFFORTS = Object.freeze({
+  'model-default': Object.freeze([]),
+  low: Object.freeze(['-c', 'model_reasoning_effort="low"']),
+  medium: Object.freeze(['-c', 'model_reasoning_effort="medium"']),
+});
+const validatedBenchmarkPins = new WeakSet();
+export function benchmarkPlayerPin(kind, spec) {
+  const fail = (what) => { throw runtimeError('BAD_BENCHMARK_PIN', `BAD_BENCHMARK_PIN: ${what}`); };
+  if (!Object.hasOwn(BENCHMARK_PIN_MODELS, kind)) fail('이 런타임은 벤치마크 핀을 지원하지 않습니다.');
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)
+    || Object.keys(spec).some((key) => key !== 'model' && key !== 'effort')) fail('model·effort 두 키만 받습니다.');
+  if (!BENCHMARK_PIN_MODELS[kind].includes(spec.model)) fail('허용 목록 밖의 모델입니다.');
+  if (typeof spec.effort !== 'string' || !Object.hasOwn(BENCHMARK_PIN_EFFORTS, spec.effort)) fail('허용 목록 밖의 effort입니다.');
+  const pin = Object.freeze({
+    kind, model: spec.model, effort: spec.effort, playerArgs: Object.freeze([...BENCHMARK_PIN_EFFORTS[spec.effort]]),
+  });
+  validatedBenchmarkPins.add(pin);
+  return pin;
 }
 
 export const SESSION_ID_MAX_LENGTH = 128;
@@ -826,6 +856,12 @@ export function createPlayerRuntime(kind, opts = {}) {
   let grokLockRoot = null;
   let grokBinary = null;
   const verification = { inspect: false, player: null, upper: null };
+  // 벤치마크 핀(위 `benchmarkPlayerPin`)이 검증한 객체만 받는다. 그 외 값은 생성 단계에서 거부한다.
+  const benchmarkPin = opts.benchmarkPin ?? null;
+  if (benchmarkPin !== null && (!validatedBenchmarkPins.has(benchmarkPin) || benchmarkPin.kind !== kind)) {
+    throw runtimeError('BAD_BENCHMARK_PIN', 'BAD_BENCHMARK_PIN: 검증된 벤치마크 핀이 아닙니다.');
+  }
+  const playerArgs = benchmarkPin ? [...benchmarkPin.playerArgs] : [...table.playerArgs];
   // 이 어댑터가 argv에 싣는 모델. 어댑터는 기동(시작·재개)마다 새로 만들어지므로 재개하면
   // 그 시점의 최신으로 다시 풀린다. served는 CLI가 실제로 서빙한 id(claude 별칭)다.
   const latestRules = LATEST_MODEL_RULES[kind] ?? null;
@@ -833,6 +869,10 @@ export function createPlayerRuntime(kind, opts = {}) {
   const fallbackModels = Object.freeze({ player: table.player, upper: table.upper });
   const models = { ...fallbackModels };
   const modelSource = { player: latestRules ? 'fallback' : 'alias', upper: latestRules ? 'fallback' : 'alias' };
+  if (benchmarkPin) {
+    models.player = benchmarkPin.model;
+    modelSource.player = 'pinned';
+  }
   const servedModels = { player: null, upper: null };
   const replacedModels = { player: null, upper: null };
   let catalogStatus = latestRules ? 'pending' : 'not-applicable';
@@ -1179,13 +1219,15 @@ export function createPlayerRuntime(kind, opts = {}) {
     }
     const found = [];
     for (const tier of ['player', 'upper']) {
+      if (modelSource[tier] === 'pinned') continue;
       const id = kind === 'codex' ? latestCodexModel(result.stdout, latestRules[tier]) : latestGrokModel(result.stdout);
       if (!isArgvSafeModelId(kind, id)) continue;
       models[tier] = id;
       modelSource[tier] = 'catalog';
       found.push(tier);
     }
-    catalogStatus = found.length === 2 ? 'ok' : (found.length === 0 ? 'error:NO_MATCH' : `partial:${found.join(',')}`);
+    const wanted = benchmarkPin ? 1 : 2;
+    catalogStatus = found.length === wanted ? 'ok' : (found.length === 0 ? 'error:NO_MATCH' : `partial:${found.join(',')}`);
   }
 
   // 카탈로그로 고른 id의 왕복이 실패하면 그 tier를 폴백 고정값으로 바꾼다. 같은 id를 쓰는 다른 tier는
@@ -1388,12 +1430,13 @@ export function createPlayerRuntime(kind, opts = {}) {
         };
       }
     }
-    await ensureModels(timeoutMs);
+    // 핀 된 플레이어는 카탈로그 없이 고정 모델로 돈다 — 벤치마크가 카탈로그 호출을 늘리지 않는다.
+    if (!benchmarkPin) await ensureModels(timeoutMs);
     if (catalogUnsettled) return catalogUnsettledResult('player', started);
     const model = models.player;
     let result;
     try {
-      result = await runOnce({ purpose: 'probe', model, modelArgs: table.playerArgs, input: canaryPrompt(canaryAbsPath, kind), timeoutMs });
+      result = await runOnce({ purpose: 'probe', model, modelArgs: playerArgs, input: canaryPrompt(canaryAbsPath, kind), timeoutMs });
     } catch (error) {
       verification.player = false;
       return {
@@ -1438,7 +1481,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       }
       let resume;
       try {
-        resume = await runOnce({ purpose: 'resume', model, modelArgs: table.playerArgs, sessionId: spawnedId, input: canaryPrompt(canaryAbsPath, kind), timeoutMs });
+        resume = await runOnce({ purpose: 'resume', model, modelArgs: playerArgs, sessionId: spawnedId, input: canaryPrompt(canaryAbsPath, kind), timeoutMs });
       } catch (error) {
         verification.player = false;
         return {
@@ -1554,7 +1597,7 @@ export function createPlayerRuntime(kind, opts = {}) {
         assertGrokVerified('player');
       }
       const sessionId = runtime.newSessionId();
-      const result = await runOnce({ purpose: 'create', model: models.player, modelArgs: table.playerArgs, sessionId, input: prompt, timeoutMs, signal });
+      const result = await runOnce({ purpose: 'create', model: models.player, modelArgs: playerArgs, sessionId, input: prompt, timeoutMs, signal });
       if (result.code !== 0) {
         throw runtimeError('CLI_FAILED', `CLI_FAILED: ${kind} 세션 생성이 실패했습니다.`, { playerId, exitCode: result.code, signal: result.signal });
       }
@@ -1584,7 +1627,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       if (!isArgvSafeSessionId(sessionId)) {
         throw runtimeError('INVALID_SESSION_ID', 'INVALID_SESSION_ID: 안전하지 않은 세션 id로 결정을 요청할 수 없습니다.', { playerId });
       }
-      const result = await runOnce({ purpose: 'resume', model: models.player, modelArgs: table.playerArgs, sessionId, input: message, timeoutMs, signal });
+      const result = await runOnce({ purpose: 'resume', model: models.player, modelArgs: playerArgs, sessionId, input: message, timeoutMs, signal });
       const raw = parseResponse(result.format, result.stdout);
       if (result.code !== 0 || !raw) {
         throw runtimeError('CLI_FAILED', `CLI_FAILED: ${kind} 결정 호출이 실패했습니다.`, { playerId, exitCode: result.code, signal: result.signal });
@@ -1607,7 +1650,7 @@ export function createPlayerRuntime(kind, opts = {}) {
         assertGrokVerified(tier);
       }
       const model = models[tier];
-      const tierArgs = tier === 'player' ? table.playerArgs : table.upperArgs;
+      const tierArgs = tier === 'player' ? playerArgs : table.upperArgs;
       const { handle, format } = start({ purpose: 'oneshot', model, modelArgs: reasoning === 'model-default' ? [] : tierArgs, input: prompt });
       const pid = handle.pid ?? null;
       const startTime = pid === null ? null : (startTimeOf(pid) ?? null);

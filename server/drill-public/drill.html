@@ -26,6 +26,21 @@
         <h1 id="study-title" class="ui-h1">다음 선택을 위한 연습</h1>
         <p class="ui-muted">한 가지 상황을 이해하고 다시 선택해 보세요. 게임이 끝난 뒤에도 이어갈 수 있습니다.</p>
       </div>
+      <section id="next-step" class="next-step" aria-labelledby="next-step-eyebrow" data-state="loading">
+        <h2 id="next-step-eyebrow" class="next-step-eyebrow">다음 단계 제안</h2>
+        <p id="next-step-title" class="next-step-title">학습 요약을 확인하고 있습니다…</p>
+        <p id="next-step-detail" class="next-step-detail"></p>
+        <ul id="next-step-notes" class="next-step-notes" hidden></ul>
+        <div id="next-step-coverage" class="next-step-coverage" hidden><p id="next-step-coverage-text"></p><p id="next-step-coverage-suggestion"></p></div>
+        <div id="next-step-after" class="next-step-after" hidden>
+          <p id="next-step-after-title" class="next-step-after-title"></p>
+          <p id="next-step-variation"></p>
+          <p id="next-step-retest"></p>
+          <div id="next-step-choices" class="next-step-choices"></div>
+        </div>
+        <div class="next-step-row"><button id="next-step-start" class="ui-btn ui-btn--primary" type="button" disabled>다음 단계 시작</button><p id="next-step-gate" class="next-step-gate" role="status"></p></div>
+        <p class="next-step-fine">제안은 요약 기록에서 계산한 참고입니다. 버튼을 눌러야만 시작하며, 진행 중인 연습은 바꾸지 않습니다.</p>
+      </section>
       <div class="mode-controls">
         <div class="ui-field mode-field">
           <label class="ui-label" for="mode">연습 모드</label>
