@@ -6,6 +6,7 @@ import {createOwnedTempDir} from './helpers/owned-fixtures.mjs';
 import {startAppServer} from '../tools/app-server.js';
 import {createRoomManager} from '../tools/room-manager.js';
 import {createGame, startHand, applyAction, legalFor} from '../engine/hand.js';
+import {writeJsonAtomic} from '../engine/state.js';
 import {hudFromState, revealFromPlayers} from '../tools/host-insights.js';
 
 const gameId='00000000-0000-4000-8000-000000000019',epoch='cd'.repeat(32);
@@ -37,7 +38,8 @@ async function fixture(t) {
     {playerId:'p2',name:'Bob',archetype:'Nit'},
   ]));
   let phase='playing';
-  const writeLoop=()=>fs.writeFileSync(path.join(root,'loop-state.json'),JSON.stringify({phase,lastPublishId:0}));
+  // Match the producer's atomic commit: equal-length phases can share timestamps.
+  const writeLoop=()=>writeJsonAtomic(path.join(root,'loop-state.json'),{phase,lastPublishId:0});
   writeLoop();
   const manager={room,current:{gameId,sessionDir:root},snapshot:()=>({gameId,gameEpoch:epoch,state:'playing'})};
   const app=await startAppServer({manager,token:'host',storeDir:root,publicPort:0});t.after(()=>app.close());

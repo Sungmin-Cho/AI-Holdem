@@ -93,8 +93,10 @@ const isSafeFile = (stat) => stat.isFile() && !stat.isSymbolicLink() && stat.nli
 const isUnlinked = (stat) => stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 0;
 const sameLeaf = (a, b) => ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].every((key) => a[key] === b[key]);
 
-// The leaf was seen mid-replace: busy when the path now names a safe file, otherwise refused.
-const replacedLeaf = (current) => (current && isSafeFile(current) ? busy() : unavailable());
+// A second atomic replacement can unlink the next regular inode before our
+// recheck too. Both observations mean retry; neither is permission to read or
+// return those bytes. Missing paths, special files and multiple links still fail.
+const replacedLeaf = (current) => (current && (isSafeFile(current) || isUnlinked(current)) ? busy() : unavailable());
 
 function takeBudget(budget, bytes) {
   if (!budget) return;
@@ -415,6 +417,13 @@ export function createReplayLibrary(storeDir, options = {}) {
     }
   }
 
+  function replacementError(root, dirNames, chain, leaf) {
+    const current = lstatOrNull(leaf);
+    const after = inspectChain(root, dirNames);
+    if (after.missing || !sameChain(chain, after)) return unavailable();
+    return replacedLeaf(current);
+  }
+
   // Inspect-open-reinspect around openContained. A leaf that was atomically
   // replaced while its ancestors stayed put is a busy retry (the engine's own
   // saveState does exactly that); anything unsafe stays an unavailable refusal and
@@ -425,7 +434,7 @@ export function createReplayLibrary(storeDir, options = {}) {
     const leaf = path.join(root, ...dirNames, fileName);
     const before = lstatOrNull(leaf);
     if (!before) return null;
-    if (isUnlinked(before)) throw replacedLeaf(lstatOrNull(leaf));
+    if (isUnlinked(before)) throw replacementError(root, dirNames, chain, leaf);
     if (!isSafeFile(before)) throw unavailable();
     if (before.size > maxBytes) throw overLimit();
     const remaining = budget ? budget.limit - budget.used : maxBytes;
@@ -443,12 +452,16 @@ export function createReplayLibrary(storeDir, options = {}) {
     const after = inspectChain(root, dirNames);
     if (after.missing || !sameChain(chain, after)) throw unavailable();
     const now = lstatOrNull(leaf);
-    if (now && isUnlinked(now)) throw replacedLeaf(lstatOrNull(leaf));
+    if (now && isUnlinked(now)) throw replacementError(root, dirNames, chain, leaf);
     if (failure) {
       if (failure.code === 'ENOENT') {
         if (!now) return null;
         throw isSafeFile(now) ? busy() : unavailable();
       }
+      // The contained opener can observe an intermediate replacement even when
+      // our outer stats match (inode/metadata reuse). It returned no bytes; retry
+      // only after the current leaf and its original ancestors passed inspection.
+      if (failure.code === 'UNSAFE_PATH' && now && isSafeFile(now)) throw now.size > maxBytes ? overLimit() : busy();
       if (now && isSafeFile(now) && !sameLeaf(before, now)) throw now.size > maxBytes ? overLimit() : busy();
       throw failure.code === 'TOO_LARGE' ? overLimit() : unavailable();
     }
@@ -515,7 +528,11 @@ export function createReplayLibrary(storeDir, options = {}) {
           continue;
         }
         const state = lstatOrNull(path.join(sessionsPath, gameId, 'state.json'));
-        if (state && isUnlinked(state)) found.push({ gameId, savedAtMs: null, code: replacedLeaf(lstatOrNull(path.join(sessionsPath, gameId, 'state.json'))).code });
+        if (state && isUnlinked(state)) {
+          const names = [CATALOG, SESSIONS, gameId];
+          const sessionChain = { ids: [...chain.ids, `${session.dev}:${session.ino}`] };
+          found.push({ gameId, savedAtMs: null, code: replacementError(root, names, sessionChain, path.join(sessionsPath, gameId, 'state.json')).code });
+        }
         else if (!state || !isSafeFile(state)) found.push({ gameId, savedAtMs: null, code: 'REPLAY_UNAVAILABLE' });
         else if (state.size > STATE_BYTES) found.push({ gameId, savedAtMs: state.mtimeMs, code: 'REPLAY_LIMIT_EXCEEDED' });
         else found.push({ gameId, savedAtMs: state.mtimeMs, code: null });

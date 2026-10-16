@@ -1136,9 +1136,134 @@ test('lstat naming an already-unlinked inode (nlink 0, seen mid-rename on macOS)
   const vanishing = (file) => {
     const stat = fs.lstatSync(file);
     if (path.basename(file) !== 'hand-0002.json') return stat;
+    fs.unlinkSync(file);
     return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { nlink: 0 });
   };
   await rejectCode(library(store, { lstat: vanishing }).lib.readHand(game.gameId, 2), 'REPLAY_UNAVAILABLE');
+});
+
+test('consecutive atomic replacements remain busy when both observations see unlinked regular inodes', async () => {
+  const store = makeStore();
+  const game = buildGame(store, { hands: 2, seed: 202 });
+  const requests = [
+    { file: STATE_FILE, run: (lib) => rejectCode(lib.readHand(game.gameId, 2), 'REPLAY_BUSY') },
+    { file: STATE_FILE, run: (lib) => rejectCode(lib.listHands(game.gameId), 'REPLAY_BUSY') },
+    { file: STATE_FILE, run: async (lib) => assert.equal((await lib.listGames()).games[0].unavailableCode, 'REPLAY_BUSY') },
+    { file: 'hand-0002.json', run: (lib) => rejectCode(lib.readHand(game.gameId, 2), 'REPLAY_BUSY') },
+    { file: 'hand-0002.json', run: async (lib) => assert.equal((await lib.listHands(game.gameId)).hands[1].unavailableCode, 'REPLAY_BUSY') },
+  ];
+  for (const { file: fileName, run } of requests) for (const phase of ['before', 'after']) {
+    let read = false;
+    const lstat = (file) => {
+      const stat = fs.lstatSync(file);
+      if (path.basename(file) !== fileName || (phase === 'after' && !read)) return stat;
+      return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { nlink: 0 });
+    };
+    const { lib, opened } = library(store, { lstat, openFile: (root, segments, limits) => {
+      const bytes = openContained(root, segments, limits);
+      if (segments.at(-1) === fileName) read = true;
+      return bytes;
+    } });
+    await run(lib);
+    if (phase === 'before') assert.ok(!opened.some((file) => file.endsWith(fileName)), 'unlinked observations must never be opened');
+    else assert.ok(read, 'a post-read unlink must discard the returned bytes');
+  }
+});
+
+test('a contained-open replacement refusal with unchanged outer identity is busy, while permission failure stays unavailable', async () => {
+  const store = makeStore();
+  const game = buildGame(store, { hands: 2, seed: 203 });
+  for (const fileName of [STATE_FILE, 'hand-0002.json']) for (const code of ['UNSAFE_PATH', 'EACCES']) {
+    const { lib } = library(store, { openFile: (root, segments, limits) => {
+      if (segments.at(-1) === fileName) throw Object.assign(new Error('test refusal'), { code });
+      return openContained(root, segments, limits);
+    } });
+    await rejectCode(lib.readHand(game.gameId, 2), code === 'UNSAFE_PATH' ? 'REPLAY_BUSY' : 'REPLAY_UNAVAILABLE');
+  }
+  for (const [fileName, cap] of [[STATE_FILE, 2 * 1024 * 1024], ['hand-0002.json', 256 * 1024]]) {
+    const otherStore = makeStore();
+    const other = buildGame(otherStore, { hands: 2, seed: 205 });
+    const { lib } = library(otherStore, { openFile: (root, segments, limits) => {
+      if (segments.at(-1) !== fileName) return openContained(root, segments, limits);
+      fs.writeFileSync(path.join(root, ...segments), Buffer.alloc(cap + 1));
+      throw Object.assign(new Error('test refusal'), { code: 'UNSAFE_PATH' });
+    } });
+    await rejectCode(lib.readHand(other.gameId, 2), 'REPLAY_LIMIT_EXCEEDED');
+  }
+});
+
+test('an ancestor swapped during replacement refusal is unavailable before and after reads for every request', async () => {
+  for (const request of ['detail', 'catalog', 'hands']) for (const phase of ['before', 'after', 'failure']) {
+    const store = makeStore();
+    const game = buildGame(store, { hands: 2, seed: 204 });
+    let swap = true;
+    let read = false;
+    const replace = () => {
+      swap = false;
+      fs.renameSync(game.dir, `${game.dir}-old`);
+      fs.mkdirSync(game.dir);
+      fs.copyFileSync(path.join(`${game.dir}-old`, STATE_FILE), statePath(game.dir));
+    };
+    const { lib, opened } = library(store, { lstat: (file) => {
+      const stat = fs.lstatSync(file);
+      if (!swap || path.basename(file) !== STATE_FILE || phase === 'failure' || (phase === 'after' && !read)) return stat;
+      replace();
+      return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { nlink: 0 });
+    }, openFile: (root, segments, limits) => {
+      if (phase === 'failure' && segments.at(-1) === STATE_FILE) {
+        replace();
+        throw Object.assign(new Error('test refusal'), { code: 'UNSAFE_PATH' });
+      }
+      const bytes = openContained(root, segments, limits);
+      if (segments.at(-1) === STATE_FILE) read = true;
+      return bytes;
+    } });
+    if (request === 'detail') await rejectCode(lib.readHand(game.gameId, 2), 'REPLAY_UNAVAILABLE');
+    else if (request === 'hands') await rejectCode(lib.listHands(game.gameId), 'REPLAY_UNAVAILABLE');
+    else assert.equal((await lib.listGames()).games[0].unavailableCode, 'REPLAY_UNAVAILABLE');
+    if (phase === 'before') assert.equal(opened.length, 0, 'ancestor replacement must be rejected before any open');
+    if (phase === 'after') assert.equal(read, true, 'the second ancestor check must discard read bytes');
+  }
+});
+
+test('replacement retry guards reject missing and unsafe current leaves across detail and lists', async () => {
+  const store = makeStore();
+  const game = buildGame(store, { hands: 2, seed: 206 });
+  const requests = [
+    { file: STATE_FILE, run: (lib) => rejectCode(lib.readHand(game.gameId, 2), 'REPLAY_UNAVAILABLE') },
+    { file: STATE_FILE, run: (lib) => rejectCode(lib.listHands(game.gameId), 'REPLAY_UNAVAILABLE') },
+    { file: STATE_FILE, run: async (lib) => assert.equal((await lib.listGames()).games[0].unavailableCode, 'REPLAY_UNAVAILABLE') },
+    { file: 'hand-0002.json', run: (lib) => rejectCode(lib.readHand(game.gameId, 2), 'REPLAY_UNAVAILABLE') },
+    { file: 'hand-0002.json', run: async (lib) => assert.equal((await lib.listHands(game.gameId)).hands[1].unavailableCode, 'REPLAY_UNAVAILABLE') },
+  ];
+  for (const { file, run } of requests) for (const phase of ['before', 'after', 'failure']) for (const type of ['missing', 'symlink', 'hardlink', 'special']) {
+    let read = false;
+    let refused = false;
+    let unlinked = false;
+    const { lib, opened } = library(store, { lstat: (name) => {
+      const stat = fs.lstatSync(name);
+      if (path.basename(name) !== file || (phase === 'after' && !read) || (phase === 'failure' && !refused)) return stat;
+      if (phase !== 'failure' && !unlinked) {
+        unlinked = true;
+        return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { nlink: 0 });
+      }
+      if (type === 'missing') throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+      const unsafe = type === 'hardlink' ? { nlink: 2 } : { isFile: () => false, isSymbolicLink: () => type === 'symlink' };
+      return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, unsafe);
+    }, openFile: (root, segments, limits) => {
+      if (segments.at(-1) === file && phase === 'failure') {
+        refused = true;
+        throw Object.assign(new Error('test refusal'), { code: 'UNSAFE_PATH' });
+      }
+      const bytes = openContained(root, segments, limits);
+      if (segments.at(-1) === file) read = true;
+      return bytes;
+    } });
+    await run(lib);
+    if (phase === 'before') assert.ok(!opened.some((name) => name.endsWith(file)), 'unsafe replacement must not be opened');
+    if (phase === 'after') assert.equal(read, true, 'unsafe replacement must discard read bytes');
+    if (phase === 'failure') assert.equal(refused, true, 'negative control must exercise opener refusal');
+  }
 });
 
 test('a swap that is not a safe single-link regular file stays unavailable instead of busy', { skip: !POSIX }, async () => {

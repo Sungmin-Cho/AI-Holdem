@@ -170,14 +170,99 @@
           "headerModel": "gpt-6-astra"
         }
       ]
+    },
+    {
+      "round": "impl-r7b",
+      "target": "7d5e225fd07fdee1dfee54d3d9c4c7e330ce72757f9fe6f5d2737dfaff391b6f",
+      "decisionFingerprint": "5879038a83a5b855a66329b2c686c1d164ddcdcc860d31b3794d73bc4c56168d",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "seats": [
+        {
+          "attemptId": "impl-r7b-reviewer-1",
+          "receiptSha256": "8aee3c891a1f34495fa3e1d2ab12535af06d57cf024cdc950d7da2bafe4d2773",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r7b-reviewer-2",
+          "receiptSha256": "59ae9d6f7779b29e8a6ed8a4325f9ac3ed008361bf6ef9e020aab52eea194a8c",
+          "state": "SUCCEEDED",
+          "verdict": "PASS",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "impl-r8",
+      "target": "b27e1ce34740919838b8e556840270033656f615df11f72a38a7768193a1be48",
+      "decisionFingerprint": "b6391e02211911a6ad60b295ee4808efebd7dcbc1cccb8df244f545b8488bc04",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "seats": [
+        {
+          "attemptId": "impl-r8-reviewer-1",
+          "receiptSha256": "1d7c7bb106a9d62724accc97b695bb7a92df70453d20be8925763c38f8cbc262",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r8-reviewer-2",
+          "receiptSha256": "80ea20644095700759a9f2acf9f64e8fdf55f0e00cd7ca4feb3ac6bc73497fa6",
+          "state": "SUCCEEDED",
+          "verdict": "PASS",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "impl-r9",
+      "target": "cc986af356c76416d475cce745e55febfe28f8b43da04436d1938884f6d7cf94",
+      "decisionFingerprint": "b670562e9b02646552d5e34970be55728d8674e189803953110d93f53867e45c",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "seats": [
+        {
+          "attemptId": "impl-r9-reviewer-1",
+          "receiptSha256": "bae515a7342d7172e1c381567e36f4359729855a04c8ff36402a38c65bd001a1",
+          "state": "SUCCEEDED",
+          "verdict": "PASS",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r9-reviewer-2",
+          "receiptSha256": "b1f2ef984f05174a944e4ad0414528ebbb9fb0b2657baacf248e927acd946bff",
+          "state": "SUCCEEDED",
+          "verdict": "PASS",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
     }
   ],
-  "currentReviewState": "R4/R5 full-scope findings corrected; R6 incremental PASS/PASS, guarded receipts verified, final product manifest unchanged",
+  "currentReviewState": "R4/R5 full scope and R6 incremental reviewed; CI race correction R7/R8 findings addressed; final R9 PASS/PASS, guarded receipts verified, final38-file product manifest unchanged",
   "localChecks": {
     "focused": {
-      "pass": 145,
+      "pass": 153,
       "fail": 0,
-      "skip": 0
+      "skip": 0,
+      "scope": "149 replay/UI plus4 host-insights API"
     },
     "replayBrowser": {
       "pass": true,
@@ -201,7 +286,7 @@
       "pass": true,
       "sourceUnchanged": true
     },
-    "presentation": "same animation residual assertion fails on exact base with only the contrast measurement correction; final CI pending",
+    "presentation": "initial exact-head remote UI complete pass including replay22; local base motion limitation retained historically; corrected final-head CI required",
     "multiplayerBrowser": {
       "pass": true,
       "checks": 19
@@ -220,7 +305,7 @@
       "singleRunGreen": true,
       "env": "HOLDEM_PUBLIC_PORT=0; caffeinate -i",
       "logSha256": "d40e01008abe3b22247f8d04d39b1e230eaa8ad46be689b39015fc74774434f8",
-      "scope": "full local run plus final focused145; final commit CI still required"
+      "scope": "historical full run before CI race correction; final focused153 and new final-head CI required"
     },
     "actualPermissionBudgetProbe": {
       "pass": true,
@@ -229,10 +314,32 @@
         "unknown EIO conservative budget"
       ],
       "logSha256": "88b52b3b400d0e0d6d53da765d1ec0ae7434941ad5db6137bc931beb3289cfa5"
+    },
+    "coarseTimestampFixtureProbe": {
+      "red": true,
+      "green": true,
+      "assertionsUnchanged": true
+    },
+    "realWriterStress": {
+      "pass": 10,
+      "fail": 0,
+      "scope": "after initial nlink correction; later final focused also passes writer"
     }
   },
   "resumedRouterVersion": "1.23.1",
   "historicalRawReceipts": "R1-R3 temp files were cleaned before 2026-10-16 resume; retained summaries above are historical, not newly authenticated receipts",
-  "finalProductTarget": "dc8b233066c93025040d5ac09a2595126d61d629926c52137dbbaeac49d8ce22",
-  "userReviewLimitOverride": "2026-10-16 explicit instruction: proceed until evidence-based judgment says stop, irrespective of numeric review cap"
+  "finalProductTarget": "cc986af356c76416d475cce745e55febfe28f8b43da04436d1938884f6d7cf94",
+  "userReviewLimitOverride": "2026-10-16 explicit instruction: proceed until evidence-based judgment says stop, irrespective of numeric review cap",
+  "initialCiFailure": {
+    "runId": 38846891317,
+    "head": "6806c547a02d6a00beab823cd1ac5021f23f8210",
+    "passed": 16,
+    "failed": 5,
+    "includesFailedAggregate": true,
+    "diagnosis": [
+      "Linux20/22 real writer classification corrected",
+      "Windows20 host-insights fixture atomic producer parity corrected",
+      "Windows20 unchanged finalize4.5second boundary requires final CI rerun"
+    ]
+  }
 }

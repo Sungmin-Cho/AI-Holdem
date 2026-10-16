@@ -26,7 +26,7 @@ maker가 구현 후 테스트를 작성했으므로 strict TDD를 주장하지 �
 
 ## 로컬 검증
 
-- 최종 집중 테스트 145/145 통과: reader, API, controller, projection, renderer, player, 비동기 선택, 동시 HTTP, 정적 import 폐포, 색상 토큰, 기존 format 기본값.
+- R6 집중 테스트 145/145 통과: reader, API, controller, projection, renderer, player, 비동기 선택, 동시 HTTP, 정적 import 폐포, 색상 토큰, 기존 format 기본값.
 - 실제 리플레이 브라우저 22개 필수 확인 통과. 실제 엔진 저장·완료 핸드, 인간 비공개 패/AI 공개 패, 내 시점 미래 정보, 키보드·포커스, 지연 HTTP 무시, 모바일 9인, 호스트 탈락, 혼합 버전, 실제 유휴 종료 및 pagehide, 원본 해시 불변과 소유 자원 정리를 포함한다.
 - 참가자 multiplayer 브라우저 19개, 관전자 spectator 브라우저 14개 확인 항목이 통과했다.
 - 실제 방 leaveEliminated·재인증 이후에도 과거 인간 좌석과 원본 replay DTO가 유지되는 통합 테스트 통과.
@@ -47,3 +47,18 @@ PR, 최종 CI, 머지, 머지 후 위키 트랜잭션은 완료 시 전달 영�
 ## 2026-10-16 계약 명확화
 
 구현 검토에서 핸드 목록의 호스트 비참여와 구형 위치 누락을 구분할 필요가 확인됐다. API v1의 닫힌 hand 행에 heroDealt:boolean|null을 추가한다. 검증된 startStacks의 user 유무로 결정하며, 읽기 불가 행은 null이다. heroPosition의 기존 null 의미는 유지한다. heroDealt=false만 참여 안 함으로 표시하고, true/null의 위치 누락은 위치 정보 없음으로 표시한다. 이는 현재 미출시 보관함 API의 추가 필드이며 원본 저장 형식이나 기존 live replay DTO를 변경하지 않는다. 초기 설계 문서는 당시 검토 해시를 보존하고 이 절에서 최종 계약을 명확히 한다.
+
+
+## 2026-10-16 원격 CI 동시 읽기 보정
+
+첫 PR CI 실행 38846891317(6806c54)은 녹색이 아니었다. UI 전체 여정(새 리플레이 22개 포함)은 통과했으나 Linux Node20·22 실제 엔진 writer 겹침 테스트가 REPLAY_UNAVAILABLE로 실패했다. Node20 스택은 읽기 전 replacedLeaf 분기를 가리켰다. Windows Node20에는 기존 코치 4.5초 봉인 테스트와 정체 공개 fixture 실패도 있었다. Windows Node22의 해당 스위트는 통과했다. 최초 실패 로그와 진단 자료를 보존했다.
+
+연속 원자 교체에서 두 번 모두 일반 inode의 링크 수 0을 관측하는 경우를 재시도(BUSY)로 분류한다. 조상을 다시 검사하며, opener가 거부한 중간 교체를 바깥 inode·타임스탬프가 같다는 이유로 영구 오류로 오분류하지 않는다. 이때 바이트를 반환하지 않고 권한 오류·위험한 현재 leaf·조상 교체는 계속 거부한다. 크기 상한도 유지한다. 확정 계약은 [동시 읽기 보충](replay-study-concurrency-clarification.md)에 있다.
+
+R7 검토는 Astra PASS·Opus PASS_WITH_CHANGES였고, Opus의 추가 ABA·조상 검사 지적을 각각 실패하는 주입 테스트로 확인해 수정했다. R8은 Astra PASS·Opus PASS_WITH_CHANGES였으며 제품 결함은 보고되지 않았다. 새 가드의 거부 경계를 직접 검증하는 테스트 지적은 파일 없음·symlink·다중 링크·특수 파일과 읽기 전·후·opener 거부, 상세·목록 조합으로 보강했다. 실제 writer는 최초 보정 후 로컬 10회 통과했고, 추가 수정 뒤 집중 실행에서도 통과했다. 실제 Linux의 inode 재사용 빈도나 개별 커널 동작을 주입 테스트만으로 확정하지 않는다.
+
+기존 정체 공개 fixture는 같은 길이의 review_generated/review_published를 제자리 덮어썼다. mtime/ctime 정밀도를 고정한 실행에서 CI와 같은 REVEAL_NOT_READY 실패를 재현했고 실제 producer의 writeJsonAtomic으로 바꾼 뒤 같은 주입 실행이 통과했다. 기존 단언은 유지했다. 코치 4.5초 경계 테스트·헬퍼·제품 루프는 기준 브랜치와 동일하며 두 브랜치의 해당 이름 테스트가 각각 1개 실행·통과했다. 그 결과로 Windows 실패 원인을 확정하거나 원격 검증을 대체하지 않는다.
+
+최종 보강 집중 실행은 리플레이·UI 149개와 정체 공개 API 4개를 합쳐 153 pass, 실패·취소·skip 0이다. 이전 3836개 로컬 전체 실행은 보정 전 이력이며 보정 후 최종 커밋의 전체·플랫폼 검증은 새 PR CI를 요구한다. 최종 리뷰 및 전달 결과는 전달 영수증에 기록한다.
+
+R9 최종 보강 검토는 Opus 5.5/high·GPT-6-Astra/high 모두 PASS다. 두 guarded 영수증·라우팅 fingerprint와 최종 제품 38개 파일 manifest 불변을 검증했다. 전체 범위 검토와 후속 증분 검토를 합쳐 코드·테스트 검토를 완료한 것으로 판단하고 최종 커밋 CI로 진행한다.
