@@ -1,7 +1,9 @@
 import http from "node:http";
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
 import { createOwnedTempDir } from "./helpers/owned-fixtures.mjs";
+import { makeLoop } from "./helpers/relay-proxy-fixture.js";
 import { startAppService } from "../tools/app-service.js";
 test("app rejects foreign origins, unauthenticated and private relay routes", async (t) => {
   const app = await startAppService(createOwnedTempDir("lobby-security"));
@@ -107,8 +109,12 @@ test('only terminal games return SESSION_INACTIVE; missing active relay files re
   const request=()=>fetch(`${app.origin}/api/game/${gameId}/events`,{headers:{authorization:`Bearer ${token}`,'x-game-epoch':epoch}});
   for(state of ['error','starting','playing','paused','finalizing']) {const response=await request();assert.equal(response.status,503);assert.equal((await response.json()).code,'SESSION_UNAVAILABLE');}
   for(state of ['ended','completed']) {const response=await request();assert.equal(response.status,409);assert.equal((await response.json()).code,'SESSION_INACTIVE');}
-  state='playing';manager.session={loop:{serverPid:process.pid}};
+  // An active session whose relay lock is absent stays retryable (the loop is still restarting it).
+  state='playing';manager.session={loop:makeLoop({lockPath:path.join(root,'lock.json'),statePath:path.join(root,'state.json'),port:1,sessionToken:'t'.repeat(64)})};
   const response=await request();assert.equal(response.status,503);assert.equal((await response.json()).code,'RELAY_UNAVAILABLE');
+  // A loop that cannot prove its relay (no capability) is refused the same way, not trusted by pid.
+  manager.session={loop:{serverPid:process.pid}};
+  const legacy=await request();assert.equal(legacy.status,503);assert.equal((await legacy.json()).code,'RELAY_UNAVAILABLE');
 });
 
 test('interrupt endpoint is host-only, identity-bound, and available while pause occupies the journal',async t=>{

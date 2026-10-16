@@ -123,6 +123,8 @@ jobs:
         run: npm ci
       - name: Verify learning runtime on the runner platform
         run: node --test --test-concurrency=1 test/platform-learning-runtime.test.js
+      - name: Verify relay proxy ownership and transport
+        run: node --test --test-concurrency=1 test/relay-access.test.js test/relay-proxy.test.js test/relay-proxy-live.test.js
       - name: Run tests
         run: npm run test:ci
   windows:
@@ -174,6 +176,9 @@ jobs:
       - name: Verify learning runtime on the runner platform
         if: matrix.shard == 'rest'
         run: node --test --test-concurrency=1 test/platform-learning-runtime.test.js
+      - name: Verify relay proxy ownership and transport
+        if: matrix.shard == 'rest'
+        run: node --test --test-concurrency=1 test/relay-access.test.js test/relay-proxy.test.js test/relay-proxy-live.test.js
       - name: Verify fresh retry recovery before the long study shard
         if: matrix.shard == 'study-a'
         run: node --test --test-name-pattern="fresh retry command forwards" test/app-command-store.test.js
