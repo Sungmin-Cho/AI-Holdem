@@ -388,6 +388,16 @@ test('hint-enabled policy sidecar publishes only after durable exposure', {timeo
  t.after(()=>loop.requestStop().catch(()=>{}));
  // Start without a relay so the fixed session source exists before its readiness probe.
  await loop.bootstrap({ai:5,mode:'cash-training',stackBb:100,hands:1,opponentRuntime:'policy',hints:'on'});
+ // A one-hand hint test needs a human decision: AI folds can otherwise finish
+ // the only hand before any user snapshot exists. Pin the initial button so
+ // the first deal has button3/SB4/BB5 and user0 acts first.
+ const stateFile=path.join(gameDir,'state.json');
+ const initialized=readJson(stateFile);
+ assert.equal(initialized.handNo,0);
+ assert.equal(initialized.seats.length,6);
+ assert.equal(initialized.seats[0].playerId,'user');
+ initialized.button=2;
+ fs.writeFileSync(stateFile,JSON.stringify(initialized));
  resolveSessionReference(gameDir,{createNew:true});
  // Restart the owned relay to validate the newly installed fixture source.
  await loop.requestStop();

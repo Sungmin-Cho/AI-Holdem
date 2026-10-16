@@ -159,10 +159,11 @@ These narrow parent fixes use the router skill's explicit inline-executor path.
 
 The first full integrated run finished with 3,778 pass, 3 fail, 1 cancelled,
 18 skipped. Two occupied-8899 failures passed with `HOLDEM_PUBLIC_PORT=0`.
-The study-rotation failure was a test race: its 40ms auto-fold advanced the
-engine to hand 2 while it verified the rotated service. Preserve the hand-1
-assertion, hold that user decision open with the existing scaled 30s fixture
-budget, and retain requestStop cleanup. The new source-suffix inference also
+The study-rotation failure reached hand2 during rotated-service inspection.
+The initial40ms-to30s wait-only mitigation was insufficient. The later CI
+follow-up controls the first human actor, preserves the hand1 assertion and
+requestStop cleanup, and corrects the old auto-fold explanation: unmanaged
+waits renew without force-folding. The new source-suffix inference also
 needed its explicit entry in the existing v3 call-site inventory; no old
 inventory checks were removed. The final whole suite runs with isolated ports.
 
@@ -264,3 +265,22 @@ matched against prior actual TAP logs. Future root-wide tests outside that
 tree are not covered by this runner and must be placed in test/. Native
 Node20/22 CI must establish the partition timing and actual check publication.
 Final host checks75/75 pass; final source hashes match both CI review manifests.
+
+## Human-turn fixture review follow-up
+
+New630a7b1 CI logs exposed an incomplete earlier rotation delay mitigation
+and an unchanged one-hand hint fixture without a guaranteed human turn.
+The fix controls only initial hand0 inputs and leaves production behavior
+untouched. A failed full deal trace was not retained, so the exact AI fold
+sequence is not asserted. Frozen separate rotation and hint manifests bind
+the actual test-only changes; original assertions and budgets remain.
+The maker's bootstrap identity failure under its child guard is recorded
+separately from parent-owned actual named-test passes (one each, no skips).
+
+Rotation: Opus/high PASS0.85 and Astra/high PASS0.92. Hint: Opus/high
+PASS0.86 and Astra/high PASS0.97, all valid and terminated. Opus verified
+that unmanaged timeouts renew the wait rather than force-fold, so the old
+comment blaming40ms auto-fold was inaccurate. Parent changed only that
+two-line explanation after review; exact string replacement against the
+frozen snapshot proves all reviewed code is unchanged. Final source hashes
+include this declared comment-only follow-up. No extra test or budget change.

@@ -3,9 +3,9 @@
   "auditBaseline": "b239dd72261070f8834ee36d3d7129f40f0fb546",
   "integratedBase": "edb0b57bdb07d46718776f0a30446062521455a9",
   "branch": "Sungmin-Cho/holdem-coaching-quality",
-  "recordedAt": "2026-10-16T08:00:25.165916Z",
+  "recordedAt": "2026-10-16T08:29:50.666288Z",
   "receiptMeaning": "CLI process/envelope status, not correctness; dispositions and host tests are separate.",
-  "reviewBasis": "Original core R3 plus integration R1 and single-line wording R2; comparison R3; CI-only comparison cwd fix R1 and Linux complete partition R1 plus required-context aggregate R2. Source hashes below match delivered files.",
+  "reviewBasis": "Original core R3 plus integration R1 and single-line wording R2; comparison R3; CI-only comparison cwd fix R1 and Linux complete partition R1 plus required-context aggregate R2; human-first rotation/hint fixture reviews R1. Source hashes below match delivered files.",
   "supervisorReceipts": [
     {
       "attemptId": "design-r1",
@@ -526,6 +526,92 @@
       "terminationConfirmed": true,
       "outputSha256": "898e7b8e23c1db588a24eb4d4c0cbc48b3967b8dd3417234ef8ac22012b7b0d9",
       "servedModels": null
+    },
+    {
+      "attemptId": "ci-rotation-maker",
+      "decisionFingerprint": "9e4716d1fdc8915aa5c2c15316f335948230fc65f8e27e2b2275c7f1664ce4dc",
+      "requestedModelId": "claude-sonnet-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "write",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "a78e005541230a130ed7d456e35750aee52185d416f1f9c533637e89b81b13b8",
+      "state": "SUCCEEDED",
+      "verdict": null,
+      "terminationConfirmed": true,
+      "outputSha256": "05435a5f0f008e8f7b1f875856adace86c80046fa3ed6b73b8949d823edcc403",
+      "servedModels": [
+        "claude-sonnet-5-5"
+      ]
+    },
+    {
+      "attemptId": "ci-rotation-r1-a",
+      "decisionFingerprint": "7d165da63ead48687c36cb6b81b72c601f2226697066aa2c8ccd9424bc78bacf",
+      "requestedModelId": "claude-opus-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "read-only",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "77ccc62609ac526702688377707c4dd9bf14ced3c1617355e2b077926c25d327",
+      "state": "SUCCEEDED",
+      "verdict": "PASS",
+      "terminationConfirmed": true,
+      "outputSha256": "91adb941756a1f465718f00fd21b2702a0b6587f7c469bc8830c3517b10ea468",
+      "servedModels": [
+        "claude-opus-5-5"
+      ]
+    },
+    {
+      "attemptId": "ci-rotation-r1-b",
+      "decisionFingerprint": "7d165da63ead48687c36cb6b81b72c601f2226697066aa2c8ccd9424bc78bacf",
+      "requestedModelId": "gpt-6-astra",
+      "requestedEffort": "high",
+      "transportId": "codex.native",
+      "permissionMode": "read-only",
+      "outputEnvelope": "codex-exec-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "f6dbc4304a921bbf1f91d8d60549c056bcc862b43bf32e8a461c2290faa52f62",
+      "state": "SUCCEEDED",
+      "verdict": "PASS",
+      "terminationConfirmed": true,
+      "outputSha256": "0d1168abdce352b2928c92c274b87916a7c9de4c7fa754688453000024f9ea90",
+      "servedModels": null
+    },
+    {
+      "attemptId": "ci-hint-r1-a",
+      "decisionFingerprint": "33ced3256bf1eed35b22ed71995f3508ce3bed4847c463fb743a6c95140fbe2e",
+      "requestedModelId": "claude-opus-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "read-only",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "5c55eb5d4f260ba5d724909c7c587d972f6ecb36832ac003f3ff6478252619ee",
+      "state": "SUCCEEDED",
+      "verdict": "PASS",
+      "terminationConfirmed": true,
+      "outputSha256": "fd469d509cc7b50a3baf652b4f4393a0c95a9ca76785b6876a6b17e64f62b0c0",
+      "servedModels": [
+        "claude-opus-5-5"
+      ]
+    },
+    {
+      "attemptId": "ci-hint-r1-b",
+      "decisionFingerprint": "33ced3256bf1eed35b22ed71995f3508ce3bed4847c463fb743a6c95140fbe2e",
+      "requestedModelId": "gpt-6-astra",
+      "requestedEffort": "high",
+      "transportId": "codex.native",
+      "permissionMode": "read-only",
+      "outputEnvelope": "codex-exec-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "e3454c662da354f80210d33b7ee416634fd5399d9bf28881ccc98d519edbe3d9",
+      "state": "SUCCEEDED",
+      "verdict": "PASS",
+      "terminationConfirmed": true,
+      "outputSha256": "3b464465438b5bc7f85b14eeebac2cffe4170c2713088e93f0e0e112b9c31649",
+      "servedModels": null
     }
   ],
   "reviewedSourceSha256": {
@@ -544,7 +630,7 @@
     "test/game-loop-learning-feedback.test.js": "19eb64f73abad0e7ba9018d273774f1d6bf302517d90ad43ec34b79845845870",
     "test/game-loop.test.js": "e4099b452382b125c7c5715aab8b9fc8572aaeb121999c1aa1e30d24e40ecdda",
     "test/helpers/ci-shards.mjs": "746344d86d7bd1abeab820a7305d39f8564f09ac2bb6ce3b45669bf729e361ae",
-    "test/learning-integration-session.test.js": "b381957efe429346f1eda4bd90d7e55027a89c93f0a9fc7d5403ff021433ddbb",
+    "test/learning-integration-session.test.js": "a8e378d2d9c6f6352075a783c732134c81ca19b80245dbd3fd2e3058bae2a3d1",
     "test/player-runtime.test.js": "578ccc9d970a4d30efa096c32f963fe1f6d6c5676283ddade58e51d26c29f403",
     "test/reference-v3-inventory.test.js": "dc445afd64f848d4df0f1fac5c65e4e9107da00b0a7e5df707b7ae9853ebcbeb",
     "test/review-facts-integrity.test.js": "93777c79e25c39716e4b2ae5460786e9cf67ed18e8fe51200007fe4800131c01",
@@ -562,7 +648,8 @@
     "test/codex-player-comparison.test.js": "79b4bf5a050619aa9e12ddb0e2ad5a3665960696bd1c4eeda99b4b86df557f07",
     "tools/compare-codex-players.js": "432ff665cb032f1b7ce416db43319dea8581eb420c35c7b447b8e9332ee0a566",
     "test/helpers/ci-linux-partitions.mjs": "4efba2f14f339c91b02f67bcba1f6189fc89af9494da9012b552fd3356b4c48e",
-    "test/ci-linux-partitions.test.js": "d00379d5be95e8df70d99a7c34e0aa6187d8fadad2fd0818ba8b11a5f0403212"
+    "test/ci-linux-partitions.test.js": "d00379d5be95e8df70d99a7c34e0aa6187d8fadad2fd0818ba8b11a5f0403212",
+    "test/policy-loop.test.js": "31188c8dee8f0c13d87e6d4f17c6293f1475e72b6f010fb6f539410dc01e9dd6"
   },
   "preservedPolicyReferenceSha256": {
     "training/data/README.md": "f9d1919fc6a48314f6ad8ee99c8b9dd3c7f050308d7534af32ee46c3e5b2ee76",
@@ -615,6 +702,59 @@
     "resolution": "Strict projection/DOM tests unchanged; shared simulation caveat changed to equivalent neutral wording. All affected fact/coach/replay modules rerun."
   },
   "finalCompleteCiGate": "Exact final PR SHA GitHub CI is required before merge; this pre-PR local receipt does not assert that future result.",
+  "ciHumanFirstFixtures": {
+    "runId": 38870854176,
+    "attempt": 1,
+    "headSha": "630a7b155b063704721f524ef6272e562b599842",
+    "releaseGatePassed": false,
+    "failures": [
+      {
+        "job": "Linux22 services",
+        "test": "S8 full: relay recovery restarts a stopped study service and publishes its rotated URL",
+        "error": "handNo2!==1 after34.792s",
+        "disposition": "Earlier30s delay mitigation was insufficient: arbitrary initial actor and any decisionId allowed an AI walk/fold before first human turn. Pin initial six-seat user0 first actor via pre-run button2 and require human toAct with decisionId; preserve hand1/rotation/publication/lifetime/cleanup assertions and all budgets."
+      },
+      {
+        "job": "Linux20 services",
+        "test": "hint-enabled policy sidecar publishes only after durable exposure",
+        "error": "user snapshot did not become available: fetch failed after20.735s",
+        "disposition": "One-hand arbitrary-button fixture could finish before a human turn. Pin initial hand0/six-seat/user0 button2 before run/resume. Preserve one hand, wait10s,40s scaled outer timeout and all hint exposure/publication/cleanup assertions."
+      }
+    ],
+    "makerHostBoundary": "Claude maker process succeeded but its attempted test hit IDENTITY_UNAVAILABLE before bootstrap because its guard denies ps. Parent ran both actual named tests outside that child guard with already-authorized tools; no helper or production guard was weakened.",
+    "namedHostRuns": {
+      "rotation": {
+        "tests": 1,
+        "pass": 1,
+        "fail": 0,
+        "skipped": 0,
+        "durationMs": 31310.639875,
+        "exitCode": 0
+      },
+      "hint": {
+        "tests": 1,
+        "pass": 1,
+        "fail": 0,
+        "skipped": 0,
+        "durationMs": 11450.022583,
+        "exitCode": 0
+      }
+    },
+    "logSha256": {
+      "linux22-services-final-failed.log": "185e9a169fb86ddac332a7b0d4395f85bf215e897887bf16dd6623c43d4b990a",
+      "linux20-services-final-failed.log": "3cec093308a371f9b869e6394fd4e16df5e80edba8aafc611449482430587763",
+      "ci-rotation-host-green.log": "35b1f8d9e227a70a645775639cb007c077103efaf0983fa6ef2dc3b42db2c408",
+      "ci-hint-human-first-host.log": "625e838c12be26bebaa735a07a052a539694989c5e7504de730381a2b1653df5"
+    },
+    "causalLimit": "The failing TAP does not retain the full deal/action trace. The exact fold/walk sequence is not attested; the verified fixture defect is that neither setup guaranteed a first human turn, and rotation accepted AI decision IDs. The new controlled first actor and stricter predicate eliminate that concrete nondeterminism without claiming a product failure.",
+    "commentOnlyFollowup": {
+      "reviewAttempt": "ci-rotation-r1-a",
+      "reviewedSourceSha256": "25ebde3259e30e1a2a1881d77527ccb6af555578ed0a1485c5759c3adc9d0463",
+      "finalSourceSha256": "a8e378d2d9c6f6352075a783c732134c81ca19b80245dbd3fd2e3058bae2a3d1",
+      "exactCommentReplacementAsserted": true,
+      "disposition": "Correct old auto-fold explanation: unmanaged user waits renew rather than force-fold. Only the exact two-line comment replacement separates final bytes from reviewed snapshot."
+    }
+  },
   "ciInitialFailure": {
     "runId": 38865017268,
     "attempt": 1,

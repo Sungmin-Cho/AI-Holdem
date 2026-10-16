@@ -33,7 +33,7 @@ The one fenced Opus R2 output was INVALID_OUTPUT and is not counted as a pass.
 
 [Structured evidence](coaching-quality-evidence.json) preserves supervisor
 receipt/output hashes, requested model/effort, actual envelope model metadata,
-34 final source hashes, 25 preserved policy/reference hashes and test summaries.
+35 final source hashes, 25 preserved policy/reference hashes and test summaries.
 The final source matches the original-core, integration, wording and scoped CI platform snapshots.
 Separate processes and fixed inputs were used; Codex read-only reviews did not
 use the Darwin receipt guard. No stronger isolation property is claimed.
@@ -116,10 +116,10 @@ No win-rate, EV, GTO, calibration or human-learning effect is established.
 
 The initial whole run had 3,778 pass, 3 fail, 1 cancelled, 18 skip. Two failures
 were temporary lobbies colliding with occupied port8899; both passed with an
-ephemeral public port. A study-rotation fixture's 40ms auto-fold could advance
-to hand2 during identity inspection. It now holds the observed user decision
-open with the existing scaled30s fixture budget and keeps the hand1 assertion
-and requestStop cleanup. The missing new source-suffix inventory entry was
+ephemeral public port. A study-rotation fixture reached hand2 during identity inspection. The first
+40ms-to30s wait mitigation was insufficient; the final CI follow-up below
+controls the first actor and accepts only a human decision. Unmanaged waits
+renew without forcing a fold. The hand1 assertion and requestStop cleanup remain. The missing new source-suffix inventory entry was
 also corrected without deleting existing inventory checks.
 
 PR #294 merged independently during finalization. Task changes were preserved
@@ -172,3 +172,34 @@ Linux version still executes the platform gate before both partitions. The
 original required names succeed only when all four Linux partitions succeed.
 Final PR CI now has25 jobs; its exact-SHA outcome is recorded on the PR after
 completion rather than embedding an unexecuted success in this commit.
+
+## CI follow-up: guarantee the observed human turn
+
+Run38870854176 on630a7b1 exposed two fixture failures: Linux22 rotation
+read hand2 instead of1; Linux20 one-hand hints never observed a user snapshot
+before relay loss. Their setups did not guarantee a human decision: an
+arbitrary initial button lets AI folds/walks end a hand first, and rotation
+accepted any actor's decisionId. The earlier40ms-to30s rotation mitigation
+did not address that path. The failing TAP does not preserve the complete
+deal, so the exact fold sequence is not independently attested.
+
+Both fixtures now assert initial hand0/six seats/user0, set initial button2
+before run/resume (next button3/SB4/BB5 makes user0 first), and rotation
+requires the actual human decision. No gameplay result is overwritten. All
+original hand1, PID/URL/instance rotation, publication, durable hint exposure,
+lifetime and cleanup assertions remain. No timeout grows, no test is skipped,
+and no product/shared helper changes. Host runs each executed exactly one
+named test: rotation1/1 in31.311s; hint1/1 in11.450s; zero skips.
+
+The guarded maker could not run its test because ps identity was unavailable
+before bootstrap. Its successful CLI receipt is not a passing test. Parent
+ran the actual named tests with authorized tools; no production guard or
+common test helper was weakened. New exact-SHA complete CI remains required.
+
+Independent rotation review: Opus/high PASS0.85, Astra/high PASS0.92.
+Independent hint review: Opus/high PASS0.86, Astra/high PASS0.97. All have
+valid receipts and confirmed termination. Opus also corrected the earlier
+auto-fold explanation: unmanaged user waits renew without force-folding.
+The final two-line test comment adopts that correction; an exact replacement
+assertion binds it to the reviewed source, with no code difference. The named
+host runs above validated the actual logic. Original CI failures remain failures.
