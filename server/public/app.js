@@ -6,6 +6,8 @@ import { applyTrainingAnnotation, excludedFromAssessment, formatTrainingCard, me
 import { formatReplay, actionVerbs } from './replay-format.js';
 import { buildReplaySteps, replaySeatOrder } from './replay-model.js';
 import { mountReplayer } from './replayer.js';
+import { createReplayController } from './replay-controller.js';
+import { createProjector } from './replay-perspective.js';
 import { helpButton } from './help-panel.js';
 import { createOnboarding, PARTICIPANT_ONBOARDING_STEPS } from './onboarding.js';
 import { DISPLAY_KEYS, currentDisplaySettings, saveDisplaySetting } from './display-settings.js';
@@ -1305,46 +1307,20 @@ function replayViewFor(handNo) {
   });
 }
 
-// Replayer state survives repaints (coach updates, unit changes) of the same hand.
-let replayUi = { step: 0, playing: false, speed: 1, listOpen: false };
-let replayModel = null;
+// Replayer state survives repaints (coach updates, unit changes) of the same
+// hand. Cursor, speed and the one autoplay timer live in the shared controller
+// (replay-controller.js, the same one the replay library uses); the live table
+// keeps its full-replay defaults: no pause before decisions.
+let replayUi = { speed: 1, listOpen: false };
+let replayController = null;
 let replayMount = null;
-let replayTimer = null;
 
 function stopReplayPlayback() {
-  clearTimeout(replayTimer); replayTimer = null;
-  replayUi.playing = false;
+  replayController?.pause();
 }
-function scheduleReplayTick() {
-  clearTimeout(replayTimer);
-  replayTimer = setTimeout(() => {
-    if (!replayUi.playing || !replayModel || openReplayHandNo == null) return;
-    setReplayStep(replayUi.step + 1, { auto: true });
-    if (replayUi.playing) scheduleReplayTick();
-  }, 1400 / replayUi.speed);
-}
-function setReplayStep(index, { auto = false } = {}) {
-  if (!replayModel) return;
-  const lastIndex = replayModel.steps.length - 1;
-  if (!auto) stopReplayPlayback();
-  replayUi.step = Math.max(0, Math.min(lastIndex, index));
-  if (replayUi.step >= lastIndex) stopReplayPlayback();
-  replayMount?.paint();
-}
-function toggleReplayPlayback() {
-  if (!replayModel) return;
-  if (replayUi.playing) stopReplayPlayback();
-  else {
-    if (replayUi.step >= replayModel.steps.length - 1) replayUi.step = 0;
-    replayUi.playing = true;
-    scheduleReplayTick();
-  }
-  replayMount?.paint();
-}
-function setReplaySpeed(speed) {
-  replayUi.speed = speed;
-  if (replayUi.playing) scheduleReplayTick();
-  replayMount?.paint();
+function disposeReplayController() {
+  replayController?.dispose();
+  replayController = null;
 }
 
 function openStudyCard(evaluationId) {
@@ -1428,9 +1404,9 @@ function paintReplay() {
   const focusKey=active?.dataset.focusKey ?? null;
   const focusedStudy=active?.dataset.studyId ?? null;
   body.replaceChildren();
-  replayMount=null;replayModel=null;
+  replayMount=null;
   if (view.kind === 'marker') {
-    stopReplayPlayback();
+    disposeReplayController();
     title.textContent = `핸드 ${view.handNo ?? openReplayHandNo} 복기`;
     disclaimer.textContent = '';
     body.append(el('p', 'replay-marker', view.message));
@@ -1451,19 +1427,23 @@ function paintReplay() {
   body.append(meta);
   const model = buildReplaySteps(replay, { seatOrder: replaySeatOrder(replay, (ui.view?.seats ?? []).map((seat) => seat.playerId)) });
   if (model.ok) {
-    replayModel = model;
-    replayUi.step = Math.min(replayUi.step, model.steps.length - 1);
+    const viewer = viewerId(ui.view) ?? 'user';
+    if (replayController) replayController.rebind(model.steps);
+    else {
+      replayController = createReplayController({
+        steps: model.steps, viewer, perspective: 'full', speed: replayUi.speed, onChange: () => replayMount?.paint(),
+      });
+    }
     const bb = view.header.blinds?.[1] ?? null;
+    const nameOf = (playerId) => names[playerId] ?? (playerId === 'user' ? '나' : playerId);
     replayMount = mountReplayer(body, {
-      replay, view, model,
-      name: (playerId) => names[playerId] ?? (playerId === 'user' ? '나' : playerId),
-      viewer: viewerId(ui.view) ?? 'user',
+      projector: createProjector({ perspective: 'full', replay, model, view, viewer, name: nameOf }),
       amount: (value) => amountText(value, bb),
       short: (value) => formatAmount(value, bb, displayUnit).primary,
-      state: () => replayUi,
-      onStep: (index) => setReplayStep(index),
-      onPlay: toggleReplayPlayback,
-      onSpeed: setReplaySpeed,
+      state: () => ({ ...replayController.state(), controls: replayController.controls() }),
+      onStep: (index) => replayController.setStep(index),
+      onPlay: () => replayController.togglePlay(),
+      onSpeed: (speed) => { replayUi.speed = speed; replayController.setSpeed(speed); },
       onStudy: openStudyCard,
     });
     const timeline = replayMount.root.querySelector('.replayer-timeline');
@@ -1476,7 +1456,7 @@ function paintReplay() {
     body.append(toggle);
     if (replayUi.listOpen) body.append(replayList(view));
   } else {
-    stopReplayPlayback();
+    disposeReplayController();
     body.append(el('p', 'replay-marker replay-fallback', '이 핸드는 기록된 숫자로 테이블을 다시 그릴 수 없어 목록으로 보여 드립니다.'));
     body.append(replayList(view));
   }
@@ -1488,8 +1468,8 @@ function paintReplay() {
 }
 
 function openReplay(handNo) {
-  stopReplayPlayback();
-  replayUi = { step: 0, playing: false, speed: replayUi.speed, listOpen: false };
+  disposeReplayController();
+  replayUi = { speed: replayUi.speed, listOpen: false };
   // A new hand starts from the top: nothing of the previous replay carries over.
   $('replay-body')._signature = null;
   $('replay-body').replaceChildren();
@@ -1500,9 +1480,9 @@ function openReplay(handNo) {
 }
 
 function closeReplay() {
-  stopReplayPlayback();
+  disposeReplayController();
   openReplayHandNo = null;
-  replayMount = null; replayModel = null;
+  replayMount = null;
   const overlay = $('replay-overlay');
   if (overlay) overlay.hidden = true;
   if(dialogs.active===overlay)dialogs.close();
@@ -1970,17 +1950,17 @@ $('log-new').addEventListener('click',()=>{$('log-list').scrollTop=$('log-list')
 // control that Space already activates has focus.
 document.addEventListener('keydown', (ev) => {
   const overlay = $('replay-overlay');
-  if (!replayModel || !overlay || overlay.hidden || ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) return;
+  if (!replayController || !overlay || overlay.hidden || ev.defaultPrevented || ev.altKey || ev.ctrlKey || ev.metaKey) return;
   if (!(overlay.contains(ev.target) || ev.target === document.body) || ev.target.closest?.('select,input,textarea')) return;
   // Holding a key must not flip playback (or step) once per repeat — including
   // with focus on the page itself, the usual way Space toggles playback.
   if (ev.repeat && [' ', 'Enter'].includes(ev.key)) { ev.preventDefault(); return; }
-  const lastIndex = replayModel.steps.length - 1;
-  if (ev.key === 'ArrowLeft') setReplayStep(replayUi.step - 1);
-  else if (ev.key === 'ArrowRight') setReplayStep(replayUi.step + 1);
-  else if (ev.key === 'Home') setReplayStep(0);
-  else if (ev.key === 'End') setReplayStep(lastIndex);
-  else if (ev.key === ' ' && !ev.target.closest('button,summary,a')) toggleReplayPlayback();
+  const at = replayController.state().step;
+  if (ev.key === 'ArrowLeft') replayController.setStep(at - 1);
+  else if (ev.key === 'ArrowRight') replayController.setStep(at + 1);
+  else if (ev.key === 'Home') replayController.setStep(0);
+  else if (ev.key === 'End') replayController.setStep(replayController.limit());
+  else if (ev.key === ' ' && !ev.target.closest('button,summary,a')) replayController.togglePlay();
   else return;
   ev.preventDefault();
 });

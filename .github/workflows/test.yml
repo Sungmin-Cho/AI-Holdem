@@ -71,6 +71,8 @@ jobs:
         run: npm ci
       - name: Learning browser journey
         run: node test/browser/learning-journey.mjs --out-dir output/playwright/ui-journey/learning --user-store-dir "$GITHUB_WORKSPACE/game"
+      - name: Replay library browser journey
+        run: node test/browser/replay-library-journey.mjs --out-dir output/playwright/ui-journey/replay-library
       - name: Preserve UI check results and screenshots
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -1,0 +1,238 @@
+{
+  "schemaVersion": 1,
+  "base": "b239dd72261070f8834ee36d3d7129f40f0fb546",
+  "routerVersion": "1.22.0",
+  "rounds": [
+    {
+      "round": "impl-r1",
+      "target": "a3a09c87d380eed61bfa287b40c1a5dd16883f5ceeae01faaaecde2690904a90",
+      "decisionFingerprint": "8b449f743daa09c958a6557354ca8dbd64299c4b80408a41e9f1a4a0853f3b83",
+      "policySha256": "fdef0c49cdc5f790cb924555812b6fdbab4fc4e318bc3c4c3b91257190346423",
+      "seats": [
+        {
+          "attemptId": "impl-r1-reviewer-1",
+          "receiptSha256": "b18c9fa5b3e763dbf8565a2d99d8f0a70c6dc176af353759a92607b5242810ad",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r1-reviewer-2",
+          "receiptSha256": "27cd16bed8adc8c720b4fcb69b2d315376e61e8e9e4dd82a90ee404af5d6e92c",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "impl-r2",
+      "target": "4b5f04724ef38b8b0d7e512f757687f346ba09847b68903a4276a273d34d1bd4",
+      "decisionFingerprint": "5f3d9a3362bef07265988446697c543408f8a024b8e32ab7bd7070f1e6d615c5",
+      "policySha256": "fdef0c49cdc5f790cb924555812b6fdbab4fc4e318bc3c4c3b91257190346423",
+      "seats": [
+        {
+          "attemptId": "impl-r2-reviewer-1",
+          "receiptSha256": "b1778cbdd00a3daef872f7ab5c96f625e272901268c56155d4f0b3556e93e3d6",
+          "state": "FAILED",
+          "verdict": null,
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r2-reviewer-2",
+          "receiptSha256": "ae60d6a2538f1b6ff8e38ca1c354e456f846a7bbb0a7b9d4272e6867c1761ef5",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "impl-r3",
+      "target": "d4df6b82049b66291380450df8751eb185483c83f55cee0ec58509b4ac9f8232",
+      "decisionFingerprint": "06c5622a0b79b278c4f40d2fa5d0be3c74d211935cc40316363aab8cc669b992",
+      "policySha256": "fdef0c49cdc5f790cb924555812b6fdbab4fc4e318bc3c4c3b91257190346423",
+      "seats": [
+        {
+          "attemptId": "impl-r3-reviewer-1",
+          "receiptSha256": "c905f68055584ac84c97a603ab6391cf69cba0c1b8003829cbbcee836eb183a9",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r3-reviewer-2",
+          "receiptSha256": "54482f9258ae00c66138ccc003a20c6d4c0a3c9e0c2baff384ca30580733315a",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "impl-r4",
+      "target": "8d009b9593be7e30cd0b3e0f46e59932a1bc7e741b1ace9a85fafa5678344b97",
+      "decisionFingerprint": "e0bfb74e6708d1641bb3f5cc5805a232746f619ff2e9df82044eff7c5c48146a",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "seats": [
+        {
+          "attemptId": "impl-r4-reviewer-1",
+          "receiptSha256": "8de63abc62f9eebe1159f4f28f9f1bf8fdecff0afef0195f1027f5535678b65b",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r4-reviewer-2",
+          "receiptSha256": "e23288adca09b28d33541f7dfeb273df712c5ba2efea36496f954d48f7c87e59",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "impl-r5",
+      "target": "575d66dfdbd2aed70f7f26fd76dcf15ede877f1d2cff3b3eca7bc73509acabe0",
+      "decisionFingerprint": "bd8622901f2c9c9499aef2de5d07fcf650c8c389f5a80f92973233aab697323e",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "seats": [
+        {
+          "attemptId": "impl-r5-reviewer-1",
+          "receiptSha256": "cd7f73613ae41af4ee7b02cff83bdacba48656e7921a26d634cb8c613138de0b",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r5-reviewer-2",
+          "receiptSha256": "29c2ea58cfd9447f088314f6dd5a69e25b1241574e6eb5771fdad17d9b48a567",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "impl-r6",
+      "target": "dc8b233066c93025040d5ac09a2595126d61d629926c52137dbbaeac49d8ce22",
+      "decisionFingerprint": "52b10bf59ec5e60f4ef5c6d878a5103a2d2547cdedaaf44edb4cfb8cd9844040",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "seats": [
+        {
+          "attemptId": "impl-r6-reviewer-1",
+          "receiptSha256": "71534f9a6ec91f12bab81d5e4cb3a918ffd41ec4f02598a6f758d733ad7db9f1",
+          "state": "SUCCEEDED",
+          "verdict": "PASS",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r6-reviewer-2",
+          "receiptSha256": "2a392f54096db67277bd92c3334705bedb3e6e8b0ec953ffb2b81fcc50fa7c3d",
+          "state": "SUCCEEDED",
+          "verdict": "PASS",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    }
+  ],
+  "currentReviewState": "R4/R5 full-scope findings corrected; R6 incremental PASS/PASS, guarded receipts verified, final product manifest unchanged",
+  "localChecks": {
+    "focused": {
+      "pass": 145,
+      "fail": 0,
+      "skip": 0
+    },
+    "replayBrowser": {
+      "pass": true,
+      "required": 22,
+      "pending": []
+    },
+    "fullSuite": {
+      "tests": 3830,
+      "pass": 3803,
+      "fail": 4,
+      "cancelled": 5,
+      "skipped": 18,
+      "singleRunGreen": false
+    },
+    "failedCasesRerun": {
+      "pass": 11,
+      "fail": 0,
+      "portOverride": "HOLDEM_PUBLIC_PORT=0"
+    },
+    "upgradeRollback": {
+      "pass": true,
+      "sourceUnchanged": true
+    },
+    "presentation": "same animation residual assertion fails on exact base with only the contrast measurement correction; final CI pending",
+    "multiplayerBrowser": {
+      "pass": true,
+      "checks": 19
+    },
+    "spectatorBrowser": {
+      "pass": true,
+      "checks": 14
+    },
+    "fullSuiteResumed": {
+      "tests": 3836,
+      "pass": 3818,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 18,
+      "runtime": "Node26.0.0 macOS",
+      "singleRunGreen": true,
+      "env": "HOLDEM_PUBLIC_PORT=0; caffeinate -i",
+      "logSha256": "d40e01008abe3b22247f8d04d39b1e230eaa8ad46be689b39015fc74774434f8",
+      "scope": "full local run plus final focused145; final commit CI still required"
+    },
+    "actualPermissionBudgetProbe": {
+      "pass": true,
+      "checks": [
+        "nine real POSIX EACCES with tight budget and healthy last row",
+        "unknown EIO conservative budget"
+      ],
+      "logSha256": "88b52b3b400d0e0d6d53da765d1ec0ae7434941ad5db6137bc931beb3289cfa5"
+    }
+  },
+  "resumedRouterVersion": "1.23.1",
+  "historicalRawReceipts": "R1-R3 temp files were cleaned before 2026-10-16 resume; retained summaries above are historical, not newly authenticated receipts",
+  "finalProductTarget": "dc8b233066c93025040d5ac09a2595126d61d629926c52137dbbaeac49d8ce22",
+  "userReviewLimitOverride": "2026-10-16 explicit instruction: proceed until evidence-based judgment says stop, irrespective of numeric review cap"
+}

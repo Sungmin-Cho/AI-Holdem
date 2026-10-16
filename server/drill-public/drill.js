@@ -184,6 +184,12 @@ export function createStudyController({ api, storage, storageKey, initialTarget 
   };
 }
 
+export function replayEntryState(health, token) {
+  if (health?.ok !== true) return { message: '플레이 기록 연결을 확인하지 못했습니다.', retry: true };
+  if (health.capabilities?.replayLibrary !== 1) return { message: '구버전 학습 서비스가 실행 중입니다. 서버에서 학습 서비스를 종료한 뒤 다시 열어 주세요.', retry: true };
+  return { href: `/replay.html#${new URLSearchParams({ token })}`, message: '', retry: false };
+}
+
 async function mountStudy() {
   const $ = (id) => document.getElementById(id);
   const entry = readStudyEntry(location);
@@ -433,7 +439,20 @@ async function mountStudy() {
   $('open-help').addEventListener('click', () => openHelp('learning'));
   $('open-display-settings').addEventListener('click', () => openDisplaySettings());
   $('source-help').append(helpButton('learning', '학습 수치의 의미'));
-  if (!entry.token) { $('status').textContent = '접속 토큰이 없습니다. 학습실에서 제공한 링크를 다시 열어 주세요.'; $('start').disabled = true; return; }
+  if (!entry.token) { if ($('replay-entry-status')) $('replay-entry-status').textContent = '플레이 기록을 열려면 접속 토큰이 필요합니다.'; $('status').textContent = '접속 토큰이 없습니다. 학습실에서 제공한 링크를 다시 열어 주세요.'; $('start').disabled = true; return; }
+  async function refreshReplayEntry() {
+    if (!$('replay-entry-link')) return;
+    $('replay-entry-link').hidden = true;
+    $('replay-entry-retry').hidden = true;
+    let health;
+    try { health = await api('/api/health'); } catch { health = null; }
+    const state = replayEntryState(health, entry.token);
+    $('replay-entry-status').textContent = state.message;
+    $('replay-entry-retry').hidden = !state.retry;
+    if (state.href) { $('replay-entry-link').href = state.href; $('replay-entry-link').hidden = false; }
+  }
+  $('replay-entry-retry')?.addEventListener('click', refreshReplayEntry);
+  void refreshReplayEntry();
   try {
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(entry.token));
     const identity = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('');

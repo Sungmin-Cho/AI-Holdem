@@ -102,13 +102,17 @@ function markerView(replay) {
   };
 }
 
-export function formatReplay(replay, { coachNote, trainingItems, names } = {}) {
+// `feedback: 'omit'` is for a viewer that has no coach or study source (the
+// replay library): no row gets a coach/study entry, so no wait copy or study
+// card is made, and there is no summary. The live table keeps the default.
+export function formatReplay(replay, { coachNote, trainingItems, names, feedback = 'live', viewer = 'user' } = {}) {
   if (!replay || replay.unavailable === true
     || replay.reason === 'REPLAY_NOT_COMPLETED'
     || replay.reason === 'REPLAY_UNAVAILABLE') {
     return markerView(replay);
   }
 
+  const withFeedback = feedback !== 'omit';
   const verbs = actionVerbs(replay.actions ?? []);
   const streets = [];
   let current = null;
@@ -135,12 +139,13 @@ export function formatReplay(replay, { coachNote, trainingItems, names } = {}) {
       amount: (action.action === 'call' || action.action === 'raise') && Number.isFinite(action.amount) && action.amount > 0 ? action.amount : null,
       pot: action.potTotal ?? null,
       cards,
+      recordedForced: action.playerId === viewer && action.forced === true,
       reasonKind: action.reasonKind ?? null,
       reasonText: reasonText(action),
       note,
       noteText: note ? `내 메모: ${note}` : '',
-      coach: coachFor(action, coachNote),
-      study: studyFor(action, trainingItems),
+      coach: withFeedback ? coachFor(action, coachNote) : null,
+      study: withFeedback ? studyFor(action, trainingItems) : null,
     });
   }
 
@@ -163,6 +168,6 @@ export function formatReplay(replay, { coachNote, trainingItems, names } = {}) {
       reliability: HEADER_RELIABILITY,
     },
     streets,
-    coachSummary: coachNote?.text ?? null,
+    coachSummary: withFeedback ? coachNote?.text ?? null : null,
   };
 }

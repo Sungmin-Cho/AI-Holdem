@@ -1,0 +1,18 @@
+.replay-library .app-header {display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap}
+.replay-workspace {max-width:1200px;margin:0 auto;padding:clamp(16px,3vw,32px)}
+#library-nav {display:flex;flex-wrap:wrap;gap:8px;margin:16px 0}
+#library-status {min-height:1.5em;max-width:72ch}
+.replay-records {list-style:none;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px}
+.replay-records li {border:1px solid var(--c-line-strong);border-radius:12px;padding:16px;min-width:0}
+.replay-records button {white-space:normal;text-align:left;min-height:44px}
+.replay-records p {overflow-wrap:anywhere;margin:8px 0 0}
+.replay-library button,.replay-library select {min-height:44px;font:inherit}
+.replay-library .btn {color:var(--c-text);background:var(--c-surface-1);border:1px solid var(--c-line-strong);border-radius:8px;padding:8px 12px;cursor:pointer}
+.replay-library .btn:disabled {opacity:.5;cursor:default}
+.replay-library .num {font-variant-numeric:tabular-nums}
+.replay-library button:focus-visible,.replay-library a:focus-visible {outline:2px solid var(--c-focus);outline-offset:3px}
+.replay-library #library-player {min-width:0}
+@media(max-width:600px) {.replay-workspace {padding:16px 8px}.replay-library .app-header {padding:12px}}
+/* The standalone page has room to wrap this public arithmetic instead of
+   truncating the pot plus uncollected bets on a narrow nine-seat table. */
+.replay-library .replayer-pot {max-width:180px;overflow:visible;text-overflow:clip;white-space:normal}

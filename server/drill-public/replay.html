@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>플레이 기록 · AI 홀덤</title>
+  <script src="/theme-boot.js"></script>
+  <link rel="stylesheet" href="/design-tokens.css">
+  <link rel="stylesheet" href="/ui-base.css">
+  <link rel="stylesheet" href="/public/replay.css">
+  <link rel="stylesheet" href="/replay.css">
+  <script type="module" src="/replay.js"></script>
+</head>
+<body class="ui-page replay-library" data-no-onboarding>
+  <header class="app-header">
+    <strong class="brand">AI 홀덤 <span class="brand-sub">플레이 기록</span></strong>
+    <label>금액 단위 <select id="replay-unit" aria-label="금액 단위"><option value="chips">칩</option><option value="bb">BB</option></select></label>
+    <a id="back-study" class="ui-btn ui-btn--quiet" href="/drill.html">학습실로</a>
+  </header>
+  <main class="replay-workspace">
+    <h1 class="ui-h1">플레이 기록</h1>
+    <p class="ui-muted">기록을 보는 동안 진행 중인 게임은 계속됩니다.</p>
+    <p id="library-status" role="status" aria-live="polite">기록을 준비하고 있습니다.</p>
+    <nav id="library-nav" aria-label="기록 탐색"></nav>
+    <section id="library-content" aria-label="기록 목록" tabindex="-1"></section>
+    <section id="library-player" aria-label="선택한 핸드 복기"></section>
+  </main>
+</body>
+</html>

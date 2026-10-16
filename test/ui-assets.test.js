@@ -112,3 +112,27 @@ test('app, relay and study listeners serve the new assets with correct types', a
     workspace.close();
   }
 });
+
+test('shared replay import graph loads on host, public participants and legacy relay without exposing the library API', async () => {
+  const workspace=createBrowserWorkspace();let app,relay;
+  try {
+    app=await startAppService(workspace.root,{publicPort:0,publicHost:'127.0.0.1',resolver:async()=>({player:null,upper:null,notices:[]})});
+    relay=await startServer({gameDir:workspace.root,port:0,token:'replay-static-relay'});
+    for(const origin of [app.origin,app.publicOrigin,'http://127.0.0.1:'+relay.port]) {
+      const seen=new Set();
+      async function visit(pathname) {
+        if(seen.has(pathname))return;seen.add(pathname);
+        const response=await fetch(origin+pathname);assert.equal(response.status,200,pathname);
+        const source=await response.text();if(!pathname.endsWith('.js'))return;
+        const scan=scanModule(source);assert.deepEqual(scan.unresolved,[],pathname);
+        for(const imported of scan.imports) {
+          const spec=typeof imported==='string'?imported:imported.specifier;
+          await visit(new URL(spec,origin+pathname).pathname);
+        }
+      }
+      await visit('/replay-player.js');await visit('/replay.css');
+      const response=await fetch(origin+'/api/replays/games?token=replay-static-relay',{headers:{authorization:'Bearer '+app.token,'x-drill-token':'some-study-token'}});
+      assert.notEqual(response.status,200);
+    }
+  } finally {await app?.close();await relay?.close();workspace.close();}
+});

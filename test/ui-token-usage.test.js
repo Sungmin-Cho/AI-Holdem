@@ -7,9 +7,11 @@ import fs from 'node:fs';
 const PAGE_CSS = [
   'server/public/ui-base.css',
   'server/public/table.css',
+  'server/public/replay.css',
   'server/public/lobby.css',
   'server/public/join.css',
   'server/drill-public/drill.css',
+  'server/drill-public/replay.css',
 ];
 
 function withoutComments(css) {
