@@ -64,6 +64,8 @@ jobs:
         run: npm run test:lobby:browser
       - name: Multiplayer browser journey
         run: npm run test:multiplayer:browser
+      - name: Coaching study next-step browser journey
+        run: node test/browser/coaching-study-journey.mjs --out-dir output/playwright/ui-journey/coaching-study
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 26.0.0

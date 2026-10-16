@@ -35,6 +35,20 @@
 }
 .study-intro { display: grid; gap: var(--sp-2); margin-bottom: var(--sp-5); }
 
+/* ---- Next step ------------------------------------------------------------ */
+.next-step { display: grid; gap: var(--sp-2); margin-bottom: var(--sp-5); padding: var(--sp-5); border: 1px solid var(--c-line-strong); border-radius: var(--r-panel); background: var(--c-surface-2); }
+.next-step-eyebrow { color: var(--c-text-2); font-size: var(--fs-12); font-weight: 700; letter-spacing: 0.04em; }
+.next-step-title { font-size: var(--fs-16); font-weight: 700; line-height: 1.45; }
+.next-step-detail, .next-step-coverage, .next-step-after, .next-step-notes { color: var(--c-text-2); font-size: var(--fs-13); line-height: 1.5; }
+.next-step-coverage, .next-step-after { display: grid; gap: var(--sp-1); padding: var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-card); background: var(--c-surface-1); }
+.next-step-after-title { color: var(--c-text); font-weight: 700; }
+.next-step-notes { padding-left: var(--sp-4); }
+.next-step-choices { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.next-step-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); }
+.next-step-gate { flex: 1 1 200px; color: var(--c-text-2); font-size: var(--fs-13); }
+.next-step-fine { color: var(--c-text-2); font-size: var(--fs-12); }
+.next-step [hidden] { display: none; }
+
 /* ---- Mode picker --------------------------------------------------------- */
 /* The field's label and select join the grid so the description can sit under
    the select and above the start button on a phone. */

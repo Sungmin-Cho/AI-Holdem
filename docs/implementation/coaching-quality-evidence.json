@@ -1,0 +1,1129 @@
+{
+  "schemaVersion": 1,
+  "auditBaseline": "b239dd72261070f8834ee36d3d7129f40f0fb546",
+  "integratedBase": "edb0b57bdb07d46718776f0a30446062521455a9",
+  "branch": "Sungmin-Cho/holdem-coaching-quality",
+  "recordedAt": "2026-10-16T07:04:01.796998Z",
+  "receiptMeaning": "CLI process/envelope status, not correctness; dispositions and host tests are separate.",
+  "reviewBasis": "Original core R3 plus integration R1 and single-line wording R2; comparison R3. Source hashes below match delivered files.",
+  "supervisorReceipts": [
+    {
+      "attemptId": "design-r1",
+      "decisionFingerprint": "c82c4baf1519773dfae583cba23e89de67805fc7a6095896d3cf5d42ae212046",
+      "requestedModelId": "claude-sonnet-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "read-only",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "50890e920078e0a3b9c834814cc9b2ae21c7bca5a585de5f5769760cfedb849b",
+      "state": "SUCCEEDED",
+      "verdict": "PASS_WITH_CHANGES",
+      "terminationConfirmed": true,
+      "outputSha256": "e38a72a69cc96de00b70eb98d599dd764f12f92d4189d0a3df6fc84410007d3b",
+      "servedModels": [
+        "claude-sonnet-5-5"
+      ]
+    },
+    {
+      "attemptId": "runtime-maker",
+      "decisionFingerprint": "ba00276ea9462132b68595d55d66cd63c9db9746ad278ce0f4d9b99de3afd799",
+      "requestedModelId": "claude-sonnet-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "write",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "2cf2130e9ac85315788d88a304954f12b88d61650f467a4fc65828937d6a1e0b",
+      "state": "SUCCEEDED",
+      "verdict": null,
+      "terminationConfirmed": true,
+      "outputSha256": "d491d008250100c3d5ced827b42581cf2d512251a585c26168b017cc64902a55",
+      "servedModels": [
+        "claude-sonnet-5-5"
+      ]
+    },
+    {
+      "attemptId": "ranges-maker",
+      "decisionFingerprint": "ba00276ea9462132b68595d55d66cd63c9db9746ad278ce0f4d9b99de3afd799",
+      "requestedModelId": "claude-sonnet-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "write",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "fe3437a7e67d1177e44336358e02bbbc90affd7bb8764aac7752570e7e09df6f",
+      "state": "SUCCEEDED",
+      "verdict": null,
+      "terminationConfirmed": true,
+      "outputSha256": "80e083eff0c1f33c3194cbb772a4dbf288f96f1dbb919f647718e6d99f7f1cc4",
+      "servedModels": [
+        "claude-sonnet-5-5"
+      ]
+    },
+    {
+      "attemptId": "coach-maker",
+      "decisionFingerprint": "ba00276ea9462132b68595d55d66cd63c9db9746ad278ce0f4d9b99de3afd799",
+      "requestedModelId": "claude-sonnet-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "write",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "17f2146df63b5ef6c043f3aa7d208b19da63fdc51765c74eee0e3cd81ec2ab50",
+      "state": "SUCCEEDED",
+      "verdict": null,
+      "terminationConfirmed": true,
+      "outputSha256": "27ddae6a21f510d9ed0215c94115544f43c0a2d2632bc3db801029bc6530e27d",
+      "servedModels": [
+        "claude-sonnet-5-5"
+      ]
+    },
+    {
+      "attemptId": "study-maker",
+      "decisionFingerprint": "ba00276ea9462132b68595d55d66cd63c9db9746ad278ce0f4d9b99de3afd799",
+      "requestedModelId": "claude-sonnet-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "write",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "ab47239304144152ced405f6dcdb76183569bd8afdc41d2048e614eef8456909",
+      "state": "SUCCEEDED",
+      "verdict": null,
+      "terminationConfirmed": true,
+      "outputSha256": "d3dddc7f8ad15196b6b194a6bb479e43b8887f77e186573a77d83258a64b3028",
+      "servedModels": [
+        "claude-sonnet-5-5"
+      ]
+    },
+    {
+      "attemptId": "coach-fix",
+      "decisionFingerprint": "7af4c3984a9f8e4aa63d054236d27ad6f76d88f526cc43feae7a39652b60e416",
+      "requestedModelId": "claude-sonnet-5-5",
+      "requestedEffort": "xhigh",
+      "transportId": "codex.to_claude",
+      "permissionMode": "write",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "c03a34cf7aa55f8fbcb46e74dd8c1419c773b5178e4c44679a41d7249eff2087",
+      "state": "SUCCEEDED",
+      "verdict": null,
+      "terminationConfirmed": true,
+      "outputSha256": "e3a07a56761b5745c91a5228f8acda09780d6ab17aa58a87a165ef9250c5c901",
+      "servedModels": [
+        "claude-sonnet-5-5"
+      ]
+    },
+    {
+      "attemptId": "runtime-fix",
+      "decisionFingerprint": "fd486064fdc1a8b17d5f001149affc0937a008da784c8a1629dc7ea26f643b65",
+      "requestedModelId": "claude-sonnet-5-5",
+      "requestedEffort": "xhigh",
+      "transportId": "codex.to_claude",
+      "permissionMode": "write",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "1beb474895fa4cb141befee3816f1fbdce8259506e6710b7888e3104046a116d",
+      "state": "SUCCEEDED",
+      "verdict": null,
+      "terminationConfirmed": true,
+      "outputSha256": "7c6f9bf010e6f7cc2742a6327854bdfcf1c0d07498b21c4430342ba69c5788d4",
+      "servedModels": [
+        "claude-sonnet-5-5"
+      ]
+    },
+    {
+      "attemptId": "ranges-r2",
+      "decisionFingerprint": "069172d69b1e6ad7ac5f399bcb81a68a1fb7287b0db0f9138e6a6f3101629db3",
+      "requestedModelId": "claude-sonnet-5-5",
+      "requestedEffort": "xhigh",
+      "transportId": "codex.to_claude",
+      "permissionMode": "write",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "6b71790ed2afe04f2f0c2132e74d19f77568c2b371006baa55df0caf2ad13ffd",
+      "state": "SUCCEEDED",
+      "verdict": null,
+      "terminationConfirmed": true,
+      "outputSha256": "8aa79c6420b7a7eeaecf2917a70c26299c0eff2c3df377333315c8f6cbaa80d9",
+      "servedModels": [
+        "claude-sonnet-5-5"
+      ]
+    },
+    {
+      "attemptId": "study-r2",
+      "decisionFingerprint": "413e64df15bb964da112cc3f2bc695b62513fd08c5f4f1ec11fd5d2d53ca28ff",
+      "requestedModelId": "claude-sonnet-5-5",
+      "requestedEffort": "xhigh",
+      "transportId": "codex.to_claude",
+      "permissionMode": "write",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "34f7a9b88ac2f871af82f6368c4b54568ade5fd72882905154733f26ebb3c2f8",
+      "state": "SUCCEEDED",
+      "verdict": null,
+      "terminationConfirmed": true,
+      "outputSha256": "e00043121865d2ccf0986e771c20c592657bb70e16ad6abb326cee042aff42dc",
+      "servedModels": [
+        "claude-sonnet-5-5"
+      ]
+    },
+    {
+      "attemptId": "comparison-r2",
+      "decisionFingerprint": "3cbc854707dc67f221c88b1b678b1dbde92d27c0d38c5f49cee404ace9174348",
+      "requestedModelId": "claude-fable-5-1",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "write",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "189a7db5196ea74dae7eba81c412b28536c4fe2ed5498f3722b35d877946b81c",
+      "state": "SUCCEEDED",
+      "verdict": null,
+      "terminationConfirmed": true,
+      "outputSha256": "e29cab7e6b4496ece3be26477091aae682ca6c70f14b4562a7cc2a631d9f59bc",
+      "servedModels": [
+        "claude-fable-5-1"
+      ]
+    },
+    {
+      "attemptId": "core-r1-a",
+      "decisionFingerprint": "802edd21c3926a4c5dee3651bb0840632e5b8819bf8596b337c15b122dcdbd0f",
+      "requestedModelId": "claude-opus-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "read-only",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "3ec5163de7e1206a2d3c54e612b4935b891fbaf322b0a8eeefb4289f34f308d0",
+      "state": "SUCCEEDED",
+      "verdict": "PASS_WITH_CHANGES",
+      "terminationConfirmed": true,
+      "outputSha256": "76b7cbba5b93d462bfccea3a7d894e4c168400d96d233769b8095767c287ebde",
+      "servedModels": [
+        "claude-opus-5-5"
+      ]
+    },
+    {
+      "attemptId": "core-r1-b",
+      "decisionFingerprint": "802edd21c3926a4c5dee3651bb0840632e5b8819bf8596b337c15b122dcdbd0f",
+      "requestedModelId": "gpt-6-astra",
+      "requestedEffort": "high",
+      "transportId": "codex.native",
+      "permissionMode": "read-only",
+      "outputEnvelope": "codex-exec-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "5cba131dd0a693c1b3c07ba3f62df7d19c7f0fd49cc158ab7f7353d290d3cf2d",
+      "state": "SUCCEEDED",
+      "verdict": "FAIL",
+      "terminationConfirmed": true,
+      "outputSha256": "21da2b31f7d2bbde1ba41809e426fc660fbd0267bdfdf864055c2f6855dbb8bb",
+      "servedModels": null
+    },
+    {
+      "attemptId": "comparison-r1",
+      "decisionFingerprint": "80489a7f6c0546fe8b337b7efa31f762386e2e260264bbb21cf7fa9979dbe726",
+      "requestedModelId": "gpt-5.6-terra",
+      "requestedEffort": "high",
+      "transportId": "codex.native",
+      "permissionMode": "read-only",
+      "outputEnvelope": "codex-exec-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "a2224a57e9cbb2b1b0325cb245c88e127673dc5c56b932294c412d6c408b4966",
+      "state": "SUCCEEDED",
+      "verdict": "PASS_WITH_CHANGES",
+      "terminationConfirmed": true,
+      "outputSha256": "6e22b9272792152f94be7b2fe3be4c0329e684749ec0fd9eac86bb36a524e07a",
+      "servedModels": null
+    },
+    {
+      "attemptId": "core-r2-a",
+      "decisionFingerprint": "69369500e951f047277357051048167f450790f7b556965a42b765c1c04c2543",
+      "requestedModelId": "claude-opus-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "read-only",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "8dc194d8c7422a5863fd1b4296f07bf591f9fdcce471c50909c66a6e2fb29da2",
+      "state": "INVALID_OUTPUT",
+      "verdict": null,
+      "terminationConfirmed": true,
+      "outputSha256": "fb544186a9f989bf0025a1cad00c3e48ca50883c68493d5728541407edda3f55",
+      "servedModels": [
+        "claude-opus-5-5"
+      ]
+    },
+    {
+      "attemptId": "core-r2-b",
+      "decisionFingerprint": "69369500e951f047277357051048167f450790f7b556965a42b765c1c04c2543",
+      "requestedModelId": "gpt-6-astra",
+      "requestedEffort": "high",
+      "transportId": "codex.native",
+      "permissionMode": "read-only",
+      "outputEnvelope": "codex-exec-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "e7ffa8865069f0c2e427d336f3e3b7092f375e9ef4e16e144f824850c178935b",
+      "state": "SUCCEEDED",
+      "verdict": "PASS_WITH_CHANGES",
+      "terminationConfirmed": true,
+      "outputSha256": "27826bd7fb569d8a050479e63dab41533762a85a8fb9d511a2fc7dbda1053cb5",
+      "servedModels": null
+    },
+    {
+      "attemptId": "comparison-r2-review",
+      "decisionFingerprint": "eee0bec6552b724e7c43fc6e93977881692b19a51dc5df97bc544b4262fd0b3d",
+      "requestedModelId": "gpt-5.6-terra",
+      "requestedEffort": "high",
+      "transportId": "codex.native",
+      "permissionMode": "read-only",
+      "outputEnvelope": "codex-exec-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "bb869fef977c289fd656d3766aff5dfb262a8a7d8d78065c149eb18fb48d1688",
+      "state": "SUCCEEDED",
+      "verdict": "FAIL",
+      "terminationConfirmed": true,
+      "outputSha256": "2233362b60a140c7f301d35fa2e6faf00d84972c33d5a7fa4f6b7268285f0157",
+      "servedModels": null
+    },
+    {
+      "attemptId": "core-r3-a",
+      "decisionFingerprint": "b148b32f55b7ac5e4ba543d1d084b264d7aadcc5a62704e2a0abe3dbd2adc80c",
+      "requestedModelId": "claude-opus-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "read-only",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "cbd7a873d5c0216bec8a921926bd1426a7f58a3db81b68c5c1c73d8384e321fa",
+      "state": "SUCCEEDED",
+      "verdict": "PASS_WITH_CHANGES",
+      "terminationConfirmed": true,
+      "outputSha256": "b8f960f2bd4e0e078886d3a283640a1ae61caa24d7dfd480bfd31364058a7d9a",
+      "servedModels": [
+        "claude-opus-5-5"
+      ]
+    },
+    {
+      "attemptId": "core-r3-b",
+      "decisionFingerprint": "b148b32f55b7ac5e4ba543d1d084b264d7aadcc5a62704e2a0abe3dbd2adc80c",
+      "requestedModelId": "gpt-6-astra",
+      "requestedEffort": "high",
+      "transportId": "codex.native",
+      "permissionMode": "read-only",
+      "outputEnvelope": "codex-exec-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "4a41f424e5b77b51ebea1dd5811c78de663309af3c4efcca3edf721ddc67dd8c",
+      "state": "SUCCEEDED",
+      "verdict": "PASS",
+      "terminationConfirmed": true,
+      "outputSha256": "a1bb4170d4ef50ec3ccfef0b61c46c5e0b84639bbd1355c40ff996c3e4c8ec22",
+      "servedModels": null
+    },
+    {
+      "attemptId": "comparison-r3-review",
+      "decisionFingerprint": "70eb94d08332a545450c7c952021f186ee31bc74685829f60f299f2aff8cd7a4",
+      "requestedModelId": "gpt-5.6-terra",
+      "requestedEffort": "high",
+      "transportId": "codex.native",
+      "permissionMode": "read-only",
+      "outputEnvelope": "codex-exec-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "3b8333bf93167658839150d3090c6231a36d1219deac3e40fcc8a4718a212259",
+      "state": "SUCCEEDED",
+      "verdict": "PASS",
+      "terminationConfirmed": true,
+      "outputSha256": "34a32a0a6452981cdedae54cc05af469e493ce48d4f09d3f159e45926ca07e7c",
+      "servedModels": null
+    },
+    {
+      "attemptId": "integration-r1-a",
+      "decisionFingerprint": "a7d2391bdb9730fa60f830d548258efef931bd9dc74c078e02be059bc97f3842",
+      "requestedModelId": "claude-opus-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "read-only",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "dcec26029be26ac649c038fe7c0ed5f081333d52a7829b16bbd77a7e386df930",
+      "state": "SUCCEEDED",
+      "verdict": "PASS",
+      "terminationConfirmed": true,
+      "outputSha256": "60d1c83578fc75323144a208e21f39a3b5edd2bca7400ccceff0058c03ec0740",
+      "servedModels": [
+        "claude-opus-5-5"
+      ]
+    },
+    {
+      "attemptId": "integration-r1-b",
+      "decisionFingerprint": "a7d2391bdb9730fa60f830d548258efef931bd9dc74c078e02be059bc97f3842",
+      "requestedModelId": "gpt-6-astra",
+      "requestedEffort": "high",
+      "transportId": "codex.native",
+      "permissionMode": "read-only",
+      "outputEnvelope": "codex-exec-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "23c24ad9ace9826b95a204679734c85e9e733dde92d28939b94e714b6e1999f7",
+      "state": "SUCCEEDED",
+      "verdict": "PASS",
+      "terminationConfirmed": true,
+      "outputSha256": "2df9edfcfdb4993a68abece14cfabbcfc501ba7f95354cdc2dfeed3a9e0453ea",
+      "servedModels": null
+    },
+    {
+      "attemptId": "integration-r2-wording",
+      "decisionFingerprint": "2d70e899d14cc10ee8af666085186da46d45ca89c09931dbbf8e9a75292c9de0",
+      "requestedModelId": "claude-opus-5-5",
+      "requestedEffort": "high",
+      "transportId": "codex.to_claude",
+      "permissionMode": "read-only",
+      "outputEnvelope": "claude-print-json-v1",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "receiptSha256": "5a3cf61b6ee283846cada5c6a54c306e72d0e708c37bd094437321f2e6025231",
+      "state": "SUCCEEDED",
+      "verdict": "PASS",
+      "terminationConfirmed": true,
+      "outputSha256": "b553c193bf1b3a450c54b0507075e1ece478ae7c4d5781cb6f8fc69ff176cb93",
+      "servedModels": [
+        "claude-opus-5-5"
+      ]
+    }
+  ],
+  "reviewedSourceSha256": {
+    ".github/workflows/test.yml": "1650c6b962cd121ac4abfeda5c586a73d419c65c3e28be9f25045e1569fb257c",
+    "server/drill-public/drill.css": "eb7eb98928188e235e7f0e311891abc9fe54cd02f3a14a326f5fad37b73ca42c",
+    "server/drill-public/drill.html": "2239cdcb8e4377e45377984ad25922f19f7185ffcb5fc4bef3d0c8040d1ea7f5",
+    "server/drill-public/drill.js": "50ca3d2cc1f064f1966317ff4b07f03bcb976f0d4a60dd5307230741054c3be7",
+    "server/drill-public/study-format.js": "edf0cd3ef5aa1596bad639835ae9ff4587536ab8be8e06e2812609716d22fd37",
+    "server/public/lobby.js": "d4ed4a502915d882a74af9baee8279c484eeb5ddf99c3d9204d28a6451c01c8b",
+    "shared/decision-facts.js": "ce407da8871b0aa3cffa99eb1bf3ab61b9fd27e1197d57645a560ed7e2988bc7",
+    "test/browser/coaching-study-journey.mjs": "1b5872aef77656fab6836ef0c4424ec6c9a0e1115948bf86685d96c7d8f5d26d",
+    "test/ci-shards.test.js": "e266eea2bbb50fb19c8fbac52ef8abe0cefe3f6d3d87e719c2fbf3501ee2c357",
+    "test/coach-prospective-input.test.js": "0fb6e8e22726134fde69ace76ac9139c425d0d2709ff1130e36eef5c9cff70f2",
+    "test/coach-ranges.test.js": "cee70714bdad30a8c0396ed9a59f0f073f621a29dd212e59007524c6e7894df6",
+    "test/game-loop-finalize.test.js": "00c2ee322bae162177804ac940d84c7ac60e85bd94504e20b9426897803ea53d",
+    "test/game-loop-learning-feedback.test.js": "19eb64f73abad0e7ba9018d273774f1d6bf302517d90ad43ec34b79845845870",
+    "test/game-loop.test.js": "e4099b452382b125c7c5715aab8b9fc8572aaeb121999c1aa1e30d24e40ecdda",
+    "test/helpers/ci-shards.mjs": "746344d86d7bd1abeab820a7305d39f8564f09ac2bb6ce3b45669bf729e361ae",
+    "test/learning-integration-session.test.js": "b381957efe429346f1eda4bd90d7e55027a89c93f0a9fc7d5403ff021433ddbb",
+    "test/player-runtime.test.js": "578ccc9d970a4d30efa096c32f963fe1f6d6c5676283ddade58e51d26c29f403",
+    "test/reference-v3-inventory.test.js": "dc445afd64f848d4df0f1fac5c65e4e9107da00b0a7e5df707b7ae9853ebcbeb",
+    "test/review-facts-integrity.test.js": "93777c79e25c39716e4b2ae5460786e9cf67ed18e8fe51200007fe4800131c01",
+    "test/study-next-step.test.js": "38c884783688577d8ec104be6dd0cadc1a877ff78942e35840807ce71a48e03c",
+    "tools/coach-prompt.js": "21abf9a78d58ada428f12a441df933a3749d844b894096db6b0fa0ad5dca3b36",
+    "tools/drill-cli.js": "afad7602d81794ce104e481335abf3556a898563d8ec77f2ab9ce0fd13b821cf",
+    "tools/drill-server.js": "a0a7792448f946d6400c8eed5dd8b8cd5a683f769526626b075c36b4624e6d67",
+    "tools/game-loop.js": "76e5bb093eb8edad4818d05bcab1e099b4fc943ec0283ac35cda749f19230fe4",
+    "tools/player-runtime.js": "9c66f0831bc6b90f724b3ab5a409ba9e8c68aee7866e4070a3b5269933db6b80",
+    "tools/review-facts.js": "9e0022a1bee33477335b6e81c8cbb508a9bf0609ad96d443cf13cf5e297184c8",
+    "training/ranges/coach-estimate.js": "c63e43d3c673535ad5cbdba1b2a6ca646f07c4a792d44cc1ed4dad64f61661bf",
+    "README.ko.md": "9484f2c639a141dc9db67b3a7027bd89ca7a3d8a8027f6756c7b680a2e8c331b",
+    "README.md": "987fdc25026d48c13b2e9cadb6755e6a914da9f338149a9550a5d3071f92afde",
+    "docs/operations.ko.md": "6ae5441c29e3c2bda5d4fbb9f0499e598d06fef3a159379f7271272a16791b3a",
+    "test/codex-player-comparison.test.js": "029a99e76af3db136e0dd4decab72ab9c4dd82dde0b9c0a2e7d05f12fd6695d1",
+    "tools/compare-codex-players.js": "432ff665cb032f1b7ce416db43319dea8581eb420c35c7b447b8e9332ee0a566"
+  },
+  "preservedPolicyReferenceSha256": {
+    "training/data/README.md": "f9d1919fc6a48314f6ad8ee99c8b9dd3c7f050308d7534af32ee46c3e5b2ee76",
+    "training/data/legacy-preflop-recipe.js": "ace519f300f9db9eea79560971d8e1c58d6adcc7559f9a0fa165967cf724f3d6",
+    "training/data/preflop-baseline-v1.json": "7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf",
+    "training/data/preflop-baseline-v1.sha256": "ca3f49d3f562930585231a75d5188e547a865a7eb47d3158d8e9238d63d047b7",
+    "training/data/preflop-baseline-v2.json": "1147b530a398c0b424379689d966d9be1fb60b665600b2600993689212fe02f7",
+    "training/data/preflop-baseline-v2.sha256": "1f0ebd826dc854309e47efcfba499b80a0d5771e923300a085bd7200306c9a05",
+    "training/data/preflop-baseline-v3.json": "0c04d64b5ea4db3ec9f73a394d85ef80bd0ba00a4309930610be35d6d6f0e2a7",
+    "training/data/preflop-baseline-v3.sha256": "25960819bbe5fd563fd229a74a9c41b6d58c7da10e2b4048e4810f48d3af29ed",
+    "training/data/preflop-equity-v1.js": "33f7affca505109afdfa8b057467d84d3a19e3a482db2bb845e76fe4c392036b",
+    "training/data/preflop-equity-v1.sha256": "89c6de8edd667040ca811faea91e5f678af1eb9f31a38f0e6af7e1bcd0f2b78b",
+    "training/policies/baseline.js": "9e6437fc5761403ebf4c0059151c5f8a3ed26f825032c235b0bc276fb9cf3e5e",
+    "training/policies/catalog.js": "ce125476da48d1fd6159509e7b6ae61d6b0a43ed865cc3baa35f54e8058a8150",
+    "training/policies/contracts.js": "e99a87d533bdba252ec0afb010f27e466986f92b93c7e84ed28ac9b66f601341",
+    "training/policies/deviation.js": "9e8617eca83beaa13c160643405b88a84467738bcd3eec2c0eae2081847ea3fe",
+    "training/policies/hand-strength.js": "0452780002ab40c63dfe4f0e5977a92228d7ad347eeae77c3c7226b17645624f",
+    "training/policies/personas-v3.js": "df55a3195bf850649dff239b8e6fa70a44e9edf7796634291f487e2657d9819c",
+    "training/policies/public-line.js": "fcb6528673d05126ccdfb9a7ac144d5df926fb3150b9cf3596cb7de93050132e",
+    "training/policies/reveal.js": "00e2f1530d7955a167e47347be899b6f06457be1095770033ece599422739b0a",
+    "training/policies/rng.js": "2a5e2c8b6363e62c9b4e1056ec159912dc531f4a2c8753db05ebfb61b432a4ae",
+    "training/policies/rule-based.js": "8144fbbee418aa88e40048b1a813f75fcf7a78c3e9b4ce648593cff6ac867f8f",
+    "training/policies/sizing.js": "2a68b245a06cc68c628bb8e38ba9212a107869321506ce95db5dfca251555100",
+    "training/policies/strategy-mirror.js": "fd33762d1553f96d785088b525f477aff0a8fee3cf22660622b8c260c54ee694",
+    "training/policies/strategy-v2.js": "d08d8c448aa51a354b9649fa0c18a6d394eb4fae606cf976ec6a45de77f9dd06",
+    "training/policies/strategy-v3.js": "e44248f559d5c1011e77dc00d81408a278d3f72c23e0a4cea15d0995cdc6aa05",
+    "training/ranges/estimate-v3.js": "0d49d99b3b5927377a085293f9e4a58209810c1053cf26a052a7715aab7d2ae4"
+  },
+  "localFullSuite": {
+    "command": "HOLDEM_PUBLIC_PORT=0 npm run test:ci",
+    "node": "v26.0.0",
+    "exitCode": 1,
+    "tests": 3958,
+    "pass": 3938,
+    "fail": 2,
+    "cancelled": 0,
+    "skipped": 18,
+    "duration_ms": 1855621.512875,
+    "logSha256": "39fba1a6c17cb5dfec5869949020ee6cea7dd8b8f7b4a9bf119e4786f7a5ec4b",
+    "status": "Not green: two own-replay vocabulary assertions failed before final one-line caveat correction."
+  },
+  "finalConsumerSuite": {
+    "exitCode": 0,
+    "tests": 88,
+    "pass": 88,
+    "fail": 0,
+    "cancelled": 0,
+    "skipped": 0,
+    "logSha256": "5869cc05f3e733b434e94a4570c1348889313b68555a587c5d03a0428565f5bd",
+    "resolution": "Strict projection/DOM tests unchanged; shared simulation caveat changed to equivalent neutral wording. All affected fact/coach/replay modules rerun."
+  },
+  "finalCompleteCiGate": "Exact final PR SHA GitHub CI is required before merge; this pre-PR local receipt does not assert that future result.",
+  "browserJourneys": {
+    "studyNextStep": {
+      "pass": true,
+      "checks": 15,
+      "resultSha256": "e4704bda4e2c98707a50e6b5a4960c7ed697e28670a2bde1d00efe94c1d31bf1"
+    },
+    "replayLibrary": {
+      "pass": true,
+      "checks": 22,
+      "resultSha256": "3f67ce3b86be010ad9b24e299c7f293d36d1efd5e7ba7d5743aaee1aaae1ede4"
+    },
+    "learning": {
+      "pass": true,
+      "checks": 19,
+      "resultSha256": "efa861218517efcdfc6f98ed263af37d603492d03c7d40bba0052920bd361ab1"
+    }
+  },
+  "actualProviderCheckpoints": [
+    {
+      "schema": "codex-player-comparison/1",
+      "options": {
+        "samples": 6,
+        "timeoutMs": 60000,
+        "budgetMs": 900000
+      },
+      "elapsedMs": 124178,
+      "ok": true,
+      "aborted": null,
+      "cleanup": {
+        "disposed": true,
+        "removed": true,
+        "tmp": null,
+        "errors": []
+      },
+      "variants": [
+        {
+          "id": "luna-default",
+          "requested": {
+            "model": "gpt-6-luna",
+            "effort": "model-default"
+          },
+          "probe": {
+            "ok": true,
+            "containment": true,
+            "elapsedMs": 5798
+          },
+          "summary": {
+            "samples": 6,
+            "attempted": 6,
+            "legal": 6,
+            "invalid": 0,
+            "timeout": 0,
+            "failed": 0,
+            "terminationUnconfirmed": 0,
+            "skipped": 0,
+            "modelMismatches": 0,
+            "decideMs": {
+              "observations": [
+                3594,
+                3369,
+                3222,
+                3840,
+                3471,
+                3806
+              ],
+              "median": 3533,
+              "min": 3222,
+              "max": 3840,
+              "overSoft25s": 0
+            },
+            "actions": {
+              "raise": 1,
+              "call": 3,
+              "fold": 2
+            },
+            "probeOk": true
+          },
+          "samples": [
+            {
+              "spotId": "preflop-open-btn",
+              "status": "ok",
+              "legal": true,
+              "action": "raise",
+              "amount": 150,
+              "warmupMs": 3015,
+              "decideMs": 3594,
+              "errorCode": null,
+              "errorPhase": null,
+              "argvModel": "gpt-6-luna",
+              "argvEffort": "model-default",
+              "observedCalls": null
+            },
+            {
+              "spotId": "preflop-facing-open-bb",
+              "status": "ok",
+              "legal": true,
+              "action": "call",
+              "amount": null,
+              "warmupMs": 3500,
+              "decideMs": 3369,
+              "errorCode": null,
+              "errorPhase": null,
+              "argvModel": "gpt-6-luna",
+              "argvEffort": "model-default",
+              "observedCalls": null
+            },
+            {
+              "spotId": "preflop-facing-3bet-btn",
+              "status": "ok",
+              "legal": true,
+              "action": "call",
+              "amount": null,
+              "warmupMs": 2692,
+              "decideMs": 3222,
+              "errorCode": null,
+              "errorPhase": null,
+              "argvModel": "gpt-6-luna",
+              "argvEffort": "model-default",
+              "observedCalls": null
+            },
+            {
+              "spotId": "flop-facing-bet-bb",
+              "status": "ok",
+              "legal": true,
+              "action": "call",
+              "amount": null,
+              "warmupMs": 2995,
+              "decideMs": 3840,
+              "errorCode": null,
+              "errorPhase": null,
+              "argvModel": "gpt-6-luna",
+              "argvEffort": "model-default",
+              "observedCalls": null
+            },
+            {
+              "spotId": "turn-facing-bet-btn",
+              "status": "ok",
+              "legal": true,
+              "action": "fold",
+              "amount": null,
+              "warmupMs": 3215,
+              "decideMs": 3471,
+              "errorCode": null,
+              "errorPhase": null,
+              "argvModel": "gpt-6-luna",
+              "argvEffort": "model-default",
+              "observedCalls": null
+            },
+            {
+              "spotId": "river-facing-overbet-bb",
+              "status": "ok",
+              "legal": true,
+              "action": "fold",
+              "amount": null,
+              "warmupMs": 3163,
+              "decideMs": 3806,
+              "errorCode": null,
+              "errorPhase": null,
+              "argvModel": "gpt-6-luna",
+              "argvEffort": "model-default",
+              "observedCalls": null
+            }
+          ]
+        },
+        {
+          "id": "sol-low",
+          "requested": {
+            "model": "gpt-6.1-sol",
+            "effort": "low"
+          },
+          "probe": {
+            "ok": true,
+            "containment": true,
+            "elapsedMs": 6808
+          },
+          "summary": {
+            "samples": 6,
+            "attempted": 6,
+            "legal": 6,
+            "invalid": 0,
+            "timeout": 0,
+            "failed": 0,
+            "terminationUnconfirmed": 0,
+            "skipped": 0,
+            "modelMismatches": 0,
+            "decideMs": {
+              "observations": [
+                5165,
+                4994,
+                5927,
+                5076,
+                4878,
+                9160
+              ],
+              "median": 5121,
+              "min": 4878,
+              "max": 9160,
+              "overSoft25s": 0
+            },
+            "actions": {
+              "raise": 1,
+              "call": 3,
+              "fold": 2
+            },
+            "probeOk": true
+          },
+          "samples": [
+            {
+              "spotId": "preflop-open-btn",
+              "status": "ok",
+              "legal": true,
+              "action": "raise",
+              "amount": 125,
+              "warmupMs": 4131,
+              "decideMs": 5165,
+              "errorCode": null,
+              "errorPhase": null,
+              "argvModel": "gpt-6.1-sol",
+              "argvEffort": "low",
+              "observedCalls": null
+            },
+            {
+              "spotId": "preflop-facing-open-bb",
+              "status": "ok",
+              "legal": true,
+              "action": "call",
+              "amount": null,
+              "warmupMs": 3987,
+              "decideMs": 4994,
+              "errorCode": null,
+              "errorPhase": null,
+              "argvModel": "gpt-6.1-sol",
+              "argvEffort": "low",
+              "observedCalls": null
+            },
+            {
+              "spotId": "preflop-facing-3bet-btn",
+              "status": "ok",
+              "legal": true,
+              "action": "call",
+              "amount": null,
+              "warmupMs": 3685,
+              "decideMs": 5927,
+              "errorCode": null,
+              "errorPhase": null,
+              "argvModel": "gpt-6.1-sol",
+              "argvEffort": "low",
+              "observedCalls": null
+            },
+            {
+              "spotId": "flop-facing-bet-bb",
+              "status": "ok",
+              "legal": true,
+              "action": "call",
+              "amount": null,
+              "warmupMs": 3364,
+              "decideMs": 5076,
+              "errorCode": null,
+              "errorPhase": null,
+              "argvModel": "gpt-6.1-sol",
+              "argvEffort": "low",
+              "observedCalls": null
+            },
+            {
+              "spotId": "turn-facing-bet-btn",
+              "status": "ok",
+              "legal": true,
+              "action": "fold",
+              "amount": null,
+              "warmupMs": 3913,
+              "decideMs": 4878,
+              "errorCode": null,
+              "errorPhase": null,
+              "argvModel": "gpt-6.1-sol",
+              "argvEffort": "low",
+              "observedCalls": null
+            },
+            {
+              "spotId": "river-facing-overbet-bb",
+              "status": "ok",
+              "legal": true,
+              "action": "fold",
+              "amount": null,
+              "warmupMs": 17406,
+              "decideMs": 9160,
+              "errorCode": null,
+              "errorPhase": null,
+              "argvModel": "gpt-6.1-sol",
+              "argvEffort": "low",
+              "observedCalls": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema": "codex-player-comparison/3",
+      "options": {
+        "samples": 6,
+        "timeoutMs": 60000,
+        "budgetMs": 900000
+      },
+      "elapsedMs": 84940,
+      "ok": false,
+      "aborted": {
+        "code": "TERMINATION_UNCONFIRMED",
+        "variant": "sol-low",
+        "phase": "sample",
+        "spot": "preflop-open-btn"
+      },
+      "cleanup": {
+        "disposed": true,
+        "removed": true,
+        "tmp": null,
+        "errors": []
+      },
+      "variants": [
+        {
+          "id": "luna-default",
+          "requested": {
+            "model": "gpt-6-luna",
+            "effort": "model-default"
+          },
+          "probe": {
+            "attempted": true,
+            "ok": true,
+            "containment": true,
+            "elapsedMs": 6778,
+            "observedCalls": 1,
+            "argvModel": "gpt-6-luna",
+            "argvEffort": "model-default",
+            "mismatch": null,
+            "verified": true,
+            "unverified": null
+          },
+          "summary": {
+            "samples": 6,
+            "attempted": 1,
+            "legal": 1,
+            "invalid": 0,
+            "timeout": 0,
+            "failed": 0,
+            "terminationUnconfirmed": 0,
+            "skipped": 5,
+            "unobserved": 0,
+            "unobservedPhases": 0,
+            "modelMismatches": 0,
+            "decideMs": {
+              "observations": [
+                3183
+              ],
+              "median": 3183,
+              "min": 3183,
+              "max": 3183,
+              "overSoft25s": 0
+            },
+            "actions": {
+              "raise": 1
+            },
+            "probeOk": true
+          },
+          "samples": [
+            {
+              "spotId": "preflop-open-btn",
+              "status": "ok",
+              "legal": true,
+              "action": "raise",
+              "amount": 150,
+              "warmupMs": 3099,
+              "decideMs": 3183,
+              "errorCode": null,
+              "errorPhase": null,
+              "argvModel": "gpt-6-luna",
+              "argvEffort": "model-default",
+              "observedCalls": {
+                "warmup": 1,
+                "decide": 1
+              }
+            },
+            {
+              "spotId": "preflop-facing-open-bb",
+              "status": "skipped",
+              "legal": false,
+              "action": null,
+              "amount": null,
+              "warmupMs": null,
+              "decideMs": null,
+              "errorCode": "ABORTED",
+              "errorPhase": null,
+              "argvModel": null,
+              "argvEffort": null,
+              "observedCalls": {
+                "warmup": null,
+                "decide": null
+              }
+            },
+            {
+              "spotId": "preflop-facing-3bet-btn",
+              "status": "skipped",
+              "legal": false,
+              "action": null,
+              "amount": null,
+              "warmupMs": null,
+              "decideMs": null,
+              "errorCode": "ABORTED",
+              "errorPhase": null,
+              "argvModel": null,
+              "argvEffort": null,
+              "observedCalls": {
+                "warmup": null,
+                "decide": null
+              }
+            },
+            {
+              "spotId": "flop-facing-bet-bb",
+              "status": "skipped",
+              "legal": false,
+              "action": null,
+              "amount": null,
+              "warmupMs": null,
+              "decideMs": null,
+              "errorCode": "ABORTED",
+              "errorPhase": null,
+              "argvModel": null,
+              "argvEffort": null,
+              "observedCalls": {
+                "warmup": null,
+                "decide": null
+              }
+            },
+            {
+              "spotId": "turn-facing-bet-btn",
+              "status": "skipped",
+              "legal": false,
+              "action": null,
+              "amount": null,
+              "warmupMs": null,
+              "decideMs": null,
+              "errorCode": "ABORTED",
+              "errorPhase": null,
+              "argvModel": null,
+              "argvEffort": null,
+              "observedCalls": {
+                "warmup": null,
+                "decide": null
+              }
+            },
+            {
+              "spotId": "river-facing-overbet-bb",
+              "status": "skipped",
+              "legal": false,
+              "action": null,
+              "amount": null,
+              "warmupMs": null,
+              "decideMs": null,
+              "errorCode": "ABORTED",
+              "errorPhase": null,
+              "argvModel": null,
+              "argvEffort": null,
+              "observedCalls": {
+                "warmup": null,
+                "decide": null
+              }
+            }
+          ]
+        },
+        {
+          "id": "sol-low",
+          "requested": {
+            "model": "gpt-6.1-sol",
+            "effort": "low"
+          },
+          "probe": {
+            "attempted": true,
+            "ok": true,
+            "containment": true,
+            "elapsedMs": 7369,
+            "observedCalls": 1,
+            "argvModel": "gpt-6.1-sol",
+            "argvEffort": "low",
+            "mismatch": null,
+            "verified": true,
+            "unverified": null
+          },
+          "summary": {
+            "samples": 6,
+            "attempted": 1,
+            "legal": 0,
+            "invalid": 0,
+            "timeout": 0,
+            "failed": 0,
+            "terminationUnconfirmed": 1,
+            "skipped": 5,
+            "unobserved": 0,
+            "unobservedPhases": 0,
+            "modelMismatches": 0,
+            "decideMs": {
+              "observations": [],
+              "median": null,
+              "min": null,
+              "max": null,
+              "overSoft25s": 0
+            },
+            "actions": {},
+            "probeOk": true
+          },
+          "samples": [
+            {
+              "spotId": "preflop-open-btn",
+              "status": "termination_unconfirmed",
+              "legal": false,
+              "action": null,
+              "amount": null,
+              "warmupMs": 62005,
+              "decideMs": null,
+              "errorCode": "CHILD_CLOSE_UNCONFIRMED",
+              "errorPhase": "warmup",
+              "argvModel": "gpt-6.1-sol",
+              "argvEffort": "low",
+              "observedCalls": {
+                "warmup": 1,
+                "decide": null
+              }
+            },
+            {
+              "spotId": "preflop-facing-open-bb",
+              "status": "skipped",
+              "legal": false,
+              "action": null,
+              "amount": null,
+              "warmupMs": null,
+              "decideMs": null,
+              "errorCode": "ABORTED",
+              "errorPhase": null,
+              "argvModel": null,
+              "argvEffort": null,
+              "observedCalls": {
+                "warmup": null,
+                "decide": null
+              }
+            },
+            {
+              "spotId": "preflop-facing-3bet-btn",
+              "status": "skipped",
+              "legal": false,
+              "action": null,
+              "amount": null,
+              "warmupMs": null,
+              "decideMs": null,
+              "errorCode": "ABORTED",
+              "errorPhase": null,
+              "argvModel": null,
+              "argvEffort": null,
+              "observedCalls": {
+                "warmup": null,
+                "decide": null
+              }
+            },
+            {
+              "spotId": "flop-facing-bet-bb",
+              "status": "skipped",
+              "legal": false,
+              "action": null,
+              "amount": null,
+              "warmupMs": null,
+              "decideMs": null,
+              "errorCode": "ABORTED",
+              "errorPhase": null,
+              "argvModel": null,
+              "argvEffort": null,
+              "observedCalls": {
+                "warmup": null,
+                "decide": null
+              }
+            },
+            {
+              "spotId": "turn-facing-bet-btn",
+              "status": "skipped",
+              "legal": false,
+              "action": null,
+              "amount": null,
+              "warmupMs": null,
+              "decideMs": null,
+              "errorCode": "ABORTED",
+              "errorPhase": null,
+              "argvModel": null,
+              "argvEffort": null,
+              "observedCalls": {
+                "warmup": null,
+                "decide": null
+              }
+            },
+            {
+              "spotId": "river-facing-overbet-bb",
+              "status": "skipped",
+              "legal": false,
+              "action": null,
+              "amount": null,
+              "warmupMs": null,
+              "decideMs": null,
+              "errorCode": "ABORTED",
+              "errorPhase": null,
+              "argvModel": null,
+              "argvEffort": null,
+              "observedCalls": {
+                "warmup": null,
+                "decide": null
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "actualCrossModelResume": {
+    "pass": true,
+    "productionStoreAccess": false,
+    "action": {
+      "action": "raise",
+      "amount": 125,
+      "reason": "버튼에서 AQ는 강한 시작 패다. 레이즈로 주도권을 잡는다."
+    },
+    "calls": [
+      {
+        "model": "gpt-6-luna",
+        "low": false,
+        "resume": false
+      },
+      {
+        "model": "gpt-6.1-sol",
+        "low": true,
+        "resume": false
+      },
+      {
+        "model": "gpt-6-luna",
+        "low": false,
+        "resume": false
+      },
+      {
+        "model": "gpt-6.1-sol",
+        "low": true,
+        "resume": true
+      }
+    ],
+    "sourceModel": "gpt-6-luna",
+    "resumeModel": "gpt-6.1-sol",
+    "resumeEffort": "low",
+    "cleanupConfirmed": true
+  },
+  "providerEvidenceLimit": "Requested/adapter/argv model and effort, not independently attested serving ID. Schema /1 complete sample is historical; /3 checkpoint failed after Sol warmup60s. No poker superiority, stability, EV, GTO or learning-effect inference.",
+  "productionGameStudyStoresUsedAsFixtures": false
+}

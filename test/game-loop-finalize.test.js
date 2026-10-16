@@ -4363,14 +4363,14 @@ test('#192 S3: heartbeat result-ready accept는 --accept-evidence closed-child�
 
 test('#192 S3: deferred flush accept는 live generation이 그대로면 --accept-evidence closed-child를 넘긴다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
   let overlapCard = null;
-  let decisionId = 'd-1-preflop-0';
   const rounds = [{
     get raw() {
       return JSON.stringify({
         handNo: 1,
         text: overlapCard ? `핸드 1에서 상대 ${overlapCard} 인용` : '카드 없이 평가',
         decisions: [{
-          decisionId,
+          // The hand coach judges the one decision its prompt names (tools/coach-prompt.js).
+          decisionId: /\((d-\d+-[a-z]+-\d+)\)만 한국어/.exec(upper.prompts[0] ?? '')?.[1] ?? null,
           why: '왜 그 액션을 했는지 설명합니다.',
           outcome: overlapCard ? `폴드 상대의 ${overlapCard}가 드러났다.` : '보드만 근거로 평가한다.',
           alternative: '다른 라인을 검토할 수 있었습니다.',
@@ -4393,8 +4393,6 @@ test('#192 S3: deferred flush accept는 live generation이 그대로면 --accept
         }, 'hand 2 was not dealt before coach deny', 8_000);
         const statePath = path.join(gameDir, 'state.json');
         const state = readJson(statePath);
-        const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
-        decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
         const last = state.lastHand;
         const foldPid = (last.folded ?? []).find((pid) => pid !== 'user') ?? 'p1';
         overlapCard = injectCurrentHandCard(state, last.holes[foldPid][0]);

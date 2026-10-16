@@ -422,7 +422,9 @@ test('S8 full: relay recovery restarts a stopped study service and publishes its
   fs.mkdirSync(gameDir, { mode: 0o700 });
   const loop = createGameLoop({ gameDir, lockDir: storeDir,
     resolver: async () => ({ player: null, upper: null, notices: [] }),
-    opts: { port: 0, waitMs: 40, storeDir, trainingEnabled: true, opponentRuntime: 'policy' } });
+    // Keep the observed user decision open while the test verifies the rotated
+    // service. A 40ms auto-fold can otherwise advance to hand 2 during inspection.
+    opts: { port: 0, waitMs: scaled(30_000), storeDir, trainingEnabled: true, opponentRuntime: 'policy' } });
   t.after(async () => { await loop.requestStop(); await stopOwnedStudy(storeDir); });
   await loop.bootstrap(resolve(...STORE_ARGS));
   const firstService = await inspectStudyService(storeDir);

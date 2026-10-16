@@ -1,5 +1,5 @@
 import {KNOWN_REFERENCE_SOURCES} from '../../shared/reference.js';
-import { STUDY_MODES, STUDY_MODE_HELP, formatQuestion, formatFeedback, formatFeedbackStep, formatSummary, formatStudyError, formatSource, formatSourceShort, formatTrends, readStudyEntry, drillRequest, spotDiagram, handCards, feedbackBars, runProgress, modeAvailability } from './study-format.js';
+import { STUDY_MODES, STUDY_MODE_HELP, formatQuestion, formatFeedback, formatFeedbackStep, formatSummary, formatStudyError, unfinishedRun, nextStepView, completionGuidance, formatSource, formatSourceShort, formatTrends, readStudyEntry, drillRequest, spotDiagram, handCards, feedbackBars, runProgress, modeAvailability } from './study-format.js';
 import { createChartPanel, renderSpotChart } from './spot-chart.js';
 import { mountPotOddsDrill } from './pot-odds-drill.js';
 import { helpButton, openHelp } from '../public/help-panel.js';
@@ -10,7 +10,7 @@ import { openDisplaySettings } from '../public/display-settings.js';
 const START_REJECTIONS = Object.freeze({
   UNSUPPORTED_SPOT: 400, UNSUPPORTED_HAND: 400, INVALID_DRILL_MODE: 400,
   INVALID_DRILL_LIMIT: 400, USAGE: 400, BAD_JSON: 400, PAYLOAD_TOO_LARGE: 413,
-  RETEST_NOT_DUE: 409, INCOMPLETE_ASSESSMENT: 409, SOURCE_CHANGED: 409,
+  RETEST_NOT_DUE: 409, INCOMPLETE_ASSESSMENT: 409, SOURCE_CHANGED: 409, UNFINISHED_RUN: 409,
 });
 const ANSWER_SOURCE_REJECTIONS = new Set(['SOURCE_UNVERIFIED', 'SOURCE_CHANGED']);
 
@@ -153,11 +153,18 @@ export function createStudyController({ api, storage, storageKey, initialTarget 
   }
   return {
     get state() { return state(); }, restore,
-    async start(selectors) {
+    // protectUnfinished: the next-step suggestion never replaces a run the user
+    // has not finished (any mode), nor a legacy session awaiting replacement. This
+    // tab's cached state can be stale (another tab may have started a run), so the
+    // condition also travels in the request and the server enforces it under its
+    // drill lock. The ordinary Start button sends no condition and replaces.
+    async start(selectors, { protectUnfinished = false } = {}) {
       if (busy || recovery || pending) return state();
+      if (protectUnfinished && (replacementOnly || unfinishedRun(state()))) return state();
       if (!Object.hasOwn(STUDY_MODES, selectors?.mode)) { error = { code: 'INVALID_DRILL_MODE' }; return emit(); }
       if (selectors.mode === 'free' && selectors.source && target?.spotKey && selectors.source.version !== (target.spotKey.endsWith('-v3') ? '3.0.0' : target.spotKey.endsWith('-v2') ? '2.0.0' : '1.0.0')) target = null;
-      return submit({ kind: 'start', body: { ...(selectors.mode === 'free' ? target : null), ...selectors, seed: uuid(), idempotencyKey: uuid() } });
+      return submit({ kind: 'start', body: { ...(selectors.mode === 'free' ? target : null), ...selectors,
+        ...(protectUnfinished ? { protectUnfinished: true } : null), seed: uuid(), idempotencyKey: uuid() } });
     },
     async answer(action, sizeBb) {
       if (busy || recovery || awaitNext || replacementOnly || !session?.question) return state();
@@ -212,6 +219,8 @@ async function mountStudy() {
   const node = (tag, text, cls) => { const value = document.createElement(tag); value.textContent = text; if (cls) value.className = cls; return value; };
   let controller;
   let summary = null;
+  let summaryState = 'loading';
+  let lastState = null;
   let formattedSummary = null;
   // The last question shown for answering and the choice made on it. The answer
   // DTO carries neither, so feedback visuals use them only for the same questionId.
@@ -222,6 +231,39 @@ async function mountStudy() {
     const mode = $('mode').value;
     $('mode-description').textContent = STUDY_MODE_HELP[mode] ?? '';
     $('mode-availability').textContent = modeAvailability(mode, formattedSummary);
+  }
+  // The suggestion reads the raw summary and the controller state together, so a
+  // summary rerender cannot re-enable it while a run is active or recovering.
+  function paintNextStep() {
+    const box = $('next-step');
+    const start = $('next-step-start');
+    const after = completionGuidance(lastState, summary);
+    const view = summary && summaryState === 'ready' ? nextStepView(summary, lastState, { authenticated }) : null;
+    box.dataset.state = view ? view.plan.kind : summaryState;
+    $('next-step-title').textContent = view ? view.plan.title
+      : summaryState === 'failed' ? '학습 요약을 불러오지 못해 다음 단계를 제안할 수 없습니다.' : '학습 요약을 확인하고 있습니다…';
+    $('next-step-detail').textContent = view?.plan.detail ?? '';
+    const notes = $('next-step-notes'); notes.replaceChildren();
+    for (const line of view?.plan.notes ?? []) notes.append(node('li', line));
+    notes.hidden = !notes.children.length;
+    const coverage = view?.plan.coverage ?? null;
+    $('next-step-coverage').hidden = !coverage;
+    $('next-step-coverage-text').textContent = coverage?.text ?? '';
+    $('next-step-coverage-suggestion').textContent = coverage?.suggestion ?? '';
+    $('next-step-after').hidden = !after;
+    $('next-step-after-title').textContent = after?.title ?? '';
+    $('next-step-variation').textContent = after?.variation ?? '';
+    $('next-step-retest').textContent = after?.retest ?? '';
+    const choices = $('next-step-choices'); choices.replaceChildren();
+    for (const choice of after?.choices ?? []) {
+      const button = node('button', choice.label, 'ui-btn ui-btn--ghost'); button.type = 'button';
+      // Only selects the mode in the picker; starting remains the user's own click.
+      button.addEventListener('click', () => { $('mode').value = choice.mode; paintModeHelp(); });
+      choices.append(button);
+    }
+    start.textContent = view?.plan.label ?? '다음 단계 시작';
+    start.disabled = !view || view.disabled;
+    $('next-step-gate').textContent = view?.gate?.text ?? '';
   }
   function paintProgress(current) {
     const meter = $('run-meter');
@@ -316,6 +358,8 @@ async function mountStudy() {
   }
   function render(state) {
     const current = state.session;
+    lastState = state;
+    paintNextStep();
     chartPanel.sync(current?.sessionId ?? null, ['assessment', 'retest', 'transfer'].includes(current?.mode) && current?.index < current?.count);
     if (!state.target && (entry.spotKey || entry.handClass)) {
       entry.spotKey = null; entry.handClass = null;
@@ -375,8 +419,8 @@ async function mountStudy() {
       const settled = await latestSummary(() => api('/api/summary'));
       if (!settled.current) return;
       const response = settled.value;
-      if (!response.ok) { $('summary-status').textContent = formatStudyError(response); return; }
-      summary = response.summary;
+      if (!response.ok) { $('summary-status').textContent = formatStudyError(response); summary = null; summaryState = 'failed'; paintNextStep(); return; }
+      summary = response.summary; summaryState = 'ready';
       const formatted = formatSummary(summary);
       formattedSummary = formatted;
       paintModeHelp();
@@ -402,7 +446,8 @@ async function mountStudy() {
       }
       if (!runs.children.length) runs.append(node('p', '완료한 새 문제 평가가 없습니다. 평가를 완료하면 24시간 뒤 같은 문항으로 재평가할 수 있습니다.'));
       paintTrends(formatTrends(summary.trends));
-    } catch { $('summary-status').textContent = '학습 요약을 불러오지 못했습니다. 상태 확인을 눌러 주세요.'; }
+      paintNextStep();
+    } catch { $('summary-status').textContent = '학습 요약을 불러오지 못했습니다. 상태 확인을 눌러 주세요.'; summary = null; summaryState = 'failed'; paintNextStep(); }
   }
   function paintTrends(trends) {
     const box = $('trends'); box.replaceChildren();
@@ -439,7 +484,7 @@ async function mountStudy() {
   $('open-help').addEventListener('click', () => openHelp('learning'));
   $('open-display-settings').addEventListener('click', () => openDisplaySettings());
   $('source-help').append(helpButton('learning', '학습 수치의 의미'));
-  if (!entry.token) { if ($('replay-entry-status')) $('replay-entry-status').textContent = '플레이 기록을 열려면 접속 토큰이 필요합니다.'; $('status').textContent = '접속 토큰이 없습니다. 학습실에서 제공한 링크를 다시 열어 주세요.'; $('start').disabled = true; return; }
+  if (!entry.token) { if ($('replay-entry-status')) $('replay-entry-status').textContent = '플레이 기록을 열려면 접속 토큰이 필요합니다.'; $('status').textContent = '접속 토큰이 없습니다. 학습실에서 제공한 링크를 다시 열어 주세요.'; $('start').disabled = true; summaryState = 'failed'; paintNextStep(); return; }
   async function refreshReplayEntry() {
     if (!$('replay-entry-link')) return;
     $('replay-entry-link').hidden = true;
@@ -460,6 +505,14 @@ async function mountStudy() {
     $('start').addEventListener('click', async () => {
       const source = KNOWN_REFERENCE_SOURCES.find(s=>s.version === $('reference-source')?.value);
       await controller.start({ mode: $('mode').value, ...(source ? {source} : {}) });
+      await refreshSummary();
+    });
+    $('next-step-start').addEventListener('click', async () => {
+      // Re-derived from the current summary and state at click time; the gate and
+      // the controller both refuse while anything is busy, recovering or unfinished.
+      const view = summary && summaryState === 'ready' ? nextStepView(summary, controller.state, { authenticated }) : null;
+      if (!view || view.disabled) return;
+      await controller.start(view.plan.selectors, { protectUnfinished: true });
       await refreshSummary();
     });
     $('next').addEventListener('click', async () => { await controller.next(); await refreshSummary(); });

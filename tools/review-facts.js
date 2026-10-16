@@ -3,7 +3,8 @@
 // digests for the machine review. Nothing here is a strategy verdict.
 import fs from 'node:fs';
 import { chipFacts, equityFacts, factsLineKo, handFacts } from '../shared/decision-facts.js';
-import { estimateOpponentRanges } from '../training/ranges/estimate-v3.js';
+import { coachEquityRanges, estimateCoachRanges } from '../training/ranges/coach-estimate.js';
+import { buildProcessInput } from '../training/process-review.js';
 
 const HOST = 'user';
 
@@ -11,24 +12,52 @@ function userDecisions(record) {
   return (record?.decisions ?? []).filter((snap) => snap?.actorId === HOST && snap.decisionId);
 }
 
-function opponentsAt(snap) {
-  return (snap.publicSeats ?? []).filter((seat) => seat.playerId !== snap.actorId && !seat.folded && !seat.out);
+// Coaching facts for one user decision. `equityRange` keeps its old field name but
+// now comes from the coaching-only public-action estimate (not the recorded policy
+// estimator): only opponents already committed on this street, only when every
+// live opponent is fully conditioned. `rangeEstimate` carries method, status, limitations
+// and per-player evidence status, never the weights or any hidden information.
+export function decisionFacts(snap) {
+  // Raw legacy/evaluator records may contain an unreadable decision. Omit its
+  // facts without losing the valid decisions in the same hand.
+  try { return buildDecisionFacts(snap); }
+  catch { return null; }
 }
 
-export function decisionFacts(snap) {
+function buildDecisionFacts(snap) {
   const chips = chipFacts(snap);
   if (!chips) return null;
   const equityRandom = equityFacts(snap);
   let equityRange = null;
+  let estimate = null;
+  let rangeMeta = null;
   try {
-    const estimated = estimateOpponentRanges(snap);
-    const ranges = opponentsAt(snap).slice(0, 8).map((seat) => estimated[seat.playerId] ?? null);
-    if (ranges.some(Boolean)) equityRange = equityFacts(snap, { ranges });
+    estimate = estimateCoachRanges(snap);
+    const { ranges, reason, excluded } = coachEquityRanges(estimate);
+    rangeMeta = { acted: estimate.acted.length, excluded, reason };
+    if (ranges) {
+      try {
+        equityRange = equityFacts(snap, { ranges });
+      } catch {
+        rangeMeta.reason = 'equity-failed';
+      }
+    }
   } catch {
-    equityRange = null;
+    rangeMeta = { acted: 0, excluded: 0, reason: 'no-estimate' };
   }
-  return { chips, hand: handFacts(snap), equityRandom, equityRange,
-    line: factsLineKo(snap, { equityRandom, equityRange }) };
+  const rangeEstimate = estimate && {
+    method: estimate.method,
+    status: estimate.status,
+    limitations: estimate.limitations,
+    issues: estimate.issues,
+    acted: estimate.acted,
+    unacted: estimate.unacted,
+    players: Object.fromEntries(Object.entries(estimate.players).map(([pid, row]) => [pid,
+      { status: row.status, reasons: row.reasons, appliedActions: row.appliedActions, actedThisStreet: row.actedThisStreet }])),
+    equityOmitted: equityRange === null ? rangeMeta.reason : null,
+  };
+  return { chips, hand: handFacts(snap), equityRandom, equityRange, rangeEstimate,
+    line: factsLineKo(snap, { equityRandom, equityRange, rangeMeta }) };
 }
 
 // "d-3-flop-5: 팟 …" lines for one hand record (the user's own decisions only).
@@ -46,9 +75,12 @@ const isUnopenedPreflop = (snap) => snap.street === 'preflop'
 export function processDetectors(records) {
   const out = { foldWhenCheck: [], minRaises: { count: 0, raises: 0, hands: [] }, openSizesBb: [],
     weakStackOffs: [], biggestLosses: [], decisions: 0 };
-  for (const record of records) {
+  for (const record of Array.isArray(records) ? records : []) {
+    if (!record || typeof record !== 'object') continue;
     const handNo = record.handNo;
-    for (const snap of userDecisions(record)) {
+    const projected = buildProcessInput([record]).hands[0].decisions;
+    const decisions = projected.filter((decision) => decision.processStatus === 'available');
+    for (const snap of decisions) {
       out.decisions += 1;
       const chosen = snap.chosenAction ?? {};
       const bb = snap.blinds?.[1];
@@ -75,7 +107,7 @@ export function processDetectors(records) {
     const start = record.startStacks?.[HOST];
     const end = record.endStacks?.[HOST];
     if (Number.isInteger(start) && Number.isInteger(end) && end < start) {
-      const last = userDecisions(record).at(-1);
+      const last = projected.at(-1)?.processStatus === 'available' ? projected.at(-1) : null;
       out.biggestLosses.push({ handNo, lost: start - end, line: last ? `${last.decisionId}: ${factsLineKo(last) ?? ''}` : null });
     }
   }

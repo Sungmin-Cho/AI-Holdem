@@ -3972,6 +3972,11 @@ test('user waitError rejects a foreign healthy listener before any step republis
   assert.equal(readLoopLog(gameDir).some((entry) => entry.event === 'user-view-republished'), false);
 });
 
+// The hand coach is prospective (tools/coach-prompt.js): the prompt names the one decision to
+// judge, and the sidecar, not the model, writes every row's `outcome`.
+const COACH_FIXED_OUTCOME = '결과는 리플레이에서 별도로 확인하세요.';
+const coachTargetOf = (prompt) => /\((d-\d+-[a-z]+-\d+)\)만 한국어/.exec(prompt ?? '')?.[1] ?? null;
+
 test('코치는 redacted hand·stats를 reserve 전에 캡처하고 process-only hand·owner·snapshot을 120초 파이프라인에 쓴다', { timeout: 15_000 }, async (t) => {
   const events = [];
   const coachCalls = [];
@@ -4033,7 +4038,8 @@ test('코치는 redacted hand·stats를 reserve 전에 캡처하고 process-only
   const capturedStats = fs.readFileSync(statsPath, 'utf8');
   assert.equal(upper.prompts[0].includes(capturedStats), false, 'outcome-bearing stats leaked into coach prompt');
   assert.match(upper.prompts[0], /hand 1 \(redacted\):/);
-  assert.match(upper.prompts[0], /hand 1 \(replay\):/);
+  assert.doesNotMatch(upper.prompts[0], /hand 1 \(replay\):/);
+  assert.ok(coachTargetOf(upper.prompts[0]), 'the prompt names the one decision to judge');
   assert.equal(upper.starts[0].timeoutMs, 120_000);
   for (const args of coachCalls.filter((args) => ['heartbeat', 'reserve', 'bind-handle', 'accept'].includes(args[0]))) {
     assert.equal(args[args.indexOf('--owner') + 1], owner, `${args[0]} minted a per-hand owner`);
@@ -4083,7 +4089,7 @@ test('#192 O4: 새 loop가 구 CLI shim을 쓰면 예약에 stamp가 남지 않�
   );
 });
 
-test('코치 프롬프트는 replay 범위 카드만 담고 deny는 진행 중 카드·정책·아키타입을 유지한다', { timeout: 40_000 }, async (t) => {
+test('코치 프롬프트는 상대 카드·정책·아키타입을 담지 않고 deny는 진행 중 카드·정책·아키타입을 유지한다', { timeout: 40_000 }, async (t) => {
   async function runOnce(replayReveal) {
     let forbiddenFile = null;
     let inProgressHoles = null;
@@ -4134,8 +4140,8 @@ test('코치 프롬프트는 replay 범위 카드만 담고 deny는 진행 중 �
 
   const allReplayRaw = fs.readFileSync(path.join(all.gameDir, '.coach-hand-1-replay.json'), 'utf8');
   const allRedactedRaw = fs.readFileSync(path.join(all.gameDir, '.coach-hand-1-redacted.json'), 'utf8');
-  assert.equal(all.upper.prompts[0].includes(allReplayRaw), true, 'all prompt missing replay capture bytes');
-  assert.equal(all.upper.prompts[0].includes(allRedactedRaw), true, 'all prompt missing redacted capture bytes');
+  assert.equal(all.upper.prompts[0].includes(allReplayRaw), false, 'the completed replay capture is not coach input');
+  assert.equal(all.upper.prompts[0].includes(allRedactedRaw), false, 'the completed redacted capture is not coach input');
 
   const allReplay = JSON.parse(allReplayRaw);
   const allRecord = readJson(path.join(all.gameDir, 'hands', 'hand-0001.json'));
@@ -4143,10 +4149,11 @@ test('코치 프롬프트는 replay 범위 카드만 담고 deny는 진행 중 �
     if (pid === 'user') continue;
     const inReplay = allReplay.holes?.[pid] != null;
     for (const card of cards) {
+      // Public in the replay or not, an opponent's cards are never decision-time input.
       assert.equal(
         all.upper.prompts[0].includes(JSON.stringify(card)),
-        inReplay,
-        `all prompt card ${pid} ${card} replay=${inReplay}`,
+        false,
+        `all prompt carries ${pid} ${card} (replay=${inReplay})`,
       );
     }
   }
@@ -4154,16 +4161,21 @@ test('코치 프롬프트는 replay 범위 카드만 담고 deny는 진행 중 �
   const showdownReplayRaw = fs.readFileSync(path.join(showdown.gameDir, '.coach-hand-1-replay.json'), 'utf8');
   const showdownReplay = JSON.parse(showdownReplayRaw);
   const showdownRecord = readJson(path.join(showdown.gameDir, 'hands', 'hand-0001.json'));
-  assert.equal(showdown.upper.prompts[0].includes(showdownReplayRaw), true);
+  assert.equal(showdown.upper.prompts[0].includes(showdownReplayRaw), false);
   for (const [pid, cards] of Object.entries(showdownRecord.holes ?? {})) {
     if (pid === 'user') continue;
     const inReplay = showdownReplay.holes?.[pid] != null;
     for (const card of cards) {
       assert.equal(
         showdown.upper.prompts[0].includes(JSON.stringify(card)),
-        inReplay,
-        `showdown prompt card ${pid} ${card} replay=${inReplay}`,
+        false,
+        `showdown prompt carries ${pid} ${card} (replay=${inReplay})`,
       );
+    }
+  }
+  for (const run of [all, showdown]) {
+    for (const literal of [run.villain.archetype, run.villain.personality, 'PRIVATE_POLICY_ID']) {
+      assert.equal(run.upper.prompts[0].includes(literal), false, `the coach prompt carries ${literal}`);
     }
   }
 
@@ -4197,9 +4209,9 @@ test('코치 프롬프트는 replay 범위 카드만 담고 deny는 진행 중 �
   }
 });
 
-test('코치 프롬프트는 redacted·replay 캡처 exact bytes를 모두 인라인한다', { timeout: 15_000 }, async (t) => {
+test('코치 프롬프트는 완료된 redacted·replay 캡처를 인라인하지 않고 캡처 파일은 보존한다', { timeout: 15_000 }, async (t) => {
   const upper = makeCoachAdapter({
-    rounds: [{ raw: JSON.stringify({ handNo: 1, text: '두 캡처를 사용했습니다.' }) }],
+    rounds: [{ raw: JSON.stringify({ handNo: 1, text: '결정 시점 스냅샷만 사용했습니다.' }) }],
   });
   const { gameDir, loop } = await setupCoachHand(t, {
     upper,
@@ -4208,16 +4220,17 @@ test('코치 프롬프트는 redacted·replay 캡처 exact bytes를 모두 인�
   const running = startRun(loop);
   await waitForCoachNote(gameDir, 1);
   await stopRun(loop, running);
+  // The captures are still taken and kept for validation and publication; they are not model input.
   const redacted = fs.readFileSync(path.join(gameDir, '.coach-hand-1-redacted.json'), 'utf8');
   const replay = fs.readFileSync(path.join(gameDir, '.coach-hand-1-replay.json'), 'utf8');
-  assert.equal(upper.prompts[0].includes(redacted), true);
-  assert.equal(upper.prompts[0].includes(replay), true);
+  assert.equal(upper.prompts[0].includes(redacted), false);
+  assert.equal(upper.prompts[0].includes(replay), false);
   assert.match(upper.prompts[0], /hand 1 \(redacted\):/);
-  assert.match(upper.prompts[0], /hand 1 \(replay\):/);
+  assert.doesNotMatch(upper.prompts[0], /hand 1 \(replay\):/);
+  assert.match(upper.prompts[0], /결정 시점 스냅샷\(d-1-[a-z]+-\d+/);
 });
 
 test('replay에 없는 decisionId는 INVALID_COACH_OUTPUT으로 재시도한다', { timeout: 20_000 }, async (t) => {
-  let validId = 'd-1-preflop-0';
   const rounds = [
     {
       raw: JSON.stringify({
@@ -4237,7 +4250,7 @@ test('replay에 없는 decisionId는 INVALID_COACH_OUTPUT으로 재시도한다'
           handNo: 1,
           text: '올바른 결정 식별자입니다.',
           decisions: [{
-            decisionId: validId,
+            decisionId: coachTargetOf(upper.prompts[1]),
             why: '왜 그 액션을 했는지 설명합니다.',
             outcome: '결과적으로 이 핸드가 이렇게 끝났습니다.',
             alternative: '다른 라인을 검토할 수 있었습니다.',
@@ -4250,32 +4263,27 @@ test('replay에 없는 decisionId는 INVALID_COACH_OUTPUT으로 재시도한다'
   const { gameDir, loop } = await setupCoachHand(t, {
     upper,
     bootstrap: { replayReveal: 'all' },
-    loopOpts: {
-      async coachCaptureCheckpoint() {
-        const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
-        validId = replay.decisions?.[0]?.decisionId ?? validId;
-      },
-    },
   });
   const running = startRun(loop);
   const note = await waitForCoachNote(gameDir, 1);
   await stopRun(loop, running);
   assert.equal(note.unavailable, undefined);
   assert.equal(upper.starts.length, 2);
-  assert.equal(note.decisions[0].decisionId, validId);
+  assert.ok(coachTargetOf(upper.prompts[1]), 'the retry names the one decision to judge');
+  assert.equal(note.decisions[0].decisionId, coachTargetOf(upper.prompts[1]));
+  assert.equal(note.decisions[0].outcome, COACH_FIXED_OUTCOME, 'the model-written outcome is replaced by the sidecar message');
 });
 
 test('폴드 상대 카드 outcome 인용은 all에서 통과하고 showdown에서 거부한다', { timeout: 40_000 }, async (t) => {
   async function runOnce(replayReveal) {
     let foldCard = null;
-    let decisionId = 'd-1-preflop-0';
     const rounds = [{
       get raw() {
         return JSON.stringify({
           handNo: 1,
           text: '폴드 상대 카드를 인용합니다.',
           decisions: [{
-            decisionId,
+            decisionId: coachTargetOf(upper.prompts[0]),
             why: '왜 그 액션을 했는지 설명합니다.',
             outcome: foldCard ? `상대가 ${foldCard}를 버리고 폴드했다.` : '보드만 근거로 평가한다.',
             alternative: '다른 라인을 검토할 수 있었습니다.',
@@ -4293,8 +4301,6 @@ test('폴드 상대 카드 outcome 인용은 all에서 통과하고 showdown에�
       bootstrap: { replayReveal, mode: 'cash-training', stack: undefined, stackBb: 100, hands: 1 },
       loopOpts: {
         async coachCaptureCheckpoint() {
-          const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
-          decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
           const record = readJson(path.join(gameDir, 'hands', 'hand-0001.json'));
           const folded = (record.folded ?? []).find((pid) => pid !== 'user');
           foldCard = folded ? record.holes[folded][0] : record.holes.p1[0];
@@ -4309,7 +4315,11 @@ test('폴드 상대 카드 outcome 인용은 all에서 통과하고 showdown에�
 
   const all = await runOnce('all');
   assert.equal(all.note.unavailable, undefined);
-  assert.equal(all.note.decisions[0].outcome.includes(all.foldCard), true);
+  // The card is public in this replay, so the validators let the first note through; the
+  // published outcome is the sidecar's fixed message, never the model's sentence.
+  assert.equal(all.note.decisions[0].outcome, COACH_FIXED_OUTCOME);
+  // Only the prose fields: the proof's hex digest can spell a club or diamond card by chance.
+  assert.equal(JSON.stringify([all.note.text, all.note.decisions]).includes(all.foldCard), false);
   assert.equal(all.starts, 1);
 
   const showdown = await runOnce('showdown');
@@ -4319,14 +4329,13 @@ test('폴드 상대 카드 outcome 인용은 all에서 통과하고 showdown에�
 
 test('진행 중 핸드와 겹치는 replay 공개 카드 인용은 deferred에 보관하고 핸드가 끝나면 게시한다', { timeout: 40_000 }, async (t) => {
   let overlapCard = null;
-  let decisionId = 'd-1-preflop-0';
   const rounds = [{
     get raw() {
       return JSON.stringify({
         handNo: 1,
         text: overlapCard ? `핸드 1에서 상대 ${overlapCard} 인용` : '카드 없이 평가',
         decisions: [{
-          decisionId,
+          decisionId: coachTargetOf(upper.prompts[0]),
           why: '왜 그 액션을 했는지 설명합니다.',
           outcome: overlapCard ? `폴드 상대의 ${overlapCard}가 드러났다.` : '보드만 근거로 평가한다.',
           alternative: '다른 라인을 검토할 수 있었습니다.',
@@ -4347,8 +4356,6 @@ test('진행 중 핸드와 겹치는 replay 공개 카드 인용은 deferred에 
         }, 'hand 2 was not dealt before coach deny', 8_000);
         const statePath = path.join(gameDir, 'state.json');
         const state = readJson(statePath);
-        const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
-        decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
         const last = state.lastHand;
         const foldPid = (last.folded ?? []).find((pid) => pid !== 'user') ?? 'p1';
         overlapCard = injectCurrentHandCard(state, last.holes[foldPid][0]);
@@ -4367,6 +4374,11 @@ test('진행 중 핸드와 겹치는 replay 공개 카드 인용은 deferred에 
     }
   }, 'hand 1 coach was not deferred', 10_000);
   assert.ok(deferred.note || deferred.text || deferred);
+  // The deferred note already carries the sidecar's outcome; the model's sentence naming the
+  // overlapping card was only ever seen by the validators.
+  const deferredRow = (deferred.note ?? deferred).decisions?.[0];
+  assert.equal(deferredRow?.outcome, COACH_FIXED_OUTCOME);
+  assert.equal(deferredRow?.decisionId, coachTargetOf(upper.prompts[0]));
   const during = readJson(path.join(gameDir, 'ui-snapshot.json'));
   assert.equal((during.coach ?? []).some((note) => note.handNo === 1), false);
 
@@ -4380,12 +4392,12 @@ test('진행 중 핸드와 겹치는 replay 공개 카드 인용은 deferred에 
   await stopRun(loop, running);
   assert.equal(published.unavailable, undefined);
   assert.equal(published.text.includes(overlapCard), true);
+  assert.equal(published.decisions[0].outcome, COACH_FIXED_OUTCOME);
   const after = readJson(path.join(gameDir, '.coach-authority.json'));
   assert.equal(after.deferred?.['1'], undefined);
 });
 
 test('replay 범위 밖 카드 인용은 지연이 아니라 INVALID_COACH_OUTPUT 재시도다', { timeout: 20_000 }, async (t) => {
-  let decisionId = 'd-1-preflop-0';
   let ghost = null;
   const rounds = [
     {
@@ -4394,7 +4406,7 @@ test('replay 범위 밖 카드 인용은 지연이 아니라 INVALID_COACH_OUTPU
           handNo: 1,
           text: '알 수 없는 카드를 인용합니다.',
           decisions: [{
-            decisionId,
+            decisionId: coachTargetOf(upper.prompts[0]),
             why: '왜 그 액션을 했는지 설명합니다.',
             outcome: ghost ? `상대는 ${ghost}를 가지고 있었다.` : '보드만 근거로 평가한다.',
             alternative: '다른 라인을 검토할 수 있었습니다.',
@@ -4410,8 +4422,6 @@ test('replay 범위 밖 카드 인용은 지연이 아니라 INVALID_COACH_OUTPU
     bootstrap: { replayReveal: 'showdown' },
     loopOpts: {
       async coachCaptureCheckpoint() {
-        const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
-        decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
         const record = readJson(path.join(gameDir, 'hands', 'hand-0001.json'));
         const folded = (record.folded ?? []).find((pid) => pid !== 'user') ?? 'p1';
         ghost = record.holes[folded][0];
@@ -4434,7 +4444,6 @@ for (const [spelling, rewrite] of [
   ['suit symbol', (card) => `${card[0]}${{ s: '♠', h: '♥', d: '♦', c: '♣' }[card[1]]}`],
 ]) {
   test(`replay 범위 밖 카드를 ${spelling}로 인용해도 INVALID_COACH_OUTPUT 재시도다`, { timeout: 20_000 }, async (t) => {
-    let decisionId = 'd-1-preflop-0';
     let ghost = null;
     const rounds = [
       {
@@ -4443,7 +4452,7 @@ for (const [spelling, rewrite] of [
             handNo: 1,
             text: '알 수 없는 카드를 인용합니다.',
             decisions: [{
-              decisionId,
+              decisionId: coachTargetOf(upper.prompts[0]),
               why: '왜 그 액션을 했는지 설명합니다.',
               outcome: ghost ? `상대는 ${rewrite(ghost)}를 가지고 있었다.` : '보드만 근거로 평가한다.',
               alternative: '다른 라인을 검토할 수 있었습니다.',
@@ -4459,8 +4468,6 @@ for (const [spelling, rewrite] of [
       bootstrap: { replayReveal: 'showdown' },
       loopOpts: {
         async coachCaptureCheckpoint() {
-          const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
-          decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
           const record = readJson(path.join(gameDir, 'hands', 'hand-0001.json'));
           const folded = (record.folded ?? []).find((pid) => pid !== 'user') ?? 'p1';
           ghost = record.holes[folded][0];
@@ -4476,7 +4483,6 @@ for (const [spelling, rewrite] of [
 }
 
 test('showdown에서 진행 중 상대 Kh 인용은 deferred가 아니라 INVALID_COACH_OUTPUT 재시도다', { timeout: 20_000 }, async (t) => {
-  let decisionId = 'd-1-preflop-0';
   let liveKh = null;
   const rounds = [
     {
@@ -4485,7 +4491,7 @@ test('showdown에서 진행 중 상대 Kh 인용은 deferred가 아니라 INVALI
           handNo: 1,
           text: liveKh ? `상대는 ${liveKh}를 가지고 있었다.` : '보드만 근거로 평가한다.',
           decisions: [{
-            decisionId,
+            decisionId: coachTargetOf(upper.prompts[0]),
             why: '왜 그 액션을 했는지 설명합니다.',
             outcome: liveKh ? `라이브 상대 ${liveKh}` : '보드만 근거로 평가한다.',
             alternative: '다른 라인을 검토할 수 있었습니다.',
@@ -4510,8 +4516,6 @@ test('showdown에서 진행 중 상대 Kh 인용은 deferred가 아니라 INVALI
         }, 'hand 2 was not dealt before live Kh deny', 8_000);
         const statePath = path.join(gameDir, 'state.json');
         const state = readJson(statePath);
-        const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
-        decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
         const completedCards = [
           ...Object.values(state.lastHand.holes ?? {}).flat(),
           ...(state.lastHand.board ?? []),
@@ -4626,14 +4630,13 @@ test('#290 멀티 진행 중 코치는 참가자 숨은 카드 인용을 지연�
 
 test('SIGKILL 뒤 resume은 deferred 코치 노트를 이어 게시한다', { timeout: 40_000 }, async (t) => {
   let overlapCard = null;
-  let decisionId = 'd-1-preflop-0';
   const rounds = [{
     get raw() {
       return JSON.stringify({
         handNo: 1,
         text: overlapCard ? `이어서 게시할 ${overlapCard} 인용` : '카드 없이 평가',
         decisions: [{
-          decisionId,
+          decisionId: coachTargetOf(upper.prompts[0]),
           why: '왜 그 액션을 했는지 설명합니다.',
           outcome: overlapCard ? `폴드 상대 ${overlapCard}` : '보드만 근거',
           alternative: '다른 라인을 검토할 수 있었습니다.',
@@ -4654,8 +4657,6 @@ test('SIGKILL 뒤 resume은 deferred 코치 노트를 이어 게시한다', { ti
         }, 'hand 2 was not dealt before defer', 8_000);
         const statePath = path.join(gameDir, 'state.json');
         const state = readJson(statePath);
-        const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
-        decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
         const foldPid = (state.lastHand.folded ?? []).find((pid) => pid !== 'user') ?? 'p1';
         overlapCard = injectCurrentHandCard(state, state.lastHand.holes[foldPid][0]);
         fs.writeFileSync(statePath, JSON.stringify(state));
@@ -4692,6 +4693,7 @@ test('SIGKILL 뒤 resume은 deferred 코치 노트를 이어 게시한다', { ti
   await stopRun(resumed, resumedRun);
   assert.equal(published.unavailable, undefined);
   assert.equal(published.text.includes(overlapCard), true);
+  assert.equal(published.decisions[0].outcome, COACH_FIXED_OUTCOME);
   assert.equal(resumedUpper.starts.length, 0);
 });
 
@@ -4804,14 +4806,13 @@ test('finalizing flush에서 replay 캡처가 없으면 deferred 핸드를 unava
 });
 
 test('정상 노트 proof-bearing 게시는 스냅샷 coach[].decisions를 보존한다', { timeout: 15_000 }, async (t) => {
-  let decisionId = 'd-1-preflop-0';
   const rounds = [{
     get raw() {
       return JSON.stringify({
         handNo: 1,
         text: '결정 단위 피드백입니다.',
         decisions: [{
-          decisionId,
+          decisionId: coachTargetOf(upper.prompts[0]),
           why: '왜 그 액션을 했는지 설명합니다.',
           outcome: '결과적으로 이 핸드가 이렇게 끝났습니다.',
           alternative: '다른 라인을 검토할 수 있었습니다.',
@@ -4823,19 +4824,15 @@ test('정상 노트 proof-bearing 게시는 스냅샷 coach[].decisions를 보�
   const { gameDir, loop } = await setupCoachHand(t, {
     upper,
     bootstrap: { replayReveal: 'all' },
-    loopOpts: {
-      async coachCaptureCheckpoint() {
-        const replay = readJson(path.join(gameDir, '.coach-hand-1-replay.json'));
-        decisionId = replay.decisions?.[0]?.decisionId ?? decisionId;
-      },
-    },
   });
   const running = startRun(loop);
   const note = await waitForCoachNote(gameDir, 1);
   await stopRun(loop, running);
   assert.ok(note.coachProof);
-  assert.equal(note.decisions[0].decisionId, decisionId);
+  assert.ok(coachTargetOf(upper.prompts[0]), 'the prompt names the one decision to judge');
+  assert.equal(note.decisions[0].decisionId, coachTargetOf(upper.prompts[0]));
   assert.equal(note.decisions[0].why.includes('왜'), true);
+  assert.equal(note.decisions[0].outcome, COACH_FIXED_OUTCOME);
 });
 
 test('코치 oneshot은 spawn 직후 done을 기다리기 전에 pid:startTime을 bind-handle한다', { timeout: 15_000 }, async (t) => {

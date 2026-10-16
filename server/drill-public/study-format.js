@@ -60,6 +60,7 @@ export function formatStudyError(error = {}) {
     SOURCE_UNVERIFIED: '이전 문항의 출처를 확인할 수 없습니다. 지원되는 새 연습을 시작하세요.',
     RETEST_NOT_DUE: '재평가는 마지막 완료로부터 24시간 뒤에 열립니다. 표시된 가능 시각을 확인하세요.',
     INCOMPLETE_ASSESSMENT: '새 문제 평가의 모든 문항을 완료한 뒤 재평가할 수 있습니다.',
+    UNFINISHED_RUN: '진행 중인 연습이 있거나 상태를 확인할 수 없어 다음 단계를 시작하지 않았습니다. 다른 창에서 시작한 연습일 수 있으니 표시된 연습을 이어가거나, 연습 시작으로 직접 새 연습을 시작하세요.',
     FUTURE_EVIDENCE: '기록 시각의 근거가 유효하지 않아 점수를 표시하지 않습니다.',
     FUTURE_OR_INCONSISTENT_EVIDENCE: '기록 시각 또는 순서의 근거가 유효하지 않아 평가를 사용할 수 없습니다.',
     INCONSISTENT_RUN: '평가 기록이 일치하지 않아 점수를 표시하지 않습니다.',
@@ -238,6 +239,157 @@ export function formatSummary(summary = {}) {
     retests: (summary.retests ?? []).map((run) => runSummary(run, allowed && (summary.assessments ?? []).some((base) => base.id === run.assessmentId && base.complete && !base.reason && verified(base.sourceIdentity) && JSON.stringify(base.sourceIdentity) === JSON.stringify(run.sourceIdentity)))),
   };
 }
+// ---- Next step (coaching-quality design decision 4) -------------------------
+// Everything below reads the raw /api/summary counts and identities, never the
+// formatted strings, and only describes an action: starting one stays an
+// explicit click that goes through createStudyController.
+const KEY_RE = /^[a-z0-9-]{1,100}$/;
+const HAND_RE = /^[2-9TJQKA]{2}[so]?$/;
+const plain = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const rawCount = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+/** A copy limited to the three identity fields, only when it is a known source. */
+function knownSource(value) {
+  if (!plain(value) || !verified(value)) return null;
+  return { id: value.id, version: value.version, contentSha256: value.contentSha256 };
+}
+const sameIdentity = (a, b) => Boolean(a && b) && a.id === b.id && a.version === b.version && a.contentSha256 === b.contentSha256;
+/** The reference version a spot key belongs to (v1 keys carry no suffix). */
+export function spotKeyVersion(spotKey) {
+  return typeof spotKey === 'string' ? (spotKey.endsWith('-v3') ? '3.0.0' : spotKey.endsWith('-v2') ? '2.0.0' : '1.0.0') : null;
+}
+/** Epoch ms of a canonical ISO-8601 instant (what the server writes with
+ * toISOString), else null. Date.parse alone accepts loose strings and numbers. */
+function isoTime(value) {
+  if (typeof value !== 'string') return null;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value ? time : null;
+}
+function availableAt(retest) {
+  return typeof retest?.nextAvailableAt === 'string' && Number.isFinite(Date.parse(retest.nextAvailableAt))
+    ? new Date(retest.nextAvailableAt).toLocaleString('ko-KR') : null;
+}
+/** Sparse direct coverage of the game record: how many evaluated decisions were
+ * compared straight with the reference. Unknown or nonsensical counts claim nothing. */
+export function coverageGuidance(summary) {
+  const coverage = summary?.game?.coverage;
+  if (!plain(coverage) || !Object.hasOwn(coverage, 'exactComparableDecisions')) return null;
+  const evaluated = rawCount(coverage.evaluatedDecisions);
+  const exact = rawCount(coverage.exactComparableDecisions);
+  if (evaluated === null || exact === null || exact > evaluated) return null;
+  const suggestion = '고정 100BB 캐시 트레이닝 게임을 더 하면 기준표와 바로 비교할 수 있는 프리플롭 예시가 늘 수 있습니다. 어떤 상황이 나올지, 비교 가능한 결정이 늘어날지는 보장하지 않으며 실력 향상을 뜻하지도 않습니다.';
+  if (evaluated === 0) return { sparse: true, evaluated, exact, suggestion,
+    text: '아직 평가된 게임 기록이 없어 기준표와 직접 비교한 결정이 없습니다.' };
+  if (exact > 0 && exact * 2 >= evaluated) return null;
+  return { sparse: true, evaluated, exact, suggestion,
+    text: `게임 기록 ${evaluated}개 결정 중 기준표와 직접 비교한 결정은 ${exact}개입니다. 나머지는 참고만 가능하거나 비교할 수 없어, 게임 기록 수치와 연습 목표는 적은 표본에 의존합니다.` };
+}
+
+const NEXT_PRACTICE_NOTE = '연습: 지금 풀어 보는 용도이며 새 문제 평가·지연 재평가처럼 따로 측정하는 실행이 아닙니다.';
+const NEXT_RECHECK_NOTE = '시작할 때 서버가 다시 확인하므로 풀 문항이 없을 수도 있습니다.';
+
+/** One suggested next action from the verified summary, or kind "none".
+ * Priority: due review, an eligible retest of a completed assessment (explicit
+ * id), free practice on a source-matched observed goal, a fresh assessment.
+ * Transfer practice is not offered: nothing in the summary proves it has questions. */
+export function planNextStep(summary) {
+  const source = knownSource(summary?.source?.identity ?? summary?.source);
+  const coverage = coverageGuidance(summary);
+  const notes = [];
+  const done = (plan) => ({ measured: false, mode: null, selectors: null, notes, coverage, ...plan });
+
+  const due = rawCount(summary?.bank?.dueCount);
+  if (source && due > 0) {
+    return done({ kind: 'daily', mode: 'daily', selectors: { mode: 'daily', source },
+      label: '오늘 복습 시작 (연습)', title: `복습 시각이 된 항목이 ${due}개 있습니다`,
+      detail: `복습할 항목이 있어 가장 먼저 제안합니다. ${NEXT_PRACTICE_NOTE} ${NEXT_RECHECK_NOTE}` });
+  }
+
+  let candidate = null;
+  for (const run of Array.isArray(summary?.assessments) ? summary.assessments : []) {
+    if (!plain(run) || typeof run.id !== 'string' || !run.id || run.mode !== 'assessment' || run.assessmentId !== undefined
+      || run.complete !== true || run.reason || !knownSource(run.sourceIdentity)) continue;
+    if (run.retest?.eligible === false) {
+      const when = availableAt(run.retest);
+      if (when) notes.push(`재평가 가능 시각: ${when}`);
+      continue;
+    }
+    if (run.retest?.eligible !== true) continue;
+    // Only a real completion time can rank the baselines. A malformed one (NaN
+    // compares false both ways) would otherwise win; skip it instead of guessing.
+    const completed = isoTime(run.completedAt);
+    if (completed === null) continue;
+    if (!candidate || completed >= candidate.completed) candidate = { run, completed };
+  }
+  if (candidate) {
+    const version = knownSource(candidate.run.sourceIdentity).version;
+    return done({ kind: 'retest', mode: 'retest', measured: true, selectors: { mode: 'retest', assessmentId: candidate.run.id },
+      label: '지연 재평가 시작 (측정)', title: '완료한 평가를 같은 문항으로 다시 확인할 수 있습니다',
+      detail: `기준표 v${version}으로 푼 그 평가의 같은 문항을 다시 풉니다. 측정 실행으로 기록되며, 결과는 같은 평가끼리만 비교합니다. ${STUDY_MODE_HELP.retest}` });
+  }
+
+  if (!source) return done({ kind: 'none', title: '다음 단계를 제안할 수 없습니다',
+    detail: '기준표 출처를 확인할 수 없어 복습·연습·평가를 제안하지 않습니다. 출처가 확인된 뒤 다시 확인하세요.' });
+
+  const goal = summary?.goal;
+  if (plain(goal) && ['game', 'practice'].includes(goal.origin) && sameIdentity(knownSource(goal.sourceIdentity), source)
+    && typeof goal.spotKey === 'string' && KEY_RE.test(goal.spotKey) && spotKeyVersion(goal.spotKey) === source.version
+    && typeof goal.handClass === 'string' && HAND_RE.test(goal.handClass)) {
+    const where = `${position(goal.spotKey.split('-')[2])} · ${hand(goal.handClass)}`;
+    return done({ kind: 'practice', mode: 'free', selectors: { mode: 'free', spotKey: goal.spotKey, handClass: goal.handClass, source },
+      label: '이 상황 연습하기 (연습)', title: `${where} 상황을 연습해 보세요`,
+      detail: `${goal.origin === 'game' ? '게임' : '연습'} 기록에서 기준표와 달랐던 상황입니다. ${NEXT_PRACTICE_NOTE}` });
+  }
+
+  return done({ kind: 'assessment', mode: 'assessment', measured: true, selectors: { mode: 'assessment', source },
+    label: '새 문제 평가 시작 (측정)', title: '아직 풀지 않은 상황으로 평가해 보세요',
+    detail: `${STUDY_MODE_HELP.assessment} 시작하면 측정 실행으로 기록됩니다. 연습이 아니라 기준표와의 일치도를 재는 실행입니다.` });
+}
+
+/** A run the user has not finished, in any mode: a question to answer, or a last
+ * answer not yet acknowledged. */
+export function unfinishedRun(state) {
+  const session = state?.session;
+  return Boolean(session?.sessionId) && (state.awaitNext === true || session.done !== true);
+}
+/** Why the next-step action is not startable now, or null. */
+export function nextStepGate(state, { authenticated = true } = {}) {
+  if (!authenticated) return { code: 'UNAUTHORIZED', text: formatStudyError({ code: 'UNAUTHORIZED' }) };
+  if (!plain(state)) return { code: 'LOADING', text: '학습 상태를 확인하고 있습니다…' };
+  if (state.busy) return { code: 'BUSY', text: '요청을 확인하고 있습니다. 끝난 뒤 시작할 수 있습니다.' };
+  if (state.recovery || state.pending) return { code: 'RECOVERY', text: '이전 요청을 확인한 뒤 시작할 수 있습니다. 현재 상태 확인을 눌러 주세요.' };
+  if (state.replacementOnly) return { code: 'REPLACEMENT_ONLY', text: '이전 연습의 출처를 확인할 수 없어 이어갈 수 없습니다. 연습 시작으로 직접 새 연습을 시작하세요.' };
+  if (unfinishedRun(state)) return { code: 'UNFINISHED', text: '진행 중인 연습이 있습니다. 끝낸 뒤 다음 단계를 시작할 수 있습니다.' };
+  return null;
+}
+/** The plan plus whether its action may be started right now. */
+export function nextStepView(summary, state, options = {}) {
+  const plan = planNextStep(summary);
+  const gate = nextStepGate(state, options);
+  return { plan, gate, disabled: Boolean(gate) || !plan.selectors };
+}
+
+/** After a finished run: a variation and a delayed retest to consider. Text and
+ * mode choices only; nothing here starts a run. */
+export function completionGuidance(state, summary) {
+  const session = state?.session;
+  if (!session?.sessionId || session.done !== true || state.awaitNext || state.busy || state.recovery || state.pending
+    || !(session.count > 0)) return null;
+  const mode = STUDY_MODES[session.mode] ?? '연습';
+  const own = (summary?.assessments ?? []).find((run) => run?.id === session.studyRun?.id);
+  const when = availableAt(own?.retest);
+  const retest = session.mode === 'assessment'
+    ? `지연 재평가: 이 평가는 완료 24시간 뒤부터 같은 문항으로 다시 풀 수 있습니다${when ? ` (가능 시각 ${when})` : ''}.`
+    : session.mode === 'retest'
+      ? '지연 재평가: 같은 평가를 다시 재평가하려면 마지막 완료로부터 24시간이 지나야 합니다.'
+      : '지연 재평가: 새 문제 평가를 완료하면 24시간 뒤 같은 문항으로 다시 확인할 수 있습니다.';
+  return {
+    title: `${mode}을 마쳤습니다`,
+    variation: '변형 연습: 같은 상황의 이웃 손패를 푸는 일반화 연습이나 다른 상황의 자유 연습으로 이어갈 수 있습니다. 풀 이웃 손패가 없으면 문항이 없을 수 있습니다.',
+    retest,
+    choices: [{ mode: 'transfer', label: '일반화 연습 모드 선택' }, { mode: 'retest', label: '지연 재평가 모드 선택' }],
+  };
+}
+
 /** Trends (design D12): one series per source and mode — runs from different
  * question distributions are never joined — and one row per game session. */
 // A series names its source as a JSON [id, version, sha] key; a game row as id@version.

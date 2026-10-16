@@ -49,6 +49,7 @@ test('literal reference versions and key-suffix source inference are inventoried
   assert.deepEqual(sites("'2.0.0'"), {
     'engine/hint-exposure.js': 1,        // accepted exposure sources (v2, v3)
     'server/drill-public/drill.js': 1,   // key suffix → version (v3, v2, v1)
+    'server/drill-public/study-format.js': 1, // source-bound next-step target version
     'shared/hint-contract.js': 1,        // v2 hint branch
     'shared/reference.js': 2,            // the v2 source and referenceSchemaOf
     'tools/drill-cli.js': 2,             // v2 drill coverage beside the v3 one; chart source by key suffix
@@ -60,6 +61,7 @@ test('literal reference versions and key-suffix source inference are inventoried
   assert.deepEqual(sites("'3.0.0'"), {
     'engine/hint-exposure.js': 1,
     'server/drill-public/drill.js': 1,
+    'server/drill-public/study-format.js': 1,
     'shared/hint-contract.js': 1,
     'shared/reference-coverage.js': 2,
     'shared/reference.js': 2,
@@ -70,6 +72,6 @@ test('literal reference versions and key-suffix source inference are inventoried
     'tools/build-preflop-baseline-v3.js': 1,
     'training/providers/preflop-json.js': 1,
   });
-  assert.deepEqual(sites("endsWith('-v2')"), { 'server/drill-public/drill.js': 1, 'tools/drill-cli.js': 2 });
-  assert.deepEqual(sites("endsWith('-v3')"), { 'server/drill-public/drill.js': 1, 'tools/drill-cli.js': 2 });
+  assert.deepEqual(sites("endsWith('-v2')"), { 'server/drill-public/drill.js': 1, 'server/drill-public/study-format.js': 1, 'tools/drill-cli.js': 2 });
+  assert.deepEqual(sites("endsWith('-v3')"), { 'server/drill-public/drill.js': 1, 'server/drill-public/study-format.js': 1, 'tools/drill-cli.js': 2 });
 });
