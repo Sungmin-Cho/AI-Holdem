@@ -418,3 +418,44 @@ test('action-controller capture includes string note and excludes non-string', a
   assert.equal('note' in dropped.sent[0], false);
   assert.equal(dropped.sent[0].requestId, 'saved-bad');
 });
+
+test('formatReplay feedback:"omit" builds no coach, study card, pending copy or summary; the live default keeps all of them', () => {
+  const replay = replayRecord(record(), { reveal: 'all' });
+  const coachNote = {
+    handNo: 1,
+    text: '프리플랍 레이즈는 무난했습니다.',
+    decisions: [{ decisionId: 'd-1-preflop-0', why: '이유', outcome: '결과', alternative: '대안' }],
+  };
+  const trainingItems = [{ decisionId: 'd-1-preflop-0', evaluationId: 'e-1', handNo: 1 }];
+  const options = { names: NAMES, coachNote, trainingItems };
+
+  // Live is the default and is unchanged.
+  const live = formatReplay(replay, options);
+  assert.deepEqual(formatReplay(replay, { ...options, feedback: 'live' }), live);
+  const liveUser = rowsOf(live).find((row) => row.decisionId === 'd-1-preflop-0');
+  assert.equal(liveUser.coach.status, 'ready');
+  assert.equal(liveUser.study.evaluationId, 'e-1');
+  assert.equal(live.coachSummary, '프리플랍 레이즈는 무난했습니다.');
+
+  const omitted = formatReplay(replay, { ...options, feedback: 'omit' });
+  for (const row of rowsOf(omitted)) {
+    assert.equal(row.coach, null, `${row.playerId} coach`);
+    assert.equal(row.study, null, `${row.playerId} study`);
+  }
+  assert.equal(omitted.coachSummary, null);
+  // Nothing else about the hand changes: same rows, same header.
+  const strip = (view) => JSON.parse(JSON.stringify(view, (key, value) => (key === 'coach' || key === 'study' || key === 'coachSummary' ? null : value)));
+  assert.deepEqual(strip(omitted), strip(live));
+  // No pending wait copy either when no feedback source was given at all.
+  const bare = formatReplay(replay, { names: NAMES, feedback: 'omit' });
+  assert.equal(rowsOf(bare).every((row) => row.coach === null && row.study === null), true);
+  assert.equal(JSON.stringify(bare).includes('코치 피드백'), false);
+  assert.equal(JSON.stringify(bare).includes('evaluationId'), false);
+  // The default for a source-less call stays "pending", as the live table shows it.
+  const pending = rowsOf(formatReplay(replay, { names: NAMES })).find((row) => row.decisionId === 'd-1-preflop-0');
+  assert.equal(pending.coach.status, 'pending');
+  // An unavailable coach note is also omitted.
+  const down = formatReplay(replay, { names: NAMES, coachNote: { handNo: 1, text: '생성 실패', unavailable: true }, feedback: 'omit' });
+  assert.equal(JSON.stringify(down).includes('불가'), false);
+  assert.equal(down.coachSummary, null);
+});

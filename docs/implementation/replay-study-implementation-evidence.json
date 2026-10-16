@@ -1,0 +1,392 @@
+{
+  "schemaVersion": 1,
+  "base": "b239dd72261070f8834ee36d3d7129f40f0fb546",
+  "routerVersion": "1.22.0",
+  "rounds": [
+    {
+      "round": "impl-r1",
+      "target": "a3a09c87d380eed61bfa287b40c1a5dd16883f5ceeae01faaaecde2690904a90",
+      "decisionFingerprint": "8b449f743daa09c958a6557354ca8dbd64299c4b80408a41e9f1a4a0853f3b83",
+      "policySha256": "fdef0c49cdc5f790cb924555812b6fdbab4fc4e318bc3c4c3b91257190346423",
+      "seats": [
+        {
+          "attemptId": "impl-r1-reviewer-1",
+          "receiptSha256": "b18c9fa5b3e763dbf8565a2d99d8f0a70c6dc176af353759a92607b5242810ad",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r1-reviewer-2",
+          "receiptSha256": "27cd16bed8adc8c720b4fcb69b2d315376e61e8e9e4dd82a90ee404af5d6e92c",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "impl-r2",
+      "target": "4b5f04724ef38b8b0d7e512f757687f346ba09847b68903a4276a273d34d1bd4",
+      "decisionFingerprint": "5f3d9a3362bef07265988446697c543408f8a024b8e32ab7bd7070f1e6d615c5",
+      "policySha256": "fdef0c49cdc5f790cb924555812b6fdbab4fc4e318bc3c4c3b91257190346423",
+      "seats": [
+        {
+          "attemptId": "impl-r2-reviewer-1",
+          "receiptSha256": "b1778cbdd00a3daef872f7ab5c96f625e272901268c56155d4f0b3556e93e3d6",
+          "state": "FAILED",
+          "verdict": null,
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r2-reviewer-2",
+          "receiptSha256": "ae60d6a2538f1b6ff8e38ca1c354e456f846a7bbb0a7b9d4272e6867c1761ef5",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "impl-r3",
+      "target": "d4df6b82049b66291380450df8751eb185483c83f55cee0ec58509b4ac9f8232",
+      "decisionFingerprint": "06c5622a0b79b278c4f40d2fa5d0be3c74d211935cc40316363aab8cc669b992",
+      "policySha256": "fdef0c49cdc5f790cb924555812b6fdbab4fc4e318bc3c4c3b91257190346423",
+      "seats": [
+        {
+          "attemptId": "impl-r3-reviewer-1",
+          "receiptSha256": "c905f68055584ac84c97a603ab6391cf69cba0c1b8003829cbbcee836eb183a9",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r3-reviewer-2",
+          "receiptSha256": "54482f9258ae00c66138ccc003a20c6d4c0a3c9e0c2baff384ca30580733315a",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "impl-r4",
+      "target": "8d009b9593be7e30cd0b3e0f46e59932a1bc7e741b1ace9a85fafa5678344b97",
+      "decisionFingerprint": "e0bfb74e6708d1641bb3f5cc5805a232746f619ff2e9df82044eff7c5c48146a",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "seats": [
+        {
+          "attemptId": "impl-r4-reviewer-1",
+          "receiptSha256": "8de63abc62f9eebe1159f4f28f9f1bf8fdecff0afef0195f1027f5535678b65b",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r4-reviewer-2",
+          "receiptSha256": "e23288adca09b28d33541f7dfeb273df712c5ba2efea36496f954d48f7c87e59",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "impl-r5",
+      "target": "575d66dfdbd2aed70f7f26fd76dcf15ede877f1d2cff3b3eca7bc73509acabe0",
+      "decisionFingerprint": "bd8622901f2c9c9499aef2de5d07fcf650c8c389f5a80f92973233aab697323e",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "seats": [
+        {
+          "attemptId": "impl-r5-reviewer-1",
+          "receiptSha256": "cd7f73613ae41af4ee7b02cff83bdacba48656e7921a26d634cb8c613138de0b",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r5-reviewer-2",
+          "receiptSha256": "29c2ea58cfd9447f088314f6dd5a69e25b1241574e6eb5771fdad17d9b48a567",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "impl-r6",
+      "target": "dc8b233066c93025040d5ac09a2595126d61d629926c52137dbbaeac49d8ce22",
+      "decisionFingerprint": "52b10bf59ec5e60f4ef5c6d878a5103a2d2547cdedaaf44edb4cfb8cd9844040",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "seats": [
+        {
+          "attemptId": "impl-r6-reviewer-1",
+          "receiptSha256": "71534f9a6ec91f12bab81d5e4cb3a918ffd41ec4f02598a6f758d733ad7db9f1",
+          "state": "SUCCEEDED",
+          "verdict": "PASS",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r6-reviewer-2",
+          "receiptSha256": "2a392f54096db67277bd92c3334705bedb3e6e8b0ec953ffb2b81fcc50fa7c3d",
+          "state": "SUCCEEDED",
+          "verdict": "PASS",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "impl-r7b",
+      "target": "7d5e225fd07fdee1dfee54d3d9c4c7e330ce72757f9fe6f5d2737dfaff391b6f",
+      "decisionFingerprint": "5879038a83a5b855a66329b2c686c1d164ddcdcc860d31b3794d73bc4c56168d",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "seats": [
+        {
+          "attemptId": "impl-r7b-reviewer-1",
+          "receiptSha256": "8aee3c891a1f34495fa3e1d2ab12535af06d57cf024cdc950d7da2bafe4d2773",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r7b-reviewer-2",
+          "receiptSha256": "59ae9d6f7779b29e8a6ed8a4325f9ac3ed008361bf6ef9e020aab52eea194a8c",
+          "state": "SUCCEEDED",
+          "verdict": "PASS",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "impl-r8",
+      "target": "b27e1ce34740919838b8e556840270033656f615df11f72a38a7768193a1be48",
+      "decisionFingerprint": "b6391e02211911a6ad60b295ee4808efebd7dcbc1cccb8df244f545b8488bc04",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "seats": [
+        {
+          "attemptId": "impl-r8-reviewer-1",
+          "receiptSha256": "1d7c7bb106a9d62724accc97b695bb7a92df70453d20be8925763c38f8cbc262",
+          "state": "SUCCEEDED",
+          "verdict": "PASS_WITH_CHANGES",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r8-reviewer-2",
+          "receiptSha256": "80ea20644095700759a9f2acf9f64e8fdf55f0e00cd7ca4feb3ac6bc73497fa6",
+          "state": "SUCCEEDED",
+          "verdict": "PASS",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "impl-r9",
+      "target": "cc986af356c76416d475cce745e55febfe28f8b43da04436d1938884f6d7cf94",
+      "decisionFingerprint": "b670562e9b02646552d5e34970be55728d8674e189803953110d93f53867e45c",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "seats": [
+        {
+          "attemptId": "impl-r9-reviewer-1",
+          "receiptSha256": "bae515a7342d7172e1c381567e36f4359729855a04c8ff36402a38c65bd001a1",
+          "state": "SUCCEEDED",
+          "verdict": "PASS",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-opus-5-5"
+          ],
+          "headerModel": null
+        },
+        {
+          "attemptId": "impl-r9-reviewer-2",
+          "receiptSha256": "b1f2ef984f05174a944e4ad0414528ebbb9fb0b2657baacf248e927acd946bff",
+          "state": "SUCCEEDED",
+          "verdict": "PASS",
+          "terminationConfirmed": true,
+          "servedModels": null,
+          "headerModel": "gpt-6-astra"
+        }
+      ]
+    },
+    {
+      "round": "ci-poll-review",
+      "scope": "one test-only convergence poll",
+      "target": "1df342fd2c0d108a3ba375b3af89c91d4e6708321876a9c484e1fe846ce64026",
+      "decisionFingerprint": "0767528516a53f3f2db0fe93a6f0b3db0e540f74dc0e813c55cdef1590331a66",
+      "policySha256": "25f6b4d2e4bcbeef5d23a5f0799287bc54d6b9fd1b7202023e537397ea26824b",
+      "seats": [
+        {
+          "attemptId": "ci-poll-review-reviewer-1",
+          "receiptSha256": "660cdb390ad37a4ae4aadeb8ed233dcf02ef091f810e1d6287296c739a1195d5",
+          "state": "SUCCEEDED",
+          "verdict": "PASS",
+          "terminationConfirmed": true,
+          "servedModels": [
+            "claude-fable-5-1"
+          ]
+        }
+      ]
+    }
+  ],
+  "currentReviewState": "R4/R5 full scope and R6 incremental reviewed; CI race correction R7/R8 findings addressed; final R9 PASS/PASS, guarded receipts verified, final38-file product manifest unchanged; test-only study descriptor poll increment independently PASS with guarded Fable5.1/high receipt",
+  "localChecks": {
+    "focused": {
+      "pass": 153,
+      "fail": 0,
+      "skip": 0,
+      "scope": "149 replay/UI plus4 host-insights API"
+    },
+    "replayBrowser": {
+      "pass": true,
+      "required": 22,
+      "pending": []
+    },
+    "fullSuite": {
+      "tests": 3830,
+      "pass": 3803,
+      "fail": 4,
+      "cancelled": 5,
+      "skipped": 18,
+      "singleRunGreen": false
+    },
+    "failedCasesRerun": {
+      "pass": 11,
+      "fail": 0,
+      "portOverride": "HOLDEM_PUBLIC_PORT=0"
+    },
+    "upgradeRollback": {
+      "pass": true,
+      "sourceUnchanged": true
+    },
+    "presentation": "initial exact-head remote UI complete pass including replay22; local base motion limitation retained historically; corrected final-head CI required",
+    "multiplayerBrowser": {
+      "pass": true,
+      "checks": 19
+    },
+    "spectatorBrowser": {
+      "pass": true,
+      "checks": 14
+    },
+    "fullSuiteResumed": {
+      "tests": 3836,
+      "pass": 3818,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 18,
+      "runtime": "Node26.0.0 macOS",
+      "singleRunGreen": true,
+      "env": "HOLDEM_PUBLIC_PORT=0; caffeinate -i",
+      "logSha256": "d40e01008abe3b22247f8d04d39b1e230eaa8ad46be689b39015fc74774434f8",
+      "scope": "historical full run before CI race correction; final focused153 and new final-head CI required"
+    },
+    "actualPermissionBudgetProbe": {
+      "pass": true,
+      "checks": [
+        "nine real POSIX EACCES with tight budget and healthy last row",
+        "unknown EIO conservative budget"
+      ],
+      "logSha256": "88b52b3b400d0e0d6d53da765d1ec0ae7434941ad5db6137bc931beb3289cfa5"
+    },
+    "coarseTimestampFixtureProbe": {
+      "red": true,
+      "green": true,
+      "assertionsUnchanged": true
+    },
+    "realWriterStress": {
+      "pass": 10,
+      "fail": 0,
+      "scope": "after initial nlink correction; later final focused also passes writer"
+    },
+    "studyServiceCorrected": {
+      "tests": 33,
+      "pass": 33,
+      "fail": 0,
+      "skip": 0
+    },
+    "descriptorPollProbe": {
+      "beforeFixSyntaxError": true,
+      "onePartialReadPass": true,
+      "persistentPartialReadsStillFailOriginalDeadline": true,
+      "timeoutUnchanged": true,
+      "globalHelpersUnchanged": true
+    }
+  },
+  "resumedRouterVersion": "1.23.1",
+  "historicalRawReceipts": "R1-R3 temp files were cleaned before 2026-10-16 resume; retained summaries above are historical, not newly authenticated receipts",
+  "finalProductTarget": "33f6e4af924ce2c2762b10c0d8a7d5e07b32ee7c44c62c804e1a4d80a2885406",
+  "userReviewLimitOverride": "2026-10-16 explicit instruction: proceed until evidence-based judgment says stop, irrespective of numeric review cap",
+  "initialCiFailure": {
+    "runId": 38846891317,
+    "head": "6806c547a02d6a00beab823cd1ac5021f23f8210",
+    "passed": 16,
+    "failed": 5,
+    "includesFailedAggregate": true,
+    "diagnosis": [
+      "Linux20/22 real writer classification corrected",
+      "Windows20 host-insights fixture atomic producer parity corrected",
+      "Windows20 unchanged finalize4.5second boundary requires final CI rerun"
+    ]
+  },
+  "secondCiObservation": {
+    "runId": 38851394953,
+    "head": "2a1217dd7505bd7047b27fd808702d6215b661f4",
+    "linux20Full": {
+      "tests": 3839,
+      "pass": 3830,
+      "fail": 0,
+      "skip": 9
+    },
+    "linux22Failure": "existing study-service identity test convergence poll JSON.parse read races owned checkpoint truncate/write",
+    "replayWriterLinux20And22": "PASS",
+    "uiReplay": "22/22 PASS",
+    "windows20LoopB": "PASS with unchanged4.5second assertions",
+    "supersededByTestOnlyPollFix": true
+  }
+}

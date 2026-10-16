@@ -272,3 +272,6 @@
 .pot-odds-choices { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .pot-odds-result { min-height: 1.5em; margin: var(--sp-2) 0; color: var(--c-info-text); font-size: var(--fs-13); }
 .pot-odds-stats { color: var(--c-text-2); font-size: var(--fs-12); }
+
+#replay-entry {display:flex;align-items:center;flex-wrap:wrap;gap:8px;max-width:100%;min-width:0}
+#replay-entry-status {max-width:55ch;white-space:normal}

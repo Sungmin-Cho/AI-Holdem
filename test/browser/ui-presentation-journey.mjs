@@ -193,6 +193,9 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       const failures=[];
       for(const theme of ['b','a','c']){
         await evaluate(theme==='b'?"document.documentElement.removeAttribute('data-theme')":`document.documentElement.setAttribute('data-theme','${theme}')`);
+        // Theme colours change immediately but button backgrounds transition.
+        // Measure the settled theme, preserving all contrast thresholds.
+        await evaluate("Promise.all(document.getAnimations().filter(animation => 'transitionProperty' in animation).map(animation => animation.finished.catch(() => {})))");
         const {checked,out}=await evaluate(`${CONTRAST_SCRIPT}(${JSON.stringify(selectors)})`);
         assert.ok(checked>=minimum,`${label}/${theme}: only ${checked} elements measured`);
         measurements.push({contrast:label,theme,checked});

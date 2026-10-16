@@ -107,6 +107,11 @@ npm run study -- /absolute/store
 npm run study:stop -- /absolute/store
 ```
 
+The study room's **Play history** opens completed hands from managed sessions, including completed hands in an unfinished game. Replays start in **My perspective**, hiding opponents' cards, future actions and results. Use **Full review** to reveal only what the saved disclosure policy allows, or jump to your own decisions. Browsing does not pause a running game. Legacy archives are not supported yet; archived coach feedback is not shown.
+
+If an older study service is running, stop it with `npm run study:stop -- /absolute/store`, then open the study room again. Reopening alone reuses the existing service.
+
+
 New sessions use preflop reference v3: opens, facing an open and facing a 3-bet at 80–150BB for 2–9 players, plus push/fold and calling a shove at 15BB or less (earlier sessions keep reference v1/v2). Unsupported spots are not treated as solved. Scores and frequency comparisons do not establish profitability or poker skill. See the [training data notes](training/data/README.md) for coverage and provenance.
 
 ## How it works

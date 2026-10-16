@@ -307,7 +307,12 @@ test('REQ-010: mismatched descriptor process identity cannot authorize stop or r
   fs.writeFileSync(descriptorPath(storeDir), JSON.stringify({ ...descriptor, pid: process.pid, startTime: processStartTime(process.pid) }));
   await assert.rejects(api.stopStudyService(storeDir, { expectedInstanceId: handle.instanceId }), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
   assert.equal(processStartTime(process.pid) !== null, true);
-  await until(() => readDescriptor(storeDir).pid === handle.pid);
+  await until(() => {
+    // The owner repairs this file in place. A read during its truncate/write
+    // is not convergence; keep the same bounded wait for the repaired pid.
+    try { return readDescriptor(storeDir).pid === handle.pid; }
+    catch (error) { if (error instanceof SyntaxError) return false; throw error; }
+  });
   await assert.rejects(api.stopStudyService(storeDir, { expectedInstanceId: randomUUID() }), { code: 'STUDY_IDENTITY_MISMATCH' });
   assert.equal((await api.inspectStudyService(storeDir)).instanceId, handle.instanceId);
 });

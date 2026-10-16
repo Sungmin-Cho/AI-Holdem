@@ -34,7 +34,20 @@ const STATIC = new Map([
   ['/pot-odds-drill.js', ['server/drill-public/pot-odds-drill.js', 'text/javascript; charset=utf-8']],
   ['/spot-chart.js', ['server/drill-public/spot-chart.js', 'text/javascript; charset=utf-8']],
 ]);
+// Only the study listener exposes the replay library; these resources include
+// the complete browser import closure, with paths preserved for ES modules.
+const REPLAY_STATIC = new Map([
+  ['/replay.html', ['server/drill-public/replay.html', 'text/html; charset=utf-8']],
+  ['/replay.js', ['server/drill-public/replay.js', 'text/javascript; charset=utf-8']],
+  ['/replay.css', ['server/drill-public/replay.css', 'text/css; charset=utf-8']],
+  ['/replay-library-state.js', ['server/drill-public/replay-library-state.js', 'text/javascript; charset=utf-8']],
+  ...['replay-player', 'replay-controller', 'replay-perspective', 'replay-model', 'replay-format', 'replay-facts', 'replayer', 'seat-format'].map(name => [`/public/${name}.js`, [`server/public/${name}.js`, 'text/javascript; charset=utf-8']]),
+  ['/public/replay.css', ['server/public/replay.css', 'text/css; charset=utf-8']],
+  ...['decision-facts', 'poker-eval'].map(name => [`/shared/${name}.js`, [`shared/${name}.js`, 'text/javascript; charset=utf-8']]),
+]);
 const CLIENT_ERRORS = new Map([
+  ['REPLAY_BAD_REQUEST', 400], ['REPLAY_NOT_FOUND', 404], ['REPLAY_NOT_COMPLETED', 409],
+  ['REPLAY_UNAVAILABLE', 422], ['REPLAY_UNSUPPORTED', 422], ['REPLAY_LIMIT_EXCEEDED', 413], ['REPLAY_BUSY', 429],
   ['PAYLOAD_TOO_LARGE', 413], ['BAD_JSON', 400], ['USAGE', 400],
   ['INVALID_DRILL_ANSWER', 400], ['INVALID_DRILL_MODE', 400], ['INVALID_DRILL_LIMIT', 400], ['INVALID_DRILL_SELECTION', 400],
   ['UNSUPPORTED_SPOT', 400], ['UNSUPPORTED_HAND', 400],
@@ -118,10 +131,15 @@ const ANSWER_FIELDS = {
 
 /** Shared HTTP adapter. Store and hooks are trusted startup configuration only. */
 export function createDrillHandler({ storeDir, token, onActivity = () => {}, beforeRequest = () => {},
-  health = {}, parentRegistry } = {}) {
+  health = {}, parentRegistry, replayLibrary, replayEnabled = true, staticAssets } = {}) {
   if (typeof storeDir !== 'string' || !storeDir || typeof token !== 'string' || !token) {
     throw new TypeError('storeDir and token required');
   }
+  // Privileged constructor options support mixed-version fixtures; HTTP callers
+  // cannot change this closure or the library capability.
+  const assets = staticAssets ?? new Map([...STATIC, ...(replayEnabled ? REPLAY_STATIC : [])]);
+  let libraryPromise;
+  const library = () => replayLibrary ?? (libraryPromise ??= import('./replay-library.js').then(({ createReplayLibrary }) => createReplayLibrary(storeDir)).catch(error => { libraryPromise = undefined; throw error; }));
   return async (req, res) => {
     try {
       const url = new URL(req.url, 'http://127.0.0.1');
@@ -155,7 +173,32 @@ export function createDrillHandler({ storeDir, token, onActivity = () => {}, bef
         return;
       }
       if (req.method === 'GET' && url.pathname === '/api/health') {
-        sendJson(res, 200, { ok: true, protocolVersion: 1, capabilities: { study: true }, ...health }); return;
+        sendJson(res, 200, { ok: true, protocolVersion: 1, ...health, capabilities: { ...health.capabilities, study: true, ...(replayEnabled ? { replayLibrary: 1 } : {}) } }); return;
+      }
+      if (url.pathname === '/api/replays' || url.pathname.startsWith('/api/replays/')) {
+        if (!replayEnabled || req.method !== 'GET') fail('NOT_FOUND');
+        const match = /^\/api\/replays\/games(?:\/([^/]+)\/hands(?:\/([^/]+))?)?$/.exec(url.pathname);
+        if (!match) fail('REPLAY_BAD_REQUEST');
+        const [, gameId, rawHand] = match;
+        if (gameId && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(gameId)) fail('REPLAY_BAD_REQUEST');
+        if (rawHand && (!/^[1-9][0-9]*$/.test(rawHand) || !Number.isSafeInteger(Number(rawHand)))) fail('REPLAY_BAD_REQUEST');
+        const allowed = rawHand ? [] : ['offset', 'limit'];
+        for (const key of url.searchParams.keys()) {
+          if (!allowed.includes(key) || url.searchParams.getAll(key).length !== 1) fail('REPLAY_BAD_REQUEST');
+        }
+        const integer = (key, fallback, min, max) => {
+          const raw = url.searchParams.get(key);
+          if (raw === null) return fallback;
+          if (!/^(0|[1-9][0-9]*)$/.test(raw)) fail('REPLAY_BAD_REQUEST');
+          const value = Number(raw);
+          if (!Number.isSafeInteger(value) || value < min || value > max) fail('REPLAY_BAD_REQUEST');
+          return value;
+        };
+        const page = rawHand ? null : { offset: integer('offset', 0, 0, Number.MAX_SAFE_INTEGER), limit: integer('limit', gameId ? 50 : 25, 1, gameId ? 100 : 50) };
+        const reader = await library();
+        const value = rawHand ? await reader.readHand(gameId, Number(rawHand))
+          : gameId ? await reader.listHands(gameId, page) : await reader.listGames(page);
+        sendJson(res, 200, value); return;
       }
       if (req.method === 'GET' && url.pathname === '/api/summary') {
         sendJson(res, 200, { ok: true, summary: await readStudySummary(storeDir) }); return;
@@ -184,8 +227,8 @@ export function createDrillHandler({ storeDir, token, onActivity = () => {}, bef
         } else { typedBody(body, {}); sendJson(res, 200, { ok: true }); }
         return;
       }
-      if (api || req.method !== 'GET' || !STATIC.has(url.pathname)) fail('NOT_FOUND');
-      const [file, mime] = STATIC.get(url.pathname);
+      if (api || req.method !== 'GET' || !assets.has(url.pathname)) fail('NOT_FOUND');
+      const [file, mime] = assets.get(url.pathname);
       fs.readFile(path.join(ROOT, file), (error, bytes) => {
         if (error) { sendJson(res, 404, { ok: false, code: 'NOT_FOUND' }); return; }
         res.writeHead(200, { 'Content-Type': mime, 'Content-Length': bytes.length,
