@@ -10,6 +10,7 @@ import { loadUiState, publicSnapshot } from "../server/server.js";
 import { ensureStudyService } from "./study-service.js";
 import { createRoomManager } from "./room-manager.js";
 import { createSessionSummaryCache } from "./session-summary.js";
+import { RelayDenied } from "./relay-access.js";
 import { readHud, readReport, readReveal } from "./host-insights.js";
 import { rankPlayers } from "../server/public/final-summary.js";
 import { HOST_ID } from "../shared/seat-roles.js";
@@ -41,6 +42,19 @@ async function bodyOf(req) {
   } catch {
     throw Object.assign(new Error(), { code: "BAD_JSON" });
   }
+}
+// #270: every proxied request opens its own connection (agent:false), so a verified listener
+// can never be reached through a pooled socket bound to an older relay on the same port, and
+// node:http follows no redirect, so the session token never leaves the verified address.
+function openUpstream({ port, path: target, method, headers, body, signal, streaming }) {
+  return new Promise((resolve, reject) => {
+    const request = http.request({ host: "127.0.0.1", port, path: target, method, headers, agent: false, signal });
+    request.once("response", resolve);
+    request.on("error", () => reject(Object.assign(new Error(), { code: "APP_UNAVAILABLE" })));
+    // Ordinary requests have a five-minute socket inactivity budget; SSE stays long-lived.
+    if (!streaming) request.setTimeout(300_000, () => request.destroy());
+    request.end(body ?? undefined);
+  });
 }
 function joinLinks(port, code, { tls = false, publicHost = null } = {}) {
   const hosts = [];
@@ -290,7 +304,7 @@ export async function startAppServer({
     pruneJoinAttempts(joinAttempts, now);
     return row.count > 10;
   }
-  async function proxyGame({ req, res, url, gameId, endpoint, seat }) {
+  async function proxyGame({ req, res, url, gameId, endpoint, seat, recheck = null }) {
     const expectedMethod = endpoint === "action" ? "POST" : "GET";
     if (req.method !== expectedMethod) {
       json(res, 405, { code: "METHOD_NOT_ALLOWED" });
@@ -344,54 +358,88 @@ export async function startAppServer({
       json(res, terminal?409:503, { code: terminal?"SESSION_INACTIVE":"SESSION_UNAVAILABLE" });
       return;
     }
-    let lock,engine;
-    try {
-      lock=JSON.parse(fs.readFileSync(path.join(current.sessionDir,"lock.json")));
-      engine=JSON.parse(fs.readFileSync(path.join(current.sessionDir,"state.json")));
-    } catch(error) {
-      if(error.code==='ENOENT'){json(res,503,{code:'RELAY_UNAVAILABLE'});return;}
-      throw error;
+    // #270: the relay is never addressed from lock.json alone. The loop's capability pins its
+    // verified relay in this same tick (before any body wait); `use` re-proves it afterwards
+    // and runs `send` in the same synchronous step as the last check.
+    const session = manager.session,
+      loop = session.loop,
+      sessionDir = current.sessionDir,
+      selectionVersion = current.selectionVersion;
+    if (typeof loop?.captureRelayAccess !== "function") {
+      json(res, 503, { code: "RELAY_UNAVAILABLE" });
+      return;
     }
-    if (
-      lock.serverPid !== manager.session.loop.serverPid ||
-      lock.sessionToken !== engine.sessionToken ||
-      lock.controlProtocolVersion !== 1
-    )
-      throw Object.assign(new Error(), { code: "RELAY_UNAVAILABLE" });
+    const capability = loop.captureRelayAccess();
     const query = new URLSearchParams(url.searchParams);
     query.delete("seat");
-    query.set("token", lock.sessionToken);
     const controller = new AbortController();
     res.on("close", () => controller.abort());
-    const options = {
-      method: req.method,
-      signal: controller.signal,
-      headers: {
-        "x-session-token": lock.sessionToken,
-        "x-seat": seat,
-      },
-    };
+    const headers = { "x-seat": seat };
+    let body = null;
     if (req.method === "POST") {
-      const body = await bodyOf(req);
-      if ("token" in body)
+      const parsed = await bodyOf(req);
+      if ("token" in parsed)
         throw Object.assign(new Error(), { code: "BAD_COMMAND" });
-      const payload = { ...body };
+      const payload = { ...parsed };
       delete payload.seat;
       if (seat !== HOST_ID) delete payload.note;
-      options.body = JSON.stringify(payload);
-      options.headers["content-type"] = "application/json";
+      body = JSON.stringify(payload);
+      headers["content-type"] = "application/json";
+      headers["content-length"] = Buffer.byteLength(body);
     }
-    const upstream = await fetch(
-      `http://127.0.0.1:${lock.port}/api/${endpoint}?${query}`,
-      options,
-    );
-    res.writeHead(upstream.status, {
-      "content-type":
-        upstream.headers.get("content-type") ?? "application/json",
+    const revalidate = () => {
+      const latest = manager.snapshot();
+      if (
+        manager.current?.gameId !== gameId ||
+        manager.current?.sessionDir !== sessionDir ||
+        manager.current?.selectionVersion !== selectionVersion ||
+        latest.gameEpoch !== snapshot.gameEpoch
+      )
+        throw new RelayDenied("STALE_GAME", "STALE");
+      // A failure reconciliation can replace these objects while keeping the selected
+      // game/epoch. Refuse this request, but let the transport retry the same game.
+      if (res.destroyed || manager.current !== current || manager.session !== session || session.loop !== loop)
+        throw new RelayDenied("RELAY_UNAVAILABLE", "CHANGED");
+      if (
+        endpoint === "action" &&
+        latest.state !== "playing" &&
+        !(["pausing", "paused"].includes(latest.state))
+      )
+        throw new RelayDenied("GAME_PAUSED", "STALE");
+      recheck?.();
+    };
+    let access = null;
+    let upstream;
+    try {
+      upstream = await capability.use(
+        { gameEpoch: snapshot.gameEpoch, revalidate },
+        (granted) => {
+          access = granted;
+          query.set("token", granted.sessionToken);
+          headers["x-session-token"] = granted.sessionToken;
+          return openUpstream({
+            port: granted.port,
+            path: `/api/${endpoint}?${query}`,
+            method: req.method,
+            headers,
+            body,
+            signal: controller.signal,
+            streaming: endpoint === "events",
+          });
+        },
+      );
+    } catch (error) {
+      if (!(error instanceof RelayDenied)) throw error;
+      if (res.destroyed) return;
+      json(res, ["STALE_GAME", "GAME_PAUSED"].includes(error.code) ? 409 : 503, { code: error.code });
+      return;
+    }
+    res.writeHead(upstream.statusCode, {
+      "content-type": upstream.headers["content-type"] ?? "application/json",
       "cache-control": "no-store",
     });
-    for await (const chunk of upstream.body) {
-      if (current.gameId !== manager.current?.gameId) {
+    for await (const chunk of upstream) {
+      if (current.gameId !== manager.current?.gameId || !access.stillBound()) {
         controller.abort();
         break;
       }
@@ -758,6 +806,19 @@ export async function startAppServer({
           gameId: pMatch[1],
           endpoint: pMatch[2],
           seat: spectator ? SPECTATOR_ID : me.playerId,
+          // The seat or credential may change while a body or an OS check is pending.
+          recheck: () => {
+            let now;
+            try { now = participantAuth(); } catch { throw new RelayDenied("STALE_GAME", "STALE"); }
+            if (
+              now.participantId !== me.participantId ||
+              now.playerId !== me.playerId ||
+              now.roomRole !== me.roomRole ||
+              now.boundGameId !== me.boundGameId ||
+              (!spectator && now.boundGameId !== manager.current?.gameId)
+            )
+              throw new RelayDenied("STALE_GAME", "STALE");
+          },
         });
         return;
       }

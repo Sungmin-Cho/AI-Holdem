@@ -37,6 +37,7 @@ import {
 } from '../engine/state.js';
 import { terminateWin32ProcessStartedAt } from '../engine/process-identity.js';
 import { createListenerOwnedBy } from './listener-ownership.js';
+import { createRelayAccess } from './relay-access.js';
 import { createRelayRootOwner, writeRelayJsonAtomic } from '../server/action-receipts.js';
 import {
   buildPlayerPrompt,
@@ -958,6 +959,20 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   let resumeEntryPending = false;
   let doneResumeNoTrainingWrite = false;
   let stopRequested = false;
+  // #270: the app proxy's request-scoped capture of the verified relay (tools/relay-access.js).
+  // It reads `serverBindingVerified` by reference and hands the token only to the proxy's
+  // `send` callback.
+  const relayAccess = createRelayAccess({
+    lockPath,
+    statePath: engineStatePath,
+    managed: opts.controlProtocolVersion === 1,
+    binding: () => serverBindingVerified,
+    isStopping: () => stopRequested,
+    startTimeOf: serverStartTimeOf,
+    listenerOwnedBy: (pid, port, call) => listenerOwnedByFn(pid, port, { timeoutMs: Math.min(call.timeoutMs, osVerifyMs) }),
+    probeMs: opts.relayVerifyMs ?? Math.min(osVerifyMs, 3_000),
+    maxConcurrent: opts.relayMaxConcurrent,
+  });
   let lifecycleStarted = false;
   let preserveLoopState = false;
   const managed = opts.controlProtocolVersion === 1;
@@ -9132,6 +9147,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // #273: the bounded failure that ended the last bootstrap/resume/run, if any.
     get runFailure() { return lastRunFailure; },
     get serverPid() { return serverPid; },
+    captureRelayAccess: () => relayAccess.capture(),
     // Host lobby read-only progress (tools/session-manager.js snapshot). No
     // tokens, paths or PIDs: stage names, runtime names, counts and times.
     get bootStage() {

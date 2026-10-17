@@ -12,6 +12,7 @@ import { createRoomManager } from '../tools/room-manager.js';
 import { resolveCurrentSession } from '../engine/session-catalog.js';
 import { inspectStudyService, stopStudyService } from '../tools/study-service.js';
 import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
+import { makeLoop } from './helpers/relay-proxy-fixture.js';
 
 const TOKEN = 'a'.repeat(64);
 const resolver = async () => ({ player: null, upper: null, notices: [] });
@@ -294,7 +295,8 @@ test('x-seat is overwritten and note is stripped on the public game proxy', asyn
     command: () => ({ requestId: 'x', status: 'rejected' }),
     receipt: () => ({ requestId: 'x', status: 'rejected' }),
     current: { gameId, sessionDir, selectionVersion: 1 },
-    session: { loop: { serverPid: process.pid } },
+    // #270: the proxy trusts only a loop that proved this relay (binding + listener + identity).
+    session: { loop: makeLoop({ lockPath: path.join(sessionDir, 'lock.json'), statePath: path.join(sessionDir, 'state.json'), port: relay.address().port, sessionToken }) },
     room: roomMgr,
   };
   const app = await startAppServer({ manager, token: TOKEN, storeDir: roomStore, port: 0, publicPort: 0 });
@@ -376,7 +378,8 @@ test('paused action POSTs reach the relay gate and its cancellation proof passes
     command: () => ({ requestId: 'x', status: 'rejected' }),
     receipt: () => ({ requestId: 'x', status: 'rejected' }),
     current: { gameId, sessionDir, selectionVersion: 1 },
-    session: { loop: { serverPid: process.pid } },
+    // #270: the proxy trusts only a loop that proved this relay (binding + listener + identity).
+    session: { loop: makeLoop({ lockPath: path.join(sessionDir, 'lock.json'), statePath: path.join(sessionDir, 'state.json'), port: relay.address().port, sessionToken }) },
     room: roomMgr,
   };
   const app = await startAppServer({ manager, token: TOKEN, storeDir: roomStore, port: 0, publicPort: 0 });
