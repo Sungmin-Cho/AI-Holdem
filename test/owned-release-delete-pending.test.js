@@ -203,6 +203,17 @@ test('#265 A: removeDeletedLockDir retries a held directory only while it is the
   assert.equal(r.result, true); assert.equal(r.slept, 0);
 });
 
+test('#265: removeDeletedLockDir never retries its rmdir on a path that came to name another directory while it waited', () => {
+  // The first identity read (before the wait) is the judged directory, every later one another.
+  const replacedAfterWait = () => { let reads = 0; return () => { reads += 1; return { dev: 1n, ino: reads === 1 ? 2n : 3n }; }; };
+  let r = decide({ rmdir: () => 'ENOTEMPTY', identity: replacedAfterWait() });
+  assert.equal(r.result, false); assert.equal(r.slept, 1);
+  assert.equal(r.calls.filter((call) => call === 'rmdir').length, 1, JSON.stringify(r.calls));
+  r = decide({ rmdir: () => 'EBUSY', identity: replacedAfterWait() });
+  assert.equal(r.error?.code, 'EBUSY'); assert.equal(r.slept, 1);
+  assert.equal(r.calls.filter((call) => call === 'rmdir').length, 1, JSON.stringify(r.calls));
+});
+
 test('#265 A: releaseOwnedLock removes its directory although another process held the pid file across the release', async () => {
   const root = createOwnedTempDir('holdem-release-held');
   const handle = acquireOwnedLock(root, 'held.lock.d');
@@ -643,29 +654,86 @@ test('#265 short mutex: a pid file pending past the waiter\'s deadline still fai
     // The name is still pending: a waiter retries it to its deadline, and then fails as it always did.
     const started = performance.now();
     await assert.rejects(withNamedLock(root, 'held.lock.d', () => {}, { timeoutMs: 1000, retryMs: 20 }), { code: 'EPERM' });
-    assert.ok(performance.now() - started >= 900, `the waiter gave up after ${Math.round(performance.now() - started)} ms`);
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed >= 900 && elapsed < 3000, `the waiter gave up after ${Math.round(elapsed)} ms, against a 1000 ms deadline`);
   } finally {
     assert.equal((await holder.closed).code, 0);
     try { fs.rmdirSync(dir); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
 });
 
-// Ordinary contention, no holder: the waiters themselves are the readers.
+// A dead owner's short lock: its one-line pid names a process that is not running.
+function deadShortLock(root, name) {
+  assert.equal(failureCode(() => process.kill(4194300, 0)), 'ESRCH', 'the dead owner pid must not be running');
+  fs.mkdirSync(path.join(root, name));
+  fs.writeFileSync(path.join(root, name, 'pid'), '4194300');
+}
+
+test('#265 short mutex: a reclaim step that fails is thrown at once, never retried as a pending read', async () => {
+  const root = createOwnedTempDir('holdem-mutex-reclaim-step');
+  deadShortLock(root, 'held.lock.d');
+  let entered = false;
+  const started = performance.now();
+  // Past the judgement, with the stale pid pinned by this reclaimer's aside: a step that fails here
+  // is a failed reclaim, not a name in the middle of its deletion.
+  await assert.rejects(withNamedLock(root, 'held.lock.d', () => { entered = true; }, {
+    timeoutMs: 3000,
+    hooks: { beforeUnlinkPid: () => { throw Object.assign(new Error('EPERM: operation not permitted, unlink'), { code: 'EPERM', syscall: 'unlink' }); } },
+  }), { code: 'EPERM', syscall: 'unlink' });
+  assert.ok(performance.now() - started < 1000, `thrown after ${Math.round(performance.now() - started)} ms`);
+  assert.equal(entered, false);
+  // Nothing was half-removed: the stale pid is where it was, and the aside is gone.
+  assert.deepEqual(fs.readdirSync(path.join(root, 'held.lock.d')), ['pid']);
+  // Without the failure the same stale lock is reclaimed.
+  await withNamedLock(root, 'held.lock.d', () => { entered = true; });
+  assert.equal(entered, true);
+  assert.equal(absent(path.join(root, 'held.lock.d')), true);
+});
+
+test('#265 short mutex: a release never waits on, or removes, an entry that is not its own pid file', async () => {
+  const root = createOwnedTempDir('holdem-mutex-release-foreign');
+  const dir = path.join(root, 'held.lock.d');
+  let holder, started;
+  await withNamedLock(root, 'held.lock.d', async () => {
+    fs.writeFileSync(path.join(dir, 'foreign'), 'x');
+    holder = holdOpen(path.join(dir, 'pid'));
+    await holder.held;
+    started = performance.now();
+  });
+  const elapsed = performance.now() - started;
+  assert.equal((await holder.closed).code, 0);
+  assert.ok(elapsed < 500, `release waited ${Math.round(elapsed)} ms beside a foreign entry`);
+  assert.deepEqual(fs.readdirSync(dir), ['foreign']);
+});
+
+// Ordinary contention, no holder: the waiters themselves are the readers. Every contender starts
+// once all of them are ready, then runs cycles until it has done `cycles` or `maxMs` has passed
+// (the last acquire may still take its timeout). An error is counted under where it was thrown
+// (acquire or release — the body only spins) and its code and syscall.
 const CONTENDER = `
+import fs from 'node:fs';
 import { withNamedLock } from ${JSON.stringify(STATE_HREF)};
 import { performance } from 'node:perf_hooks';
-const [root, name, cycles, maxMs] = process.argv.slice(1);
+const [root, name, cycles, maxMs, go] = process.argv.slice(1);
+process.stdout.write('ready\\n');
+while (!fs.existsSync(go)) await new Promise((resolve) => setTimeout(resolve, 2));
 const errors = {};
 let done = 0, maxWait = 0;
 const end = performance.now() + Number(maxMs);
 while (done < Number(cycles) && performance.now() < end) {
   const started = performance.now();
+  let entered = false;
   try {
-    await withNamedLock(root, name, () => { const until = performance.now() + 1; while (performance.now() < until); }, { retryMs: 5, timeoutMs: 20000 });
-    maxWait = Math.max(maxWait, performance.now() - started);
+    await withNamedLock(root, name, () => {
+      entered = true;
+      maxWait = Math.max(maxWait, performance.now() - started);
+      const until = performance.now() + 1;
+      while (performance.now() < until);
+    }, { retryMs: 5, timeoutMs: 10000 });
     done += 1;
   } catch (error) {
-    errors[error.code ?? 'ERROR'] = (errors[error.code ?? 'ERROR'] ?? 0) + 1;
+    const key = (entered ? 'release' : 'acquire') + ':' + (error.code ?? 'ERROR') + ':' + (error.syscall ?? '-');
+    errors[key] = (errors[key] ?? 0) + 1;
   }
   await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * 10)));
 }
@@ -673,20 +741,30 @@ process.stdout.write(JSON.stringify({ done, errors, maxWait: Math.round(maxWait)
 
 test('#265 short mutex: contending processes neither fail nor stall on each other\'s reads of the pid file', { timeout: 90_000 }, async (t) => {
   const root = createOwnedTempDir('holdem-mutex-contention');
+  const go = path.join(root, 'go');
   const runs = Array.from({ length: 4 }, () => {
-    const child = registerOwnedProcess(spawn(process.execPath, ['--input-type=module', '-e', CONTENDER, root, 'busy.lock.d', '150', '12000'],
+    const child = registerOwnedProcess(spawn(process.execPath, ['--input-type=module', '-e', CONTENDER, root, 'busy.lock.d', '150', '12000', go],
       { stdio: ['ignore', 'pipe', 'pipe'] }), 'short mutex contender');
     let out = '', err = '';
-    child.stdout.on('data', (chunk) => { out += chunk; });
+    const closed = new Promise((resolve) => child.on('close', (code) => resolve({ code, out, err })));
+    const ready = new Promise((resolve, reject) => {
+      child.stdout.on('data', (chunk) => { out += chunk; if (out.includes('ready\n')) resolve(); });
+      closed.then(({ code }) => reject(new Error(`contender exited ${code} before it was ready: ${err}`)));
+    });
     child.stderr.on('data', (chunk) => { err += chunk; });
-    return new Promise((resolve) => child.on('close', (code) => resolve({ code, out, err })));
+    return { ready, closed };
   });
-  const results = await Promise.all(runs);
-  const reports = results.map(({ code, out, err }) => { assert.equal(code, 0, err); return JSON.parse(out); });
+  await Promise.all(runs.map((run) => run.ready));
+  fs.writeFileSync(go, '');
+  const results = await Promise.all(runs.map((run) => run.closed));
+  const reports = results.map(({ code, out, err }) => { assert.equal(code, 0, err); return JSON.parse(out.slice(out.indexOf('ready\n') + 6)); });
   t.diagnostic(`contenders ${JSON.stringify(reports)}`);
   for (const report of reports) {
     assert.deepEqual(report.errors, {}, `a contender failed: ${JSON.stringify(reports)}`);
-    // An empty leftover holds every waiter for 6 s; a fair wait here is a few milliseconds.
+    // They really contended: each took the lock many times, in turn with the others.
+    assert.ok(report.done >= 20, `a contender made no progress: ${JSON.stringify(reports)}`);
+    // An empty leftover holds every waiter for 6 s (5990–6030 ms in the Windows Node 20 RED); the
+    // fair waits here were at most 0.64 s on both Windows Node versions once it was fixed.
     assert.ok(report.maxWait < 5000, `a contender stalled: ${JSON.stringify(reports)}`);
   }
   assert.equal(absent(path.join(root, 'busy.lock.d')), true);

@@ -372,6 +372,11 @@ export function removeDeletedLockDir(dir, expected, {
     if (notEmpty && (!windows || now() >= deadline || !onlyDeletedNames())) return false;
     if (!notEmpty && (!windows || !['EPERM', 'EBUSY'].includes(failure.code) || now() >= deadline || !stillExpected())) throw failure;
     sleep(DELETE_PENDING_RETRY_MS);
+    // The retry removes by path: only while the path still names the directory judged above.
+    if (!stillExpected()) {
+      if (notEmpty) return false;
+      throw failure;
+    }
   }
 }
 
@@ -470,15 +475,31 @@ function detachStalePidFile(dir, expected, hooks) {
   }
 }
 
-function reclaimMutex(dir, hooks) {
-  const decided = mutexIdentity(dir);
+// #265: on Windows a lock name deleted while another process reads it stays pending until that
+// read ends — before libuv 1.49 for as long as the reader holds it, after it for the instant before
+// the remover closes its own handle — and stat-ing or opening it answers EPERM. For a waiter that
+// is a lock being released, not a verdict: `onPending` takes the error, `read` answers `unjudged`,
+// and the lock is judged again on the next round. Only the judging reads; a failed reclaim step
+// is thrown as it always was.
+function readLockForWaiter(read, onPending, unjudged) {
+  try {
+    return read();
+  } catch (error) {
+    if (!onPending || process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+    onPending(error);
+    return unjudged;
+  }
+}
+
+function reclaimMutex(dir, hooks, onPending) {
+  const decided = readLockForWaiter(() => mutexIdentity(dir), onPending, null);
   if (!decided) return false;
   if (!decided.pidFile) {
     const leftovers = reclaimAsideLeftovers(dir, decided);
     if (leftovers !== null) return leftovers;
   }
   if (!isIdentityStale(decided)) return false;
-  const confirmed = mutexIdentity(dir);
+  const confirmed = readLockForWaiter(() => mutexIdentity(dir), onPending, null);
   if (!isReclaimable(decided, confirmed)) return false;
   hooks?.afterJudge?.(dir);
   if (!detachStalePidFile(dir, confirmed, hooks)) return false;
@@ -609,23 +630,18 @@ function acquireMutex(dir, ctx) {
   const state = { tmp: null, mine: null };
   try {
     for (;;) {
-      // #265: on Windows before libuv 1.49 a lock name its owner deleted while another waiter
-      // read it stays pending until that read ends, and stat-ing or opening it answers EPERM.
-      // That is a lock being released, not a verdict: judge it again on the next round. An
-      // EPERM that lasts to the deadline is thrown, as it always was.
+      // A read of a name pending deletion (see readLockForWaiter) is judged again next round;
+      // one that still answers EPERM at the deadline is thrown, as it always was.
       let pending = null;
-      try {
-        // rename은 dir가 없을 때, 또는 방금 회수해 비웠을 때만 시도한다. 존재하는 dir는 먼저
-        // 판정한다 — 젊은 빈 디렉터리(legacy mkdir→pid 창)는 회수 대상이 아니므로 덮지 않는다.
-        let mine = inodeKey(dir) ? null : installMutex(dir, String(process.pid), ctx.hooks, state);
+      const onPending = (error) => { pending = error; };
+      // rename은 dir가 없을 때, 또는 방금 회수해 비웠을 때만 시도한다. 존재하는 dir는 먼저
+      // 판정한다 — 젊은 빈 디렉터리(legacy mkdir→pid 창)는 회수 대상이 아니므로 덮지 않는다.
+      const present = readLockForWaiter(() => inodeKey(dir), onPending, true);
+      let mine = present ? null : installMutex(dir, String(process.pid), ctx.hooks, state);
+      if (mine) return mine;
+      if (!pending && reclaimMutex(dir, ctx.hooks, onPending)) {
+        mine = installMutex(dir, String(process.pid), ctx.hooks, state);
         if (mine) return mine;
-        if (reclaimMutex(dir, ctx.hooks)) {
-          mine = installMutex(dir, String(process.pid), ctx.hooks, state);
-          if (mine) return mine;
-        }
-      } catch (error) {
-        if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
-        pending = error;
       }
       if (Date.now() >= ctx.deadline) {
         if (pending) throw pending;
