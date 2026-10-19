@@ -578,11 +578,15 @@ test('#265 A: a lock directory without a readable owner still fails closed for i
 // pending name meanwhile got EPERM, and its acquire threw it.
 const STATE_HREF = new URL('../engine/state.js', import.meta.url).href;
 
-// Takes the mutex `name` under `root` once, polling every `retryMs`, and reports how it went.
+// Takes the mutex `name` under `root` once, polling every `retryMs`, and reports how it went. It
+// starts once `go` exists: registering the child can take a while on Windows (a synchronous identity
+// probe), and its deadline must not run before the test is ready to act on it.
 const WAITER = `
+import fs from 'node:fs';
 import { withNamedLock } from ${JSON.stringify(STATE_HREF)};
 import { performance } from 'node:perf_hooks';
-const [root, name, retryMs, timeoutMs] = process.argv.slice(1);
+const [root, name, retryMs, timeoutMs, go] = process.argv.slice(1);
+while (!fs.existsSync(go)) await new Promise((resolve) => setTimeout(resolve, 2));
 process.stdout.write('waiting\\n');
 const started = performance.now();
 try {
@@ -593,8 +597,10 @@ try {
 }`;
 
 function waitForMutex(root, name, { retryMs = 5, timeoutMs = 15_000 } = {}) {
-  const child = registerOwnedProcess(spawn(process.execPath, ['--input-type=module', '-e', WAITER, root, name, String(retryMs), String(timeoutMs)],
+  const go = path.join(root, `waiter-go-${randomUUID()}`);
+  const child = registerOwnedProcess(spawn(process.execPath, ['--input-type=module', '-e', WAITER, root, name, String(retryMs), String(timeoutMs), go],
     { stdio: ['ignore', 'pipe', 'pipe'] }), 'short mutex waiter');
+  fs.writeFileSync(go, '');
   let out = '', err = '';
   child.stdout.on('data', (chunk) => { out += chunk; });
   child.stderr.on('data', (chunk) => { err += chunk; });
