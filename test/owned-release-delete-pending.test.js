@@ -354,6 +354,9 @@ test('#265 A: a service that cannot release its lock within its deadline leaves 
   // The service's stderr goes to the diagnostics log; CI already sets one, a local run gets its own.
   const before = process.env.AI_HOLDEM_PLATFORM_DIAGNOSTICS;
   const diagnostics = before ?? createOwnedTempDir('holdem-study-diagnostics');
+  const childLog = path.join(diagnostics, 'study-children.log');
+  // Only what this test's service appends: the CI log is shared, and pids are reused.
+  const logStart = fs.existsSync(childLog) ? fs.statSync(childLog).size : 0;
   process.env.AI_HOLDEM_PLATFORM_DIAGNOSTICS = diagnostics;
   let launched;
   try { launched = await launch(t); }
@@ -371,12 +374,15 @@ test('#265 A: a service that cannot release its lock within its deadline leaves 
   const lock = readOwnedLock(path.join(storeDir, '.training'), 'study.lock.d');
   if (closed.out.includes('seen EPERM')) {
     assert.equal(lock?.status, 'dead', 'a service that gave up its release leaves a dead lock');
-    // It gave up because the deadline ran out on a held file, after many attempts — not at once.
-    const line = fs.readFileSync(path.join(diagnostics, 'study-children.log'), 'utf8').split('\n')
+    // It retried the held file until its deadline: the last attempt failed on that file (EPERM)
+    // or on the spent budget itself (no errno) — never on anything else, such as the RangeError
+    // a broken retry clock threw at once. How many attempts fit depends on the runner.
+    const appended = fs.readFileSync(childLog).subarray(logStart).toString('utf8');
+    const line = appended.split('\n')
       .find((row) => row.startsWith('STUDY_CHILD_CLEANUP_FAILED step=release') && row.endsWith(` pid=${handle.pid}`));
-    assert.ok(line, 'the service reported no failed release');
-    assert.match(line, / fs=EPERM /);
-    assert.ok(Number(/ tries=(\d+)/.exec(line)[1]) >= 5, line);
+    assert.ok(line, `the service reported no failed release:\n${appended}`);
+    t.diagnostic(line);
+    assert.match(line, / code=STUDY_DESCRIPTOR_CORRUPT fs=(EPERM|none) /);
   } else {
     assert.equal(lock, null);
   }
@@ -462,6 +468,20 @@ test('#265 A: a cleanup retry on the default clock reads its deadline without re
   assert.equal(ok, true);
   assert.equal(budgets[0], 15_000);
   assert.ok(budgets[1] > 0 && budgets[1] <= 5_000, `the retry ran with ${budgets[1]} ms`);
+  // Without a clock of its own a cleanup step keeps the clock already in force, an outer test
+  // clock included, and a retry that reaches the deadline fails on the spent budget (no errno).
+  let clock = 0;
+  const seen = [];
+  tries = 0;
+  const outer = await withPlatformDeadline(10_000, () => runCleanupStep('release', () => {
+    tries += 1;
+    seen.push(platformTimeout(15_000));
+    throw transient();
+  }, { deadline: 100, platform: 'win32', wait: async (ms) => { clock += ms; }, report: (line) => lines.push(line) }), { now: () => clock });
+  assert.equal(outer, false);
+  assert.deepEqual(seen, [10_000, 50], 'the first attempt sees the outer budget, the retry what is left of its deadline');
+  assert.deepEqual(lines, [`STUDY_CHILD_CLEANUP_FAILED step=release code=STUDY_DESCRIPTOR_CORRUPT fs=none tries=3 pid=${process.pid}\n`]);
+  assert.equal(clock, 100);
 });
 
 test('#265 A: a transaction keeps its body\'s errno when its after-proof fails too, and a proof keeps the errno of a path it could not stat', async () => {
