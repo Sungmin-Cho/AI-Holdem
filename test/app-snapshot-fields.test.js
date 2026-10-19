@@ -45,6 +45,10 @@ const setup = { mode: 'cash-training', aiCount: 5, opponentRuntime: 'policy', hi
 // 이전 문구 그대로다 — 예전 게임이 남긴 loop-state notice를 흉내 낸다.
 const PREVIOUS_GAME_NOTICE = '컨테인먼트 실패(claude/claude-sonnet-5): 도구·MCP 표면이 비어 있지 않습니다.';
 const RAW_SECRET = 'decision-meta dropped: /Users/someone/.secret --operator-confirmed 1 (pid: 4242)';
+// The pid is matched with its label: a bare `4242` also turns up inside the
+// snapshot's random hex identifiers (gameEpoch, UUIDs), which made this flaky (#304).
+const HOST_LEAK = /operator-confirmed|pid: 4242|\.secret|sonnet/;
+const PARTICIPANT_LEAK = /secret|pid: 4242/;
 
 test('host snapshot exposes boot stages and projected notices bound to the launching game', { timeout: TIMEOUT * 2 }, async (t) => {
   const storeDir = createOwnedTempDir('app-snapshot-fields');
@@ -86,7 +90,7 @@ test('host snapshot exposes boot stages and projected notices bound to the launc
   assert.equal(first.upperStatus, 'unavailable');
   assert.deepEqual(first.notices.items.map((item) => item.code), ['RUNTIME_CONTAINMENT_FAILED']);
   assert.ok(first.notices.unclassified >= 1);
-  assert.doesNotMatch(JSON.stringify(first), /operator-confirmed|4242|\.secret|sonnet/);
+  assert.doesNotMatch(JSON.stringify(first), HOST_LEAK);
 
   // Pausing carries its start time and per-kind waiting counts.
   await run(manager, 'pause');
@@ -162,7 +166,7 @@ test('participant state never carries host progress fields', { timeout: TIMEOUT 
   })).json();
   const text = JSON.stringify(participant);
   for (const key of PROGRESS_KEYS) assert.doesNotMatch(text, new RegExp(`"${key}"`), key);
-  assert.doesNotMatch(text, /secret|4242/);
+  assert.doesNotMatch(text, PARTICIPANT_LEAK);
   await run(manager, 'pause');
   await run(manager, 'end');
 });
@@ -189,4 +193,31 @@ test('resolveRuntimes reports probe progress without letting the observer change
     ['upper', 'grok', 2, null], ['upper', 'grok', 2, true],
   ]);
   for (const event of events) assert.ok(Number.isFinite(event.elapsedMs) && event.elapsedMs >= 0);
+});
+
+test('leak matchers find the raw notice but never a random identifier (#304)', () => {
+  // Seeded, so the corpus (and the control count below) is the same on every run.
+  let seed = 304;
+  const next = () => {
+    seed = (seed + 0x6D2B79F5) >>> 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return (t ^ (t >>> 14)) >>> 0;
+  };
+  const hex = (chars) => Array.from({ length: chars / 8 }, () => next().toString(16).padStart(8, '0')).join('');
+  const uuid = () => {
+    const h = hex(32);
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${'89ab'[next() % 4]}${h.slice(17, 20)}-${h.slice(20)}`;
+  };
+  const rows = Array.from({ length: 20_000 }, () => JSON.stringify({
+    gameEpoch: hex(64), instanceId: uuid(), gameId: uuid(),
+    stageAt: new Date(Date.UTC(2020, 0, 1) + next() * 100).toISOString(), elapsedMs: next() % 10_000_000,
+  }));
+  for (const matcher of [HOST_LEAK, PARTICIPANT_LEAK]) {
+    assert.equal(rows.filter((row) => matcher.test(row)).length, 0, String(matcher));
+    assert.match(JSON.stringify({ notices: [RAW_SECRET] }), matcher);
+  }
+  assert.match(RAW_SECRET, /pid: 4242/, 'the fixture still carries the labelled pid');
+  // Control: the bare number this replaced does hit the same corpus.
+  assert.ok(rows.filter((row) => /4242/.test(row)).length > 0, 'the corpus can produce the old false positive');
 });
