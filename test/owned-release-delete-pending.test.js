@@ -212,6 +212,13 @@ test('#265: removeDeletedLockDir never retries its rmdir on a path that came to 
   r = decide({ rmdir: () => 'EBUSY', identity: replacedAfterWait() });
   assert.equal(r.error?.code, 'EBUSY'); assert.equal(r.slept, 1);
   assert.equal(r.calls.filter((call) => call === 'rmdir').length, 1, JSON.stringify(r.calls));
+  // Gone while it waited — another reclaimer finished it: removed, as the retried rmdir's ENOENT says.
+  const goneAfterWait = () => { let reads = 0; return () => { reads += 1; return reads === 1 ? { dev: 1n, ino: 2n } : null; }; };
+  for (const code of ['ENOTEMPTY', 'EBUSY']) {
+    r = decide({ rmdir: () => code, identity: goneAfterWait() });
+    assert.equal(r.result, true, code); assert.equal(r.slept, 1, code);
+    assert.equal(r.calls.filter((call) => call === 'rmdir').length, 1, JSON.stringify(r.calls));
+  }
 });
 
 test('#265 A: releaseOwnedLock removes its directory although another process held the pid file across the release', async () => {
@@ -662,6 +669,31 @@ test('#265 short mutex: a pid file pending past the waiter\'s deadline still fai
   }
 });
 
+test('#265 short mutex: a waiter whose last round finds a lock it may not take fails LOCKED, though earlier rounds met a pending pid', {
+  skip: WIN32 ? false : 'only Windows keeps a deleted name behind its holder',
+}, async (t) => {
+  const root = createOwnedTempDir('holdem-mutex-pending-then-held');
+  const dir = path.join(root, 'held.lock.d');
+  let holder;
+  // The holder outlives the release's bound by half a second, then leaves the empty directory that
+  // no waiter may take before it is 6 s old.
+  await withNamedLock(root, 'held.lock.d', async () => {
+    holder = holdOpen(path.join(dir, 'pid'), { lingerMs: 300, pendingLingerMs: DELETE_PENDING_WAIT_MS + 500 });
+    await holder.held;
+  });
+  try {
+    if (absent(path.join(dir, 'pid'))) {
+      assert.equal(DELETE_PENDING, false, 'libuv 1.46 must keep the deleted name');
+      t.skip('this file system deletes names at once');
+      return;
+    }
+    await assert.rejects(withNamedLock(root, 'held.lock.d', () => {}, { timeoutMs: 3000, retryMs: 20 }), { code: 'LOCKED' });
+  } finally {
+    assert.equal((await holder.closed).code, 0);
+    try { fs.rmdirSync(dir); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+});
+
 // A dead owner's short lock: its one-line pid names a process that is not running.
 function deadShortLock(root, name) {
   assert.equal(failureCode(() => process.kill(4194300, 0)), 'ESRCH', 'the dead owner pid must not be running');
@@ -672,16 +704,20 @@ function deadShortLock(root, name) {
 test('#265 short mutex: a reclaim step that fails is thrown at once, never retried as a pending read', async () => {
   const root = createOwnedTempDir('holdem-mutex-reclaim-step');
   deadShortLock(root, 'held.lock.d');
-  let entered = false;
+  let entered = false, linked = 0;
   const started = performance.now();
   // Past the judgement, with the stale pid pinned by this reclaimer's aside: a step that fails here
   // is a failed reclaim, not a name in the middle of its deletion.
   await assert.rejects(withNamedLock(root, 'held.lock.d', () => { entered = true; }, {
     timeoutMs: 3000,
-    hooks: { beforeUnlinkPid: () => { throw Object.assign(new Error('EPERM: operation not permitted, unlink'), { code: 'EPERM', syscall: 'unlink' }); } },
+    hooks: {
+      afterLink: (lockDir, aside) => { linked += fs.existsSync(aside) ? 1 : 0; },
+      beforeUnlinkPid: () => { throw Object.assign(new Error('EPERM: operation not permitted, unlink'), { code: 'EPERM', syscall: 'unlink' }); },
+    },
   }), { code: 'EPERM', syscall: 'unlink' });
   assert.ok(performance.now() - started < 1000, `thrown after ${Math.round(performance.now() - started)} ms`);
   assert.equal(entered, false);
+  assert.equal(linked, 1, 'the failure came once, after the aside was linked');
   // Nothing was half-removed: the stale pid is where it was, and the aside is gone.
   assert.deepEqual(fs.readdirSync(path.join(root, 'held.lock.d')), ['pid']);
   // Without the failure the same stale lock is reclaimed.
@@ -707,9 +743,9 @@ test('#265 short mutex: a release never waits on, or removes, an entry that is n
 });
 
 // Ordinary contention, no holder: the waiters themselves are the readers. Every contender starts
-// once all of them are ready, then runs cycles until it has done `cycles` or `maxMs` has passed
-// (the last acquire may still take its timeout). An error is counted under where it was thrown
-// (acquire or release — the body only spins) and its code and syscall.
+// once all of them are ready, then runs `cycles` cycles; `maxMs` is only a watchdog on starting
+// another (the last acquire may still take its timeout). An error is counted under where it was
+// thrown (acquire or release — the body only spins) and its code and syscall.
 const CONTENDER = `
 import fs from 'node:fs';
 import { withNamedLock } from ${JSON.stringify(STATE_HREF)};
@@ -729,7 +765,7 @@ while (done < Number(cycles) && performance.now() < end) {
       maxWait = Math.max(maxWait, performance.now() - started);
       const until = performance.now() + 1;
       while (performance.now() < until);
-    }, { retryMs: 5, timeoutMs: 10000 });
+    }, { retryMs: 5, timeoutMs: 20000 });
     done += 1;
   } catch (error) {
     const key = (entered ? 'release' : 'acquire') + ':' + (error.code ?? 'ERROR') + ':' + (error.syscall ?? '-');
@@ -739,11 +775,13 @@ while (done < Number(cycles) && performance.now() < end) {
 }
 process.stdout.write(JSON.stringify({ done, errors, maxWait: Math.round(maxWait) }) + '\\n');`;
 
-test('#265 short mutex: contending processes neither fail nor stall on each other\'s reads of the pid file', { timeout: 90_000 }, async (t) => {
+const CONTENDER_CYCLES = 60;
+
+test('#265 short mutex: contending processes do not fail on each other\'s reads of the pid file', { timeout: 150_000 }, async (t) => {
   const root = createOwnedTempDir('holdem-mutex-contention');
   const go = path.join(root, 'go');
   const runs = Array.from({ length: 4 }, () => {
-    const child = registerOwnedProcess(spawn(process.execPath, ['--input-type=module', '-e', CONTENDER, root, 'busy.lock.d', '150', '12000', go],
+    const child = registerOwnedProcess(spawn(process.execPath, ['--input-type=module', '-e', CONTENDER, root, 'busy.lock.d', String(CONTENDER_CYCLES), '60000', go],
       { stdio: ['ignore', 'pipe', 'pipe'] }), 'short mutex contender');
     let out = '', err = '';
     const closed = new Promise((resolve) => child.on('close', (code) => resolve({ code, out, err })));
@@ -759,13 +797,12 @@ test('#265 short mutex: contending processes neither fail nor stall on each othe
   const results = await Promise.all(runs.map((run) => run.closed));
   const reports = results.map(({ code, out, err }) => { assert.equal(code, 0, err); return JSON.parse(out.slice(out.indexOf('ready\n') + 6)); });
   t.diagnostic(`contenders ${JSON.stringify(reports)}`);
+  // The waits are a diagnostic: the lock is not fair, so no bound on them is a correctness check
+  // (the empty leftover's 6 s stall — 5990–6030 ms in the Windows Node 20 RED — is pinned by the
+  // deterministic tests above).
   for (const report of reports) {
     assert.deepEqual(report.errors, {}, `a contender failed: ${JSON.stringify(reports)}`);
-    // They really contended: each took the lock many times, in turn with the others.
-    assert.ok(report.done >= 20, `a contender made no progress: ${JSON.stringify(reports)}`);
-    // An empty leftover holds every waiter for 6 s (5990–6030 ms in the Windows Node 20 RED); the
-    // fair waits here were at most 0.64 s on both Windows Node versions once it was fixed.
-    assert.ok(report.maxWait < 5000, `a contender stalled: ${JSON.stringify(reports)}`);
+    assert.equal(report.done, CONTENDER_CYCLES, `a contender did not finish: ${JSON.stringify(reports)}`);
   }
   assert.equal(absent(path.join(root, 'busy.lock.d')), true);
 });

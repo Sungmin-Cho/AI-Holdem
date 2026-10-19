@@ -311,9 +311,12 @@ function rmdirReclaimed(dir, expected) {
 
 // pid 파일 없이 aside만 남은 디렉터리는 보유 중이 아니다: 보유자는 항상 dir/pid를 가지며
 // 새 락은 aside를 가질 수 없다(link의 원본이 dir/pid이므로). 고아 aside를 치우고 비면
-// 즉시 rmdir한다. 해당 없음(aside 없음)이면 null.
-function reclaimAsideLeftovers(dir, expected) {
-  if (listReclaimAsides(dir).length === 0) return null;
+// 즉시 rmdir한다. 해당 없음(aside 없음)이면 null. 대기자의 첫 목록 읽기는 판정이다(#265,
+// readLockForWaiter): 지워지는 중인 디렉터리면 false로 다음 라운드에 다시 본다.
+function reclaimAsideLeftovers(dir, expected, onPending) {
+  const asides = readLockForWaiter(() => listReclaimAsides(dir), onPending, null);
+  if (asides === null) return false;
+  if (asides.length === 0) return null;
   if (sweepOrphanAsides(dir).remaining > 0) return false;
   return rmdirReclaimed(dir, expected);
 }
@@ -373,7 +376,11 @@ export function removeDeletedLockDir(dir, expected, {
     if (!notEmpty && (!windows || !['EPERM', 'EBUSY'].includes(failure.code) || now() >= deadline || !stillExpected())) throw failure;
     sleep(DELETE_PENDING_RETRY_MS);
     // The retry removes by path: only while the path still names the directory judged above.
-    if (!stillExpected()) {
+    // Gone meanwhile (another reclaimer finished) is what the retried rmdir would have answered.
+    let current;
+    try { current = ops.identity(dir); } catch { current = undefined; }
+    if (current === null) return true;
+    if (!sameInode(expected, current)) {
       if (notEmpty) return false;
       throw failure;
     }
@@ -479,8 +486,8 @@ function detachStalePidFile(dir, expected, hooks) {
 // read ends — before libuv 1.49 for as long as the reader holds it, after it for the instant before
 // the remover closes its own handle — and stat-ing or opening it answers EPERM. For a waiter that
 // is a lock being released, not a verdict: `onPending` takes the error, `read` answers `unjudged`,
-// and the lock is judged again on the next round. Only the judging reads; a failed reclaim step
-// is thrown as it always was.
+// and the lock is judged again on the next round. Only the judging reads (the directory's stat, the
+// pid file, the first aside listing); a failed reclaim step is thrown as it always was.
 function readLockForWaiter(read, onPending, unjudged) {
   try {
     return read();
@@ -495,7 +502,7 @@ function reclaimMutex(dir, hooks, onPending) {
   const decided = readLockForWaiter(() => mutexIdentity(dir), onPending, null);
   if (!decided) return false;
   if (!decided.pidFile) {
-    const leftovers = reclaimAsideLeftovers(dir, decided);
+    const leftovers = reclaimAsideLeftovers(dir, decided, onPending);
     if (leftovers !== null) return leftovers;
   }
   if (!isIdentityStale(decided)) return false;
