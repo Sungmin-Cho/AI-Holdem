@@ -609,15 +609,28 @@ function acquireMutex(dir, ctx) {
   const state = { tmp: null, mine: null };
   try {
     for (;;) {
-      // rename은 dir가 없을 때, 또는 방금 회수해 비웠을 때만 시도한다. 존재하는 dir는 먼저
-      // 판정한다 — 젊은 빈 디렉터리(legacy mkdir→pid 창)는 회수 대상이 아니므로 덮지 않는다.
-      let mine = inodeKey(dir) ? null : installMutex(dir, String(process.pid), ctx.hooks, state);
-      if (mine) return mine;
-      if (reclaimMutex(dir, ctx.hooks)) {
-        mine = installMutex(dir, String(process.pid), ctx.hooks, state);
+      // #265: on Windows before libuv 1.49 a lock name its owner deleted while another waiter
+      // read it stays pending until that read ends, and stat-ing or opening it answers EPERM.
+      // That is a lock being released, not a verdict: judge it again on the next round. An
+      // EPERM that lasts to the deadline is thrown, as it always was.
+      let pending = null;
+      try {
+        // rename은 dir가 없을 때, 또는 방금 회수해 비웠을 때만 시도한다. 존재하는 dir는 먼저
+        // 판정한다 — 젊은 빈 디렉터리(legacy mkdir→pid 창)는 회수 대상이 아니므로 덮지 않는다.
+        let mine = inodeKey(dir) ? null : installMutex(dir, String(process.pid), ctx.hooks, state);
         if (mine) return mine;
+        if (reclaimMutex(dir, ctx.hooks)) {
+          mine = installMutex(dir, String(process.pid), ctx.hooks, state);
+          if (mine) return mine;
+        }
+      } catch (error) {
+        if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+        pending = error;
       }
-      if (Date.now() >= ctx.deadline) throwLocked();
+      if (Date.now() >= ctx.deadline) {
+        if (pending) throw pending;
+        throwLocked();
+      }
       sleepSync(ctx.retryMs);
     }
   } finally {
@@ -635,13 +648,11 @@ function releaseMutex(dir, mine) {
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
-  try {
-    fs.rmdirSync(dir);
-  } catch (error) {
-    // ENOTEMPTY: foreign content appeared in our lock dir; leave it to go stale
-    // rather than recursively deleting what we did not write.
-    if (error.code !== 'ENOENT' && error.code !== 'ENOTEMPTY') throw error;
-  }
+  // Every waiter reads our pid file each round, so on Windows one often still has it open
+  // here (#265): the directory then waits for that read instead of staying behind, empty,
+  // as a lock no waiter may take for 6 s. ENOTEMPTY from anything else — foreign content in
+  // our lock dir — leaves it to go stale rather than recursively deleting what we did not write.
+  removeDeletedLockDir(dir, mine);
 }
 
 export function withMutation(gameDir, fn, options) {
