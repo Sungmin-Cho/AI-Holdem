@@ -152,7 +152,8 @@ export function semanticFailures(tx, before, after) {
   for (const [id, review] of Object.entries(bank.reviewState)) {
     if (Object.hasOwn(review, 'srsVersion') || Object.hasOwn(review, 'graduatedAt')) fail(`review ${id} gained SR v2 fields`);
   }
-  const banked = bank.items.filter((item) => item.evidenceIds.includes(tx.evaluationId)).length;
+  // Counted per evidence id, so the same answer banked twice on one item shows too.
+  const banked = bank.items.flatMap((item) => item.evidenceIds).filter((id) => id === tx.evaluationId).length;
   if (banked !== (tx.grade === 'off-policy' ? 1 : 0)) fail(`${banked} bank evidence rows for a ${tx.grade} answer`);
   return failures;
 }
@@ -212,6 +213,7 @@ export async function verifyRecovery({ codeRoot, fixture = loadFixture(), makeSt
     const rewritten = touched(row.after.ids, identities(row.store));
     if (rewritten.length) mismatches.push(`${label}: rewrote ${JSON.stringify(rewritten)}`);
     if (!isDeepStrictEqual(hashesOf(readState(row.store)), hashesOf(row.after.state))) mismatches.push(`${label}: bytes changed`);
+    if (!isDeepStrictEqual(listEntries(row.store), row.checkpoint.expected.entries)) mismatches.push(`${label}: leftover entries ${JSON.stringify(listEntries(row.store))}`);
   }
   return { mismatches, checkpoints: rows.length };
 }

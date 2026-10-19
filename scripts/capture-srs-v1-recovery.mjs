@@ -11,8 +11,10 @@
 // The old code is not modified. Its public API (startDrill, answerQuestion)
 // runs in a fresh process with the clock and randomUUID fixed before it loads;
 // every fs mutation is followed by a read of `.training`, and each distinct
-// durable state during an answer is one checkpoint. Writes are atomic renames
-// or fsynced appends, so a crash leaves exactly one of these states.
+// state of its files during an answer is one checkpoint. Writes are atomic
+// renames or fsynced appends, so an interruption between two writes leaves one
+// of these states. Out of scope: torn appends, power loss before a directory
+// is synced, and the dead writer's lock and temp entries (#148, #265).
 import { execFileSync, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -313,47 +315,68 @@ function pendingOf(tx) {
 
 // --- negative controls ---------------------------------------------------------
 
-// Each mutation is a plausible regression of the recovery path; the comparison
-// must reject every one. Replacements must each match exactly once.
+// Each mutation is a plausible regression of the recovery path. A control
+// counts as detected only when the comparison reports the failure it was built
+// to cause (`expect`), not merely some difference. The bank, profile and SRS
+// writers each refuse to apply the same evidence twice, so the duplication
+// controls disable both the recovery's proof and the writer's own check.
+// Replacements must each match exactly once.
+const APPLY_PROFILE = 'if (!proof.profileDone) await createProfileStore(storeDir).apply(pending.profileEvent);';
+const COLLECT_BANK = 'if (!proof.bankDone) await createMistakeBank(storeDir).collect(pending.bankEvent);';
+const UPDATE_REVIEW = 'await bank.updateReviewState(captured.mistakeId, captured.patch);';
 const MUTATIONS = [
   {
     id: 'v1-patch-rederived-as-v2',
     description: 'recovery re-derives a v1 pending patch with the SR v2 formula',
     edits: [['tools/drill-cli.js', 'captured.patch.srsVersion === SRS_VERSION ? SRS_VERSION : 1', 'SRS_VERSION']],
+    expect: /recovery failed PENDING_UNRESOLVED: SRS target is not the captured absolute transition/,
   },
   {
     id: 'srs-target-marked-v2',
     description: 'applying the captured v1 target also stamps srsVersion 2 on the review',
-    edits: [['tools/drill-cli.js', 'await bank.updateReviewState(captured.mistakeId, captured.patch);',
-      'await bank.updateReviewState(captured.mistakeId, { ...captured.patch, srsVersion: 2 });']],
+    edits: [['tools/drill-cli.js', UPDATE_REVIEW, 'await bank.updateReviewState(captured.mistakeId, { ...captured.patch, srsVersion: 2 });']],
+    expect: /gained SR v2 fields/,
   },
   {
     id: 'srs-attempt-counted-twice',
     description: 'the SRS write adds another attempt on top of the captured target',
-    edits: [['tools/drill-cli.js', 'await bank.updateReviewState(captured.mistakeId, captured.patch);',
-      'await bank.updateReviewState(captured.mistakeId, { ...captured.patch, attempts: captured.patch.attempts + 1 });']],
+    edits: [['tools/drill-cli.js', UPDATE_REVIEW, 'await bank.updateReviewState(captured.mistakeId, { ...captured.patch, attempts: captured.patch.attempts + 1 });']],
+    expect: /the SR v1 target is not the captured one/,
   },
   {
     id: 'profile-event-duplicated',
-    description: 'recovery ignores the journal proof and the store appends without its duplicate check',
+    description: 'recovery re-applies an event the journal holds and the profile store skips its duplicate checks',
     edits: [
-      ['tools/drill-cli.js', 'if (!proof.profileDone) await createProfileStore(storeDir).apply(pending.profileEvent);',
-        'await createProfileStore(storeDir).apply(pending.profileEvent);'],
+      ['tools/drill-cli.js', APPLY_PROFILE, 'await createProfileStore(storeDir).apply(pending.profileEvent);'],
+      ['training/profile-store.js', 'if (duplicate) return { applied: false, profile };', 'if (false && duplicate) return { applied: false, profile };'],
       ['training/profile-store.js', 'if (!readJsonl(eventsPath).some((row) => row.evaluationId === event.evaluationId',
         'if (true || !readJsonl(eventsPath).some((row) => row.evaluationId === event.evaluationId'],
     ],
+    expect: /: 2 learning events for the transaction/,
+  },
+  {
+    id: 'bank-evidence-duplicated',
+    // The bank's graph validation is a third guard: it refuses the duplicate, so recovery fails.
+    description: 'recovery re-collects bank evidence it already wrote and the bank skips its evidence-id check',
+    edits: [
+      ['tools/drill-cli.js', COLLECT_BANK, 'await createMistakeBank(storeDir).collect(pending.bankEvent);'],
+      ['training/mistake-bank.js', 'const existingId = data.items.find((item) => item.evidenceIds.includes(evaluation.evaluationId));',
+        'const existingId = null;'],
+    ],
+    expect: /recovery failed PENDING_UNRESOLVED: bank evidence identity is duplicated/,
   },
   {
     id: 'profile-consumer-reapplied',
-    description: 'recovery re-applies a profile event the journal already holds',
-    edits: [['tools/drill-cli.js', 'if (!proof.profileDone) await createProfileStore(storeDir).apply(pending.profileEvent);',
-      'await createProfileStore(storeDir).apply(pending.profileEvent);']],
+    description: 'recovery re-applies a profile event the journal already holds (the store refreshes the projection)',
+    edits: [['tools/drill-cli.js', APPLY_PROFILE, 'await createProfileStore(storeDir).apply(pending.profileEvent);']],
+    expect: /profile\.json [0-9a-f]{64} != [0-9a-f]{64}/,
   },
   {
     id: 'session-rewritten-without-pending',
     description: 'loading a session with nothing pending persists it again',
     edits: [['tools/drill-cli.js', 'if (session.pending) await replayPending(storeDir, session, proof.events);',
       'if (session.pending) await replayPending(storeDir, session, proof.events); else persistSession(storeDir, session);']],
+    expect: /rewrote \["drill-session\.json"\]/,
   },
 ];
 // The module graph reaches beyond tools/ (engine, shared, training, server, export and
@@ -386,12 +409,15 @@ async function negativeControls(fixture) {
     const results = [];
     for (const mutation of MUTATIONS) {
       const report = await verifyRecovery({ codeRoot: codeCopy(scratch, mutation.edits), fixture, makeStore });
+      const matched = report.mismatches.filter((line) => mutation.expect.test(line));
       results.push({
         id: mutation.id, description: mutation.description,
         files: [...new Set(mutation.edits.map(([rel]) => rel))],
-        detected: report.mismatches.length > 0,
+        expect: String(mutation.expect),
+        detected: matched.length > 0,
+        matched: matched.length,
         mismatches: report.mismatches.length,
-        first: report.mismatches.slice(0, 3),
+        first: matched.slice(0, 2),
       });
     }
     const dirty = git(REPO_ROOT, 'status', '--porcelain', '--', ...CODE_PATHS) !== '';

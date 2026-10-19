@@ -11,9 +11,9 @@
     "node": "v26.0.0",
     "platform": "darwin-arm64",
     "inputs": {
-      "scripts/capture-srs-v1-recovery.mjs": "827356b9f47418f24fbb58e660a1e9d2f193270f8b2cbff025ed1aa63d4771bb",
-      "test/helpers/srs-v1-recovery.mjs": "9674bd86c7e923677c86154903c2db248f0b9a123bdc9ceb77c65b4488f4fbd8",
-      "test/helpers/srs-v1-recovery-runner.mjs": "87b779a9329cf46d943951dc5ffab939cd783ea67d9a89eb24bdfa2a706aef15"
+      "scripts/capture-srs-v1-recovery.mjs": "e1232d399df63b47f20cfc12e47c7ba242c1130f033800094d768932f0c6faaf",
+      "test/helpers/srs-v1-recovery.mjs": "32bfc1675a6e0a57fc1718c00523b1c3dedfa7040c9e2f6f9b24233fbda0289e",
+      "test/helpers/srs-v1-recovery-runner.mjs": "2d1b82096cce49998d52ab0ce798d8cb8f08365b6fa7f83533f5eac8c7c0bf35"
     },
     "reproduced": "two producer processes in separate temp stores produced identical states; no captured byte contains a store path"
   },
@@ -993,7 +993,7 @@
     }
   ],
   "negativeControls": {
-    "codeTree": "220dc18ed9a5f70e2a7315f224c0043065360abc",
+    "codeTree": "0773e7209fac2f92c09de6dc4566ced7d7627eb6",
     "unmodified": {
       "checkpoints": 25,
       "mismatches": 0
@@ -1005,12 +1005,13 @@
         "files": [
           "tools/drill-cli.js"
         ],
+        "expect": "/recovery failed PENDING_UNRESOLVED: SRS target is not the captured absolute transition/",
         "detected": true,
+        "matched": 22,
         "mismatches": 22,
         "first": [
           "a-v2-off-policy/00-pending-saved: recovery failed PENDING_UNRESOLVED: SRS target is not the captured absolute transition",
-          "a-v2-off-policy/01-profile-event-appended: recovery failed PENDING_UNRESOLVED: SRS target is not the captured absolute transition",
-          "a-v2-off-policy/02-profile-projection-written: recovery failed PENDING_UNRESOLVED: SRS target is not the captured absolute transition"
+          "a-v2-off-policy/01-profile-event-appended: recovery failed PENDING_UNRESOLVED: SRS target is not the captured absolute transition"
         ]
       },
       {
@@ -1019,12 +1020,13 @@
         "files": [
           "tools/drill-cli.js"
         ],
+        "expect": "/gained SR v2 fields/",
         "detected": true,
+        "matched": 16,
         "mismatches": 48,
         "first": [
-          "a-v2-off-policy/00-pending-saved: mistakes.json 409b40145a9053727d38ebdfab7f35e258ed6a20d7d399b31983b28d68fa9976 != b37db24f64c767b5943f3c4fac8006fa1adf3bc0be9af89675d134e3d19ee9e2",
-          "a-v2-off-policy/00-pending-saved: a-v2-off-policy: the SR v1 target is not the captured one",
-          "a-v2-off-policy/00-pending-saved: a-v2-off-policy: review 4bd14df11215e3d29faa438aacca58c9c8d1055ad045904ee43720d91b9ae7d8:d-1-preflop-0:local-preflop-baseline@2.0.0 gained SR v2 fields"
+          "a-v2-off-policy/00-pending-saved: a-v2-off-policy: review 4bd14df11215e3d29faa438aacca58c9c8d1055ad045904ee43720d91b9ae7d8:d-1-preflop-0:local-preflop-baseline@2.0.0 gained SR v2 fields",
+          "a-v2-off-policy/01-profile-event-appended: a-v2-off-policy: review 4bd14df11215e3d29faa438aacca58c9c8d1055ad045904ee43720d91b9ae7d8:d-1-preflop-0:local-preflop-baseline@2.0.0 gained SR v2 fields"
         ]
       },
       {
@@ -1033,40 +1035,58 @@
         "files": [
           "tools/drill-cli.js"
         ],
+        "expect": "/the SR v1 target is not the captured one/",
         "detected": true,
+        "matched": 16,
         "mismatches": 32,
         "first": [
-          "a-v2-off-policy/00-pending-saved: mistakes.json dd0148f9bf92f8f5a0df9fa93716776c35654b2123c23954d543a35dfd9acf95 != b37db24f64c767b5943f3c4fac8006fa1adf3bc0be9af89675d134e3d19ee9e2",
           "a-v2-off-policy/00-pending-saved: a-v2-off-policy: the SR v1 target is not the captured one",
-          "a-v2-off-policy/01-profile-event-appended: mistakes.json dd0148f9bf92f8f5a0df9fa93716776c35654b2123c23954d543a35dfd9acf95 != b37db24f64c767b5943f3c4fac8006fa1adf3bc0be9af89675d134e3d19ee9e2"
+          "a-v2-off-policy/01-profile-event-appended: a-v2-off-policy: the SR v1 target is not the captured one"
         ]
       },
       {
         "id": "profile-event-duplicated",
-        "description": "recovery ignores the journal proof and the store appends without its duplicate check",
+        "description": "recovery re-applies an event the journal holds and the profile store skips its duplicate checks",
         "files": [
           "tools/drill-cli.js",
           "training/profile-store.js"
         ],
+        "expect": "/: 2 learning events for the transaction/",
         "detected": true,
-        "mismatches": 6,
+        "matched": 6,
+        "mismatches": 21,
         "first": [
-          "a-v2-off-policy/01-profile-event-appended: profile.json 19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e != c9c451ee407421690a5358b23a9139006887fb65a354a84e184e86c9cb92f523",
-          "a-v2-off-policy/01-profile-event-appended: rewrote [\"drill-session.json\",\"mistakes.json\",\"profile.json\"], producer rewrote [\"drill-session.json\",\"mistakes.json\"]",
-          "b-v2-preferred/01-profile-event-appended: profile.json e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417 != 19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+          "a-v2-off-policy/01-profile-event-appended: a-v2-off-policy: 2 learning events for the transaction",
+          "a-v2-off-policy/02-profile-projection-written: a-v2-off-policy: 2 learning events for the transaction"
+        ]
+      },
+      {
+        "id": "bank-evidence-duplicated",
+        "description": "recovery re-collects bank evidence it already wrote and the bank skips its evidence-id check",
+        "files": [
+          "tools/drill-cli.js",
+          "training/mistake-bank.js"
+        ],
+        "expect": "/recovery failed PENDING_UNRESOLVED: bank evidence identity is duplicated/",
+        "detected": true,
+        "matched": 1,
+        "mismatches": 1,
+        "first": [
+          "a-v2-off-policy/04-bank-written: recovery failed PENDING_UNRESOLVED: bank evidence identity is duplicated"
         ]
       },
       {
         "id": "profile-consumer-reapplied",
-        "description": "recovery re-applies a profile event the journal already holds",
+        "description": "recovery re-applies a profile event the journal already holds (the store refreshes the projection)",
         "files": [
           "tools/drill-cli.js"
         ],
+        "expect": "/profile\\.json [0-9a-f]{64} != [0-9a-f]{64}/",
         "detected": true,
+        "matched": 3,
         "mismatches": 6,
         "first": [
           "a-v2-off-policy/01-profile-event-appended: profile.json 19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e != c9c451ee407421690a5358b23a9139006887fb65a354a84e184e86c9cb92f523",
-          "a-v2-off-policy/01-profile-event-appended: rewrote [\"drill-session.json\",\"mistakes.json\",\"profile.json\"], producer rewrote [\"drill-session.json\",\"mistakes.json\"]",
           "b-v2-preferred/01-profile-event-appended: profile.json e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417 != 19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
         ]
       },
@@ -1076,12 +1096,13 @@
         "files": [
           "tools/drill-cli.js"
         ],
+        "expect": "/rewrote \\[\"drill-session\\.json\"\\]/",
         "detected": true,
+        "matched": 28,
         "mismatches": 28,
         "first": [
           "a-v2-off-policy/08-committed: rewrote [\"drill-session.json\"], producer rewrote []",
-          "b-v2-preferred/07-committed: rewrote [\"drill-session.json\"], producer rewrote []",
-          "c-v1-mixed/07-committed: rewrote [\"drill-session.json\"], producer rewrote []"
+          "b-v2-preferred/07-committed: rewrote [\"drill-session.json\"], producer rewrote []"
         ]
       }
     ]

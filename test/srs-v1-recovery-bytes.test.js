@@ -52,9 +52,13 @@ test('the SR v1 recovery fixture is the pinned producer\'s capture, intact', () 
   assert.ok(manifest.transactions.some((tx) => tx.source.version === '2.0.0'));
 
   // The capture showed this comparison rejects each deliberate regression.
+  // Detected means the comparison reported the failure the mutation was built to cause.
   assert.equal(manifest.negativeControls.unmodified.mismatches, 0);
-  assert.deepEqual(manifest.negativeControls.mutations.filter((row) => !row.detected), []);
-  assert.ok(manifest.negativeControls.mutations.length >= 6);
+  assert.deepEqual(manifest.negativeControls.mutations.map((row) => row.id), [
+    'v1-patch-rederived-as-v2', 'srs-target-marked-v2', 'srs-attempt-counted-twice', 'profile-event-duplicated',
+    'bank-evidence-duplicated', 'profile-consumer-reapplied', 'session-rewritten-without-pending',
+  ]);
+  for (const row of manifest.negativeControls.mutations) assert.ok(row.detected && row.matched > 0, row.id);
 });
 
 test('current recovery of every SR v1 checkpoint matches the producer\'s own recovery, and only once', { timeout: TIMEOUT }, async () => {

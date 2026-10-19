@@ -10,6 +10,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+// `node --test` runs every module under test/ without arguments: nothing to do.
+if (process.argv.length === 2) process.exit(0);
 const [root, now, ...stores] = process.argv.slice(2);
 const RealDate = globalThis.Date;
 const frozen = RealDate.parse(now ?? '');
