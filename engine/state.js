@@ -285,10 +285,10 @@ function listReclaimAsides(dir) {
 
 // 회수자가 죽어 남긴 aside만 지운다(고유 이름 — 경로 재바인딩 불가). 살아 있는 회수자의
 // aside는 진행 중인 회수의 흔적이므로 건드리지 않는다.
-function sweepOrphanAsides(dir) {
+function sweepOrphanAsides(dir, asides = listReclaimAsides(dir)) {
   let removed = 0;
   let remaining = 0;
-  for (const aside of listReclaimAsides(dir)) {
+  for (const aside of asides) {
     if (isProcessAlive(aside.reclaimerPid)) { remaining += 1; continue; }
     try {
       fs.unlinkSync(path.join(dir, aside.name));
@@ -311,13 +311,14 @@ function rmdirReclaimed(dir, expected) {
 
 // pid 파일 없이 aside만 남은 디렉터리는 보유 중이 아니다: 보유자는 항상 dir/pid를 가지며
 // 새 락은 aside를 가질 수 없다(link의 원본이 dir/pid이므로). 고아 aside를 치우고 비면
-// 즉시 rmdir한다. 해당 없음(aside 없음)이면 null. 대기자의 첫 목록 읽기는 판정이다(#265,
-// readLockForWaiter): 지워지는 중인 디렉터리면 false로 다음 라운드에 다시 본다.
+// 즉시 rmdir한다. 해당 없음(aside 없음)이면 null. 대기자의 목록 읽기는 판정이다(#265,
+// readLockForWaiter): 지워지는 중인 디렉터리면 false로 다음 라운드에 다시 본다. 정리는 그 목록으로만
+// 한다 — 다시 읽지 않는다. 그 뒤에 생긴 aside(산 회수자)는 비재귀 rmdir이 ENOTEMPTY로 지킨다.
 function reclaimAsideLeftovers(dir, expected, onPending) {
   const asides = readLockForWaiter(() => listReclaimAsides(dir), onPending, null);
   if (asides === null) return false;
   if (asides.length === 0) return null;
-  if (sweepOrphanAsides(dir).remaining > 0) return false;
+  if (sweepOrphanAsides(dir, asides).remaining > 0) return false;
   return rmdirReclaimed(dir, expected);
 }
 

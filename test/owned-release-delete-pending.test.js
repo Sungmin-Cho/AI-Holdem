@@ -67,7 +67,7 @@ function holdOpen(file, { lingerMs = LINGER_MS, maxMs = 120_000, kind = 'file', 
     child.stdout.on('data', () => { if (out.includes('held\n')) resolve(); });
     closed.then(({ code }) => reject(new Error(`holder exited ${code} before holding: ${err}`)));
   });
-  return { held, closed };
+  return { held, closed, child };
 }
 
 const failureCode = (fn) => { try { fn(); return null; } catch (error) { return error.code; } };
@@ -212,6 +212,12 @@ test('#265: removeDeletedLockDir never retries its rmdir on a path that came to 
   r = decide({ rmdir: () => 'EBUSY', identity: replacedAfterWait() });
   assert.equal(r.error?.code, 'EBUSY'); assert.equal(r.slept, 1);
   assert.equal(r.calls.filter((call) => call === 'rmdir').length, 1, JSON.stringify(r.calls));
+  // Unreadable after the wait (EPERM): not known to be the same directory, so treated as replaced.
+  const unreadableAfterWait = () => { let reads = 0; return () => { reads += 1; if (reads === 1) return { dev: 1n, ino: 2n }; throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); }; };
+  r = decide({ rmdir: () => 'ENOTEMPTY', identity: unreadableAfterWait() });
+  assert.equal(r.result, false); assert.equal(r.calls.filter((call) => call === 'rmdir').length, 1);
+  r = decide({ rmdir: () => 'EPERM', identity: unreadableAfterWait() });
+  assert.equal(r.error?.code, 'EPERM'); assert.equal(r.calls.filter((call) => call === 'rmdir').length, 1);
   // Gone while it waited — another reclaimer finished it: removed, as the retried rmdir's ENOENT says.
   const goneAfterWait = () => { let reads = 0; return () => { reads += 1; return reads === 1 ? { dev: 1n, ino: 2n } : null; }; };
   for (const code of ['ENOTEMPTY', 'EBUSY']) {
@@ -675,10 +681,9 @@ test('#265 short mutex: a waiter whose last round finds a lock it may not take f
   const root = createOwnedTempDir('holdem-mutex-pending-then-held');
   const dir = path.join(root, 'held.lock.d');
   let holder;
-  // The holder outlives the release's bound by half a second, then leaves the empty directory that
-  // no waiter may take before it is 6 s old.
+  // The holder keeps the deleted pid past the release's bound until this test ends it.
   await withNamedLock(root, 'held.lock.d', async () => {
-    holder = holdOpen(path.join(dir, 'pid'), { lingerMs: 300, pendingLingerMs: DELETE_PENDING_WAIT_MS + 500 });
+    holder = holdOpen(path.join(dir, 'pid'), { lingerMs: 300, pendingLingerMs: 60_000 });
     await holder.held;
   });
   try {
@@ -687,9 +692,21 @@ test('#265 short mutex: a waiter whose last round finds a lock it may not take f
       t.skip('this file system deletes names at once');
       return;
     }
-    await assert.rejects(withNamedLock(root, 'held.lock.d', () => {}, { timeoutMs: 3000, retryMs: 20 }), { code: 'LOCKED' });
+    // A waiter in another process polls the pending pid; then the holder ends, which leaves the
+    // empty directory no waiter may take before it is 6 s old, well past the waiter's 3 s.
+    const waiter = waitForMutex(root, 'held.lock.d', { retryMs: 20, timeoutMs: 3000 });
+    await waiter.waiting;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    holder.child.kill();
+    await holder.closed;
+    const waited = await waiter.closed;
+    t.diagnostic(`waiter ${waited.out.trim().replace(/\n/g, ' | ')}`);
+    assert.equal(waited.code, 0, waited.err);
+    assert.match(waited.out, /^failed LOCKED \d+$/m);
+    assert.deepEqual(fs.readdirSync(dir), []);
   } finally {
-    assert.equal((await holder.closed).code, 0);
+    holder.child.kill();
+    await holder.closed;
     try { fs.rmdirSync(dir); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
 });
@@ -705,7 +722,6 @@ test('#265 short mutex: a reclaim step that fails is thrown at once, never retri
   const root = createOwnedTempDir('holdem-mutex-reclaim-step');
   deadShortLock(root, 'held.lock.d');
   let entered = false, linked = 0;
-  const started = performance.now();
   // Past the judgement, with the stale pid pinned by this reclaimer's aside: a step that fails here
   // is a failed reclaim, not a name in the middle of its deletion.
   await assert.rejects(withNamedLock(root, 'held.lock.d', () => { entered = true; }, {
@@ -715,9 +731,9 @@ test('#265 short mutex: a reclaim step that fails is thrown at once, never retri
       beforeUnlinkPid: () => { throw Object.assign(new Error('EPERM: operation not permitted, unlink'), { code: 'EPERM', syscall: 'unlink' }); },
     },
   }), { code: 'EPERM', syscall: 'unlink' });
-  assert.ok(performance.now() - started < 1000, `thrown after ${Math.round(performance.now() - started)} ms`);
   assert.equal(entered, false);
-  assert.equal(linked, 1, 'the failure came once, after the aside was linked');
+  // Once, after the aside was linked: a retry would have judged and linked again.
+  assert.equal(linked, 1, 'the failure was retried, or came before the aside was linked');
   // Nothing was half-removed: the stale pid is where it was, and the aside is gone.
   assert.deepEqual(fs.readdirSync(path.join(root, 'held.lock.d')), ['pid']);
   // Without the failure the same stale lock is reclaimed.
