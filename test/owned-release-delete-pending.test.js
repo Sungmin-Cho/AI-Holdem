@@ -13,34 +13,43 @@ import { performance } from 'node:perf_hooks';
 import { randomUUID } from 'node:crypto';
 import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
 import { studyBudget } from './helpers/platform.js';
-import { descriptorPath, lockPath, launch, service } from './helpers/study-service-fixtures.mjs';
-import { acquireOwnedLock, releaseOwnedLock, readOwnedLock } from '../engine/state.js';
+import { descriptorPath, lockPath, launch, service, until } from './helpers/study-service-fixtures.mjs';
+import { acquireOwnedLock, releaseOwnedLock, readOwnedLock, removeDeletedLockDir, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
+import { platformTimeout } from '../shared/platform-files.js';
 
 const [UV_MAJOR, UV_MINOR] = process.versions.uv.split('.').map(Number);
 // libuv 1.49.0 added POSIX delete semantics on Windows (ChangeLog: "win,fs: use posix
 // delete semantics, if supported"). Before it, a deleted name outlives other handles.
 const DELETE_PENDING = process.platform === 'win32' && (UV_MAJOR < 1 || (UV_MAJOR === 1 && UV_MINOR < 49));
 const STOP_BUDGET = studyBudget({ coldStarts: 1, warmCalls: 3, extraMs: 30_000 });
+// How long a holder keeps a file open after it saw the name deleted. The owner's next step
+// follows its delete within milliseconds, so this covers it with room; it is also well inside
+// the owner's own bounded wait (DELETE_PENDING_WAIT_MS), which a fixed owner must outlast.
+const LINGER_MS = 1000;
 
 // A second process that opens `file` (libuv shares delete, like every reader here) and keeps it
 // open until it sees the name deleted — EPERM while delete-pending, ENOENT where the name went
-// at once — and for `lingerMs` after that, then closes it and exits.
+// at once, or another file already in its place — and for `lingerMs` after that, then closes it.
 const HOLDER = `
 const fs = require('node:fs');
 const file = process.argv[1], lingerMs = Number(process.argv[2]), maxMs = Number(process.argv[3]);
 const fd = fs.openSync(file, 'r');
+const mine = fs.fstatSync(fd, { bigint: true });
 process.stdout.write('held\\n');
 const started = Date.now();
 const poll = setInterval(() => {
   let seen = null;
-  try { fs.lstatSync(file); } catch (error) { seen = error.code; }
+  try {
+    const now = fs.lstatSync(file, { bigint: true });
+    if (now.dev !== mine.dev || now.ino !== mine.ino) seen = 'replaced';
+  } catch (error) { seen = error.code; }
   if (seen === null && Date.now() - started < maxMs) return;
   clearInterval(poll);
   process.stdout.write('seen ' + (seen ?? 'present') + '\\n');
   setTimeout(() => { fs.closeSync(fd); process.stdout.write('closed\\n'); process.exit(0); }, lingerMs);
 }, 5);`;
 
-function holdOpen(file, { lingerMs = 300, maxMs = 120_000 } = {}) {
+function holdOpen(file, { lingerMs = LINGER_MS, maxMs = 120_000 } = {}) {
   const child = registerOwnedProcess(spawn(process.execPath, ['-e', HOLDER, file, String(lingerMs), String(maxMs)],
     { stdio: ['ignore', 'pipe', 'pipe'] }), 'delete-pending holder');
   let out = '', err = '';
@@ -55,6 +64,8 @@ function holdOpen(file, { lingerMs = 300, maxMs = 120_000 } = {}) {
 }
 
 const failureCode = (fn) => { try { fn(); return null; } catch (error) { return error.code; } };
+// Absent means lstat answers ENOENT. existsSync is false for a delete-pending name too (EPERM).
+const absent = (file) => failureCode(() => fs.lstatSync(file)) === 'ENOENT';
 
 test('#265 A premise: a name deleted while another process holds it stays delete-pending only before libuv 1.49 on Windows', async (t) => {
   const root = createOwnedTempDir('holdem-delete-pending');
@@ -64,14 +75,16 @@ test('#265 A premise: a name deleted while another process holds it stays delete
   await holder.held;
   fs.unlinkSync(file);
   const lstatAfterUnlink = failureCode(() => fs.lstatSync(file));
+  const listedAfterUnlink = fs.readdirSync(dir).join(',');
   const rmdirAfterUnlink = failureCode(() => fs.rmdirSync(dir));
   const closed = await holder.closed;
-  t.diagnostic(`platform=${process.platform} uv=${process.versions.uv} lstat=${lstatAfterUnlink} rmdir=${rmdirAfterUnlink ?? 'ok'} holder=${closed.out.trim().replace(/\n/g, ' | ')}`);
+  t.diagnostic(`platform=${process.platform} node=${process.version} uv=${process.versions.uv} lstat=${lstatAfterUnlink} readdir=[${listedAfterUnlink}] rmdir=${rmdirAfterUnlink ?? 'ok'} holder=${closed.out.trim().replace(/\n/g, ' | ')}`);
   assert.equal(closed.code, 0);
   if (DELETE_PENDING) {
     assert.equal(lstatAfterUnlink, 'EPERM');
+    assert.equal(listedAfterUnlink, 'pid');
     assert.equal(rmdirAfterUnlink, 'ENOTEMPTY');
-    assert.equal(failureCode(() => fs.lstatSync(file)), 'ENOENT', 'the name goes when the last handle closes');
+    assert.equal(absent(file), true, 'the name goes when the last handle closes');
     fs.rmdirSync(dir);
   } else {
     assert.equal(lstatAfterUnlink, 'ENOENT');
@@ -79,16 +92,100 @@ test('#265 A premise: a name deleted while another process holds it stays delete
   }
 });
 
+// The decisions of removeDeletedLockDir, on any platform, against scripted file calls.
+// By default the directory itself is gone once removed and every name in it is pending (EPERM).
+const pendingNames = (file) => { const code = file === '/lock.d' ? 'ENOENT' : 'EPERM'; throw Object.assign(new Error(code), { code }); };
+function scriptedOps({ rmdir, readdir = () => ['pid'], lstat = pendingNames, identity = () => ({ dev: 1n, ino: 2n }) }) {
+  const calls = [];
+  const fail = (code) => { throw Object.assign(new Error(code), { code }); };
+  return {
+    calls,
+    ops: {
+      rmdir: (dir) => { calls.push('rmdir'); const code = rmdir(calls.filter((c) => c === 'rmdir').length); if (code) fail(code); },
+      readdir: (dir) => { calls.push('readdir'); return readdir(); },
+      lstat: (file) => { calls.push(`lstat ${path.basename(file)}`); return lstat(file); },
+      identity: (dir) => { calls.push('identity'); return identity(); },
+    },
+  };
+}
+function decide(script, options = {}) {
+  let clock = 0, slept = 0;
+  const scripted = scriptedOps(script);
+  let result, error;
+  try {
+    result = removeDeletedLockDir('/lock.d', { dev: 1n, ino: 2n }, {
+      platform: 'win32', ops: scripted.ops, now: () => clock, sleep: (ms) => { clock += ms; slept += 1; }, ...options,
+    });
+  } catch (caught) { error = caught; }
+  return { result, error, slept, calls: scripted.calls };
+}
+
+test('#265 A: removeDeletedLockDir waits only for its own delete-pending names, and only on Windows', () => {
+  // Emptied after the first ENOTEMPTY: the holder closed in between. Retry at once.
+  let r = decide({ rmdir: (n) => (n === 1 ? 'ENOTEMPTY' : null), readdir: () => [] });
+  assert.equal(r.result, true); assert.equal(r.slept, 1);
+  // Our pid still pending (EPERM), then gone.
+  r = decide({ rmdir: (n) => (n <= 3 ? 'ENOTEMPTY' : null) });
+  assert.equal(r.result, true); assert.equal(r.slept, 3);
+  // A pending pid that vanished between readdir and lstat is still ours.
+  r = decide({ rmdir: (n) => (n === 1 ? 'ENOTEMPTY' : null), lstat: () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); } });
+  assert.equal(r.result, true);
+  // Anything else in the directory, a readable pid, a replaced directory: never waited on.
+  for (const script of [
+    { rmdir: () => 'ENOTEMPTY', readdir: () => ['pid', 'foreign'] },
+    { rmdir: () => 'ENOTEMPTY', readdir: () => ['foreign'] },
+    { rmdir: () => 'ENOTEMPTY', lstat: () => ({}) },
+    { rmdir: () => 'ENOTEMPTY', identity: () => ({ dev: 1n, ino: 3n }) },
+    { rmdir: () => 'ENOTEMPTY', identity: () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); } },
+  ]) {
+    r = decide(script);
+    assert.equal(r.result, false); assert.equal(r.slept, 0, JSON.stringify(r.calls));
+  }
+  // Still pending at the bound: the directory is left, as before.
+  r = decide({ rmdir: () => 'ENOTEMPTY' });
+  assert.equal(r.result, false); assert.equal(r.slept, DELETE_PENDING_WAIT_MS / 20);
+  // The caller's budget caps the wait; none at all when it is spent.
+  r = decide({ rmdir: () => 'ENOTEMPTY' }, { waitMs: 100 });
+  assert.equal(r.result, false); assert.equal(r.slept, 5);
+  r = decide({ rmdir: () => 'ENOTEMPTY' }, { waitMs: -5 });
+  assert.equal(r.result, false); assert.equal(r.slept, 0);
+  // Other platforms delete names at once: an ENOTEMPTY there is foreign content.
+  r = decide({ rmdir: () => 'ENOTEMPTY' }, { platform: 'linux' });
+  assert.equal(r.result, false); assert.equal(r.slept, 0);
+  assert.deepEqual(r.calls, ['rmdir']);
+});
+
+test('#265 A: removeDeletedLockDir retries a held directory and waits out its own pending removal', () => {
+  // rmdir refused while another process holds the directory itself, then accepted.
+  let r = decide({ rmdir: (n) => (n <= 2 ? 'EBUSY' : null), lstat: () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); } });
+  assert.equal(r.result, true); assert.equal(r.slept, 2);
+  // Refused past the bound: thrown, as it always was.
+  r = decide({ rmdir: () => 'EPERM' });
+  assert.equal(r.error?.code, 'EPERM'); assert.equal(r.slept, DELETE_PENDING_WAIT_MS / 20);
+  // Elsewhere, at once.
+  r = decide({ rmdir: () => 'EPERM' }, { platform: 'darwin' });
+  assert.equal(r.error?.code, 'EPERM'); assert.equal(r.slept, 0);
+  r = decide({ rmdir: () => 'EACCES' });
+  assert.equal(r.error?.code, 'EACCES'); assert.equal(r.slept, 0);
+  // Removed, but the removal still pending behind a holder: the name answers EPERM until it goes.
+  let reads = 0;
+  r = decide({ rmdir: () => null, lstat: () => { reads += 1; throw Object.assign(new Error(reads <= 3 ? 'EPERM' : 'ENOENT'), { code: reads <= 3 ? 'EPERM' : 'ENOENT' }); } });
+  assert.equal(r.result, true); assert.equal(r.slept, 3);
+  // A new owner's lock already at that path is not ours to watch.
+  r = decide({ rmdir: () => null, lstat: () => ({}) });
+  assert.equal(r.result, true); assert.equal(r.slept, 0);
+});
+
 test('#265 A: releaseOwnedLock removes its directory although another process held the pid file across the release', async () => {
   const root = createOwnedTempDir('holdem-release-held');
   const handle = acquireOwnedLock(root, 'held.lock.d');
-  const holder = holdOpen(path.join(handle.dir, 'pid'), { lingerMs: 300 });
+  const holder = holdOpen(path.join(handle.dir, 'pid'));
   await holder.held;
   releaseOwnedLock(handle);
   assert.equal((await holder.closed).code, 0);
   // Judged after the holder closed: a directory still here now is the empty leftover that
   // every later reader takes as an unknown owner (LOOP_LOCK_UNKNOWN for the loop lock).
-  assert.equal(fs.existsSync(handle.dir), false, 'the released lock directory remains');
+  assert.equal(absent(handle.dir), true, 'the released lock directory remains');
   assert.equal(readOwnedLock(root, 'held.lock.d'), null);
   releaseOwnedLock(acquireOwnedLock(root, 'held.lock.d'));
 });
@@ -98,14 +195,16 @@ test('#265 A: a release waits a bounded time for a held pid file and then leaves
 }, async () => {
   const root = createOwnedTempDir('holdem-release-bound');
   const handle = acquireOwnedLock(root, 'held.lock.d');
-  const holder = holdOpen(path.join(handle.dir, 'pid'), { lingerMs: 6000 });
+  const holder = holdOpen(path.join(handle.dir, 'pid'), { lingerMs: DELETE_PENDING_WAIT_MS + 4000 });
   await holder.held;
   const started = performance.now();
   releaseOwnedLock(handle);
   const elapsed = performance.now() - started;
-  assert.ok(elapsed < 4000, `release waited ${Math.round(elapsed)} ms for a holder that outlives its bound`);
-  assert.equal(fs.existsSync(handle.dir), true);
+  assert.ok(elapsed < DELETE_PENDING_WAIT_MS + 1500, `release waited ${Math.round(elapsed)} ms for a holder that outlives its bound`);
+  assert.equal(absent(handle.dir), false);
+  // While the pid is pending the lock cannot even be read: never reclaimed, never taken.
   assert.equal(readOwnedLock(root, 'held.lock.d')?.status, 'unknown');
+  assert.throws(() => acquireOwnedLock(root, 'held.lock.d'), { code: 'EPERM' });
   assert.equal((await holder.closed).code, 0);
   // The empty leftover is an unknown owner, never reclaimed by age; only this test removes it.
   assert.deepEqual(fs.readdirSync(handle.dir), []);
@@ -118,20 +217,46 @@ test('#265 A: a release never waits on, or removes, an entry that is not its own
   const root = createOwnedTempDir('holdem-release-foreign');
   const handle = acquireOwnedLock(root, 'held.lock.d');
   fs.writeFileSync(path.join(handle.dir, 'foreign'), 'x');
-  const holder = holdOpen(path.join(handle.dir, 'pid'), { lingerMs: 1500 });
+  const holder = holdOpen(path.join(handle.dir, 'pid'));
   await holder.held;
   const started = performance.now();
   releaseOwnedLock(handle);
   const elapsed = performance.now() - started;
   assert.equal((await holder.closed).code, 0);
-  assert.ok(elapsed < 1000, `release waited ${Math.round(elapsed)} ms beside a foreign entry`);
+  assert.ok(elapsed < 500, `release waited ${Math.round(elapsed)} ms beside a foreign entry`);
   assert.deepEqual(fs.readdirSync(handle.dir), ['foreign']);
+});
+
+// A lock whose owner died: acquired by a child that exits without releasing it.
+async function deadOwnedLock(dir, name) {
+  const href = new URL('../engine/state.js', import.meta.url).href;
+  const child = spawn(process.execPath, ['--input-type=module', '-e',
+    `import { acquireOwnedLock } from ${JSON.stringify(href)}; acquireOwnedLock(process.argv[1], process.argv[2]);`,
+    dir, name], { stdio: ['ignore', 'ignore', 'pipe'] });
+  let err = '';
+  child.stderr.on('data', (chunk) => { err += chunk; });
+  const code = await new Promise((resolve) => child.on('close', resolve));
+  assert.equal(code, 0, err);
+  assert.equal(readOwnedLock(dir, name)?.status, 'dead');
+}
+
+test('#265 A: a dead lock is reclaimed although another process held its pid file across the reclaim', async () => {
+  const root = createOwnedTempDir('holdem-reclaim-held');
+  await deadOwnedLock(root, 'held.lock.d');
+  const holder = holdOpen(path.join(root, 'held.lock.d', 'pid'));
+  await holder.held;
+  const handle = acquireOwnedLock(root, 'held.lock.d');
+  assert.equal((await holder.closed).code, 0);
+  assert.equal(readOwnedLock(root, 'held.lock.d')?.status, 'alive');
+  assert.deepEqual(fs.readdirSync(handle.dir), ['pid']);
+  releaseOwnedLock(handle);
+  assert.equal(absent(handle.dir), true);
 });
 
 for (const [label, held] of [['descriptor', (storeDir) => descriptorPath(storeDir)], ['lock pid file', (storeDir) => path.join(lockPath(storeDir), 'pid')]]) {
   test(`#265 A: a study stop finishes and leaves no lock or descriptor when another process holds the ${label} across its removal`, { timeout: STOP_BUDGET }, async (t) => {
     const { storeDir, handle, api } = await launch(t);
-    const holder = holdOpen(held(storeDir), { lingerMs: 300 });
+    const holder = holdOpen(held(storeDir));
     await holder.held;
     const result = await api.stopStudyService(storeDir, { expectedInstanceId: handle.instanceId });
     const closed = await holder.closed;
@@ -139,36 +264,114 @@ for (const [label, held] of [['descriptor', (storeDir) => descriptorPath(storeDi
     assert.deepEqual(result, { stopped: true, alreadyStopped: false });
     // The stop result alone would also accept a dead lock left behind; the service's own
     // cleanup is what removes both.
-    assert.equal(fs.existsSync(descriptorPath(storeDir)), false, 'descriptor left behind');
-    assert.equal(fs.existsSync(lockPath(storeDir)), false, 'study lock left behind');
+    assert.equal(absent(descriptorPath(storeDir)), true, 'descriptor left behind');
+    assert.equal(absent(lockPath(storeDir)), true, 'study lock left behind');
   });
 }
 
-// A lock whose owner died: acquired by a child that exits without releasing it.
-async function deadStudyLock(storeDir) {
-  const href = new URL('../engine/state.js', import.meta.url).href;
-  const child = spawn(process.execPath, ['--input-type=module', '-e',
-    `import { acquireOwnedLock } from ${JSON.stringify(href)}; acquireOwnedLock(process.argv[1], 'study.lock.d');`,
-    path.join(storeDir, '.training')], { stdio: ['ignore', 'ignore', 'pipe'] });
-  let err = '';
-  child.stderr.on('data', (chunk) => { err += chunk; });
-  const code = await new Promise((resolve) => child.on('close', resolve));
-  assert.equal(code, 0, err);
-  assert.equal(readOwnedLock(path.join(storeDir, '.training'), 'study.lock.d')?.status, 'dead');
-}
+test('#265 A: only a Windows EPERM or EBUSY from a file call earns a cleanup step another attempt', async () => {
+  const { transientCleanupError } = await service();
+  const coded = (fsCode) => Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT'), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode });
+  for (const code of ['EPERM', 'EBUSY']) {
+    assert.equal(transientCleanupError(coded(code), 'win32'), true, code);
+    assert.equal(transientCleanupError(Object.assign(new Error(code), { code }), 'win32'), true, `raw ${code}`);
+    assert.equal(transientCleanupError(coded(code), 'linux'), false, `${code} is permanent on POSIX`);
+    assert.equal(transientCleanupError(coded(code), 'darwin'), false, `${code} is permanent on macOS`);
+  }
+  for (const error of [coded('EACCES'), coded('ENOTDIR'), coded(undefined), new Error('STUDY_IDENTITY_MISMATCH'),
+    Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT'), { code: 'STUDY_DESCRIPTOR_CORRUPT' }), null, undefined]) {
+    assert.equal(transientCleanupError(error, 'win32'), false, String(error?.fsCode ?? error?.message));
+  }
+});
+
+test('#265 A: a cleanup step retries only a transient failure, inside one deadline, and reports how it ended', async () => {
+  const { runCleanupStep } = await service();
+  const transient = () => Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT fs=EPERM'), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EPERM' });
+  const run = async (fn, { deadline = 1000, platform = 'win32' } = {}) => {
+    let clock = 0;
+    const lines = [];
+    const ok = await runCleanupStep('release', fn, { deadline, platform, now: () => clock,
+      wait: async (ms) => { clock += ms; }, report: (line) => lines.push(line) });
+    return { ok, lines, clock };
+  };
+  let tries = 0;
+  let r = await run(() => { tries += 1; if (tries < 3) throw transient(); });
+  assert.equal(r.ok, true); assert.equal(tries, 3); assert.deepEqual(r.lines, []);
+  // Every retry runs under the deadline: its proofs and stat calls see what is left of it.
+  const budgets = [];
+  tries = 0;
+  r = await run(() => {
+    tries += 1;
+    try { budgets.push(platformTimeout(15_000)); } catch (error) { budgets.push(error.code); }
+    if (tries < 2) throw transient();
+  }, { deadline: performance.now() + 5_000 });
+  assert.equal(budgets[0], 15_000, 'the first attempt keeps the bounds it always had');
+  assert.ok(budgets[1] <= 5_000, `a retry ran with ${budgets[1]} ms`);
+  // A failure that is not a held file ends the step at once, reported.
+  tries = 0;
+  r = await run(() => { tries += 1; throw Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT own lock absent'), { code: 'STUDY_DESCRIPTOR_CORRUPT' }); });
+  assert.equal(r.ok, false); assert.equal(tries, 1);
+  assert.deepEqual(r.lines, ['STUDY_CHILD_CLEANUP_FAILED step=release code=STUDY_DESCRIPTOR_CORRUPT fs=none tries=1\n']);
+  // A held file that outlasts the deadline: retried until it is spent, then reported.
+  tries = 0;
+  r = await run(() => { tries += 1; throw transient(); }, { deadline: 200 });
+  assert.equal(r.ok, false); assert.equal(tries, 5); assert.equal(r.clock, 200);
+  assert.deepEqual(r.lines, ['STUDY_CHILD_CLEANUP_FAILED step=release code=STUDY_DESCRIPTOR_CORRUPT fs=EPERM tries=5\n']);
+  // POSIX: EPERM is a refusal, never retried.
+  tries = 0;
+  r = await run(() => { tries += 1; throw transient(); }, { platform: 'linux' });
+  assert.equal(r.ok, false); assert.equal(tries, 1);
+});
+
+test('#265 A: a transaction keeps its body\'s errno when its after-proof fails too, and a proof keeps the errno of a path it could not stat', async () => {
+  const { aclTransaction } = await service();
+  const root = createOwnedTempDir('holdem-acl-errno');
+  const ctx = { root, training: path.join(root, '.training') };
+  const held = Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT fs=EPERM'), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EPERM' });
+  let proofs = 0;
+  const beforeOnly = (entries, { onUnproven }) => { proofs += 1; if (proofs === 1) return true; onUnproven('acl:after'); return false; };
+  assert.throws(() => aclTransaction(ctx, () => { throw held; }, { platform: 'win32', prove: beforeOnly }), (error) => error === held);
+  assert.equal(proofs > 1, true, 'the after-proof still ran');
+  proofs = 0;
+  // A body that succeeded still fails on its after-proof, as before.
+  assert.throws(() => aclTransaction(ctx, () => 'done', { platform: 'win32', prove: beforeOnly }),
+    (error) => error.code === 'STUDY_DESCRIPTOR_CORRUPT' && error.fsCode === undefined);
+  const unstatable = (entries, { onUnproven }) => { onUnproven('error:EPERM'); return false; };
+  assert.throws(() => aclTransaction(ctx, () => 'never', { platform: 'win32', prove: unstatable }),
+    (error) => error.code === 'STUDY_DESCRIPTOR_CORRUPT' && error.fsCode === 'EPERM');
+  const refused = (entries, { onUnproven }) => { onUnproven('acl:refused'); return false; };
+  assert.throws(() => aclTransaction(ctx, () => 'never', { platform: 'win32', prove: refused }),
+    (error) => error.code === 'STUDY_DESCRIPTOR_CORRUPT' && error.fsCode === undefined);
+});
 
 test('#265 A: a dead owner that left only its lock is stopped for inspect and stop, and a later ensure replaces it', { timeout: STOP_BUDGET }, async (t) => {
   const first = await launch(t);
   const api = await service();
   await api.stopStudyService(first.storeDir, { expectedInstanceId: first.handle.instanceId });
-  assert.equal(fs.existsSync(lockPath(first.storeDir)), false);
-  await deadStudyLock(first.storeDir);
-  assert.equal(fs.existsSync(descriptorPath(first.storeDir)), false);
+  assert.equal(absent(lockPath(first.storeDir)), true);
+  await deadOwnedLock(path.join(first.storeDir, '.training'), 'study.lock.d');
+  assert.equal(absent(descriptorPath(first.storeDir)), true);
   assert.deepEqual(await api.inspectStudyService(first.storeDir), { status: 'stopped' });
   assert.deepEqual(await api.stopStudyService(first.storeDir, { expectedInstanceId: randomUUID() }), { stopped: true, alreadyStopped: true });
   const second = await launch(t, {}, first.storeDir);
   assert.notEqual(second.handle.instanceId, first.handle.instanceId);
   assert.equal((await api.inspectStudyService(first.storeDir)).instanceId, second.handle.instanceId);
+});
+
+test('#265 A: a live owner that has not published yet is never reported stopped', { timeout: STOP_BUDGET }, async (t) => {
+  const storeDir = createOwnedTempDir('holdem-study-unpublished');
+  const api = await service();
+  const pending = api.ensureStudyService(storeDir, { testOptions: { publishDelayMs: 4000 },
+    onChild(child) { child.ref(); registerOwnedProcess(child, 'study service'); } });
+  t.after(async () => {
+    const handle = await pending;
+    await api.stopStudyService(storeDir, { expectedInstanceId: handle.instanceId });
+  });
+  await until(() => readOwnedLock(path.join(storeDir, '.training'), 'study.lock.d')?.status === 'alive');
+  assert.equal(absent(descriptorPath(storeDir)), true, 'the publish delay already ran out');
+  const seen = await api.inspectStudyService(storeDir);
+  assert.equal(seen.status, 'running');
+  assert.equal(seen.instanceId, (await pending).instanceId);
 });
 
 test('#265 A: a lock directory without a readable owner still fails closed for inspect and stop', { timeout: STOP_BUDGET }, async (t) => {
@@ -178,4 +381,5 @@ test('#265 A: a lock directory without a readable owner still fails closed for i
   t.after(() => fs.rmSync(lockPath(storeDir), { recursive: true, force: true }));
   await assert.rejects(api.inspectStudyService(storeDir), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
   await assert.rejects(api.stopStudyService(storeDir, { expectedInstanceId: handle.instanceId }), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
+  assert.deepEqual(fs.readdirSync(lockPath(storeDir)), [], 'an unknown owner is preserved');
 });

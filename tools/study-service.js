@@ -38,6 +38,12 @@ export const COLD_START_MS = process.platform === 'win32' ? 120_000 : 60_000;
 // longer than half a second to answer one local request, and a ceiling that a
 // healthy-but-slow service cannot meet is a ceiling that never accepts it.
 export const HTTP_WAIT_MS = process.platform === 'win32' ? 30_000 : 3_000;
+// #265 A: the deadline a stopping service gives the retries of its two cleanup steps, shared by
+// both. A normal cleanup is eight ACL children, about 1.6 s; a file another process holds clears
+// when that process closes it, well under a second for every holder seen. The client waits
+// WAIT_MS for the whole stop. POSIX never meets the condition, so one attempt there.
+const STOP_CLEANUP_MS = process.platform === 'win32' ? 10_000 : 0;
+const STOP_CLEANUP_RETRY_MS = 50;
 const HEX = /^[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
@@ -48,10 +54,47 @@ const sameInode = (a, b) => a && b && a.dev === b.dev && a.ino === b.ino;
 const trainingIdentity = (ctx) => createHash('sha256').update(JSON.stringify([
   ctx.training, ctx.trainingStat?.dev, ctx.trainingStat?.ino,
 ])).digest('hex');
-function fail(code = 'STUDY_DESCRIPTOR_CORRUPT', detail) {
+function fail(code = 'STUDY_DESCRIPTOR_CORRUPT', detail, fsCode) {
   // The code is the contract; the detail only ever reaches logs and stderr.
   // formatStudyError renders from the code alone, so no path reaches a viewer.
-  const error = new Error(detail ? `${code} ${detail}` : code); error.code = code; throw error;
+  const error = new Error(detail ? `${code} ${detail}` : code); error.code = code;
+  if (fsCode) error.fsCode = fsCode;
+  throw error;
+}
+// A file call that answered anything but ENOENT fails the same way, and keeps its errno. A
+// Windows file deleted while another process holds it answers EPERM until that holder closes it
+// (#265 A); only a caller that can tell this from a refusal can wait it out.
+function failFs(cause) {
+  const fsCode = typeof cause?.code === 'string' ? cause.code : undefined;
+  fail('STUDY_DESCRIPTOR_CORRUPT', fsCode ? `fs=${fsCode}` : undefined, fsCode);
+}
+// #265 A: before libuv 1.49 (Node 20) a Windows unlink is delete-on-close, so the name of a file
+// another process holds open stays behind it: EPERM (EBUSY for a sharing violation) until that
+// handle closes. Only these, and only there, are worth another attempt of a cleanup step.
+export function transientCleanupError(error, platform = process.platform) {
+  return platform === 'win32' && ['EPERM', 'EBUSY'].includes(error?.fsCode ?? error?.code);
+}
+const writeStderr = (line) => { try { process.stderr.write(line); } catch { /* closed stdio */ } };
+// #265 A: a stop's cleanup step runs again, whole and with every check it makes, while it fails
+// only on a file another process holds. The first attempt keeps the bounds it always had; every
+// retry runs inside `deadline`, so its proofs and stat calls fail once that is spent instead of
+// starting another child. Any other failure, or the deadline, ends the step — reported on stderr
+// (discarded in production, kept by CI and piped callers) and never thrown, as before.
+export async function runCleanupStep(step, fn, { deadline, platform = process.platform, now = platformNow,
+  wait = sleep, report = writeStderr } = {}) {
+  for (let tries = 1; ; tries += 1) {
+    let failure;
+    setProofPhase('stop');
+    try {
+      if (tries === 1) fn(); else withPlatformDeadline(deadline, fn);
+      return true;
+    } catch (error) { failure = error; } finally { setProofPhase(null); }
+    if (!transientCleanupError(failure, platform) || now() >= deadline) {
+      report(`STUDY_CHILD_CLEANUP_FAILED step=${step} code=${failure?.code ?? failure?.name ?? 'unknown'} fs=${failure?.fsCode ?? 'none'} tries=${tries}\n`);
+      return false;
+    }
+    await wait(Math.max(1, Math.min(STOP_CLEANUP_RETRY_MS, deadline - now())));
+  }
 }
 // A win32 checkpoint is two PowerShell children. They once took about a second each, and
 // the 2x rule then started checkpoints about 6 s apart (2 s of work, 4 s of wait); cheaper
@@ -72,7 +115,7 @@ export function memoizedStartTimeOf(memo, startTimeOf) {
 }
 function statOrNull(file) {
   platformTimeout(WAIT_MS);
-  try { return fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; fail(); }
+  try { return fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; failFs(error); }
 }
 // Windows ACL proof is a PowerShell child. A client call (ensure/inspect/stop)
 // opens one AsyncLocalStorage scope: one before proof, nested and sequential
@@ -114,7 +157,7 @@ function presentListing(candidates) {
       return `${file}:${stat.dev}:${stat.ino}`;
     } catch (error) {
       if (error.code === 'ENOENT') return '';
-      fail();
+      failFs(error);
     }
   }).join('\u0000');
 }
@@ -158,7 +201,9 @@ function proveEntries(candidates, phase, prove = arePrivatePaths) {
     else if (transport && transportTries < 3) transportTries += 1;
     else break;
   }
-  fail('STUDY_DESCRIPTOR_CORRUPT', `${phase} ${reasons.join(' | ')}`);
+  // A path the proof could not even stat names its errno (`error:EPERM`); keep it (#265 A).
+  const fsCode = reasons.map((reason) => /^error:(E[A-Z]+)$/.exec(reason)?.[1]).find(Boolean);
+  fail('STUDY_DESCRIPTOR_CORRUPT', `${phase} ${reasons.join(' | ')}`, fsCode);
 }
 function settleTransaction(fn) {
   const result = fn();
@@ -235,8 +280,18 @@ export function aclTransaction(ctx, fn, { platform = process.platform, prove } =
   identityMemo = new Map();
   try {
     aclScope = new Set(proveEntries(candidates, 'before', proveFn).map(({ file }) => file));
-    try { return enterTransaction(() => settleTransaction(fn)); }
-    finally { aclScope = null; proveEntries(candidates, 'after', proveFn); }
+    let result;
+    try { result = enterTransaction(() => settleTransaction(fn)); }
+    catch (error) {
+      aclScope = null;
+      // #265 A: the body's failure is what happened — a file another process holds, say. An
+      // after-proof that fails as well must not replace it with one that names nothing.
+      try { proveEntries(candidates, 'after', proveFn); } catch { /* keep the body's error */ }
+      throw error;
+    }
+    aclScope = null;
+    proveEntries(candidates, 'after', proveFn);
+    return result;
   } finally { identityMemo = null; }
 }
 function ownUid(stat) { return typeof process.getuid !== 'function' || stat.uid === process.getuid(); }
@@ -317,7 +372,7 @@ function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized =
       throw error;
     }
     if (missing()) return null;
-    fail();
+    failFs(error);
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 // Windows inode numbers run past 2^53, where a Number-valued stat rounds them.
@@ -329,7 +384,7 @@ function exactInode(file) {
   try {
     const stat = fs.lstatSync(file, { bigint: true });
     return { dev: stat.dev, ino: stat.ino };
-  } catch (error) { if (error.code === 'ENOENT') return null; fail(); }
+  } catch (error) { if (error.code === 'ENOENT') return null; failFs(error); }
 }
 function pidRunning(pid) {
   if (!Number.isSafeInteger(pid) || pid < 1) return false;
@@ -715,7 +770,10 @@ function readContextOwnership(storeDir) {
 async function inspectStudyServiceWithinBudget(storeDir) {
   const deadline = platformNow() + platformTimeout(WAIT_MS);
   const { ctx, descriptor, owner } = readContextOwnership(storeDir);
-  if (!owner && descriptor.state === 'missing') return { status: 'stopped' };
+  // A service runs only while its lock proves it alive. No descriptor and no owner, or one proved
+  // dead (a service that died before releasing its lock, #265 A), is a stopped service; the next
+  // ensure reclaims that lock. An owner that cannot be identified still fails closed.
+  if ((!owner || owner.status === 'dead') && descriptor.state === 'missing') return { status: 'stopped' };
   if (owner?.status === 'dead' && descriptor.state === 'valid'
     && owner.pid === descriptor.value.pid && owner.startTime === descriptor.value.startTime
     && descriptor.value.storeIdentity === ctx.storeIdentity) return { status: 'stopped' };
@@ -726,7 +784,7 @@ async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {
   const deadline = platformNow() + platformTimeout(WAIT_MS);
   if (!UUID.test(expectedInstanceId)) fail('STUDY_IDENTITY_MISMATCH');
   const { ctx, descriptor, owner } = readContextOwnership(storeDir);
-  if (!owner && descriptor.state === 'missing') return { stopped: true, alreadyStopped: true };
+  if ((!owner || owner.status === 'dead') && descriptor.state === 'missing') return { stopped: true, alreadyStopped: true };
   if (descriptor.state === 'valid' && descriptor.value.instanceId === expectedInstanceId
     && descriptor.value.storeIdentity === ctx.storeIdentity && owner?.status === 'dead'
     && owner.pid === descriptor.value.pid && owner.startTime === descriptor.value.startTime) {
@@ -765,9 +823,10 @@ async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {
       continue;
     }
     const { current, lock } = observed;
-    // The lock is gone by now; judge the service's pid with the evidence of the lock record
-    // observed when the stop began (#256).
-    if (current.state === 'missing' && !lock && descriptorIdentityStatus(value, owner) === 'dead') {
+    // Judge the service's pid with the evidence of the lock record observed when the stop began
+    // (#256). A service that died before it could release its lock leaves that lock dead, not
+    // gone (#265 A); it is stopped all the same, and the next ensure reclaims the lock.
+    if (current.state === 'missing' && (!lock || lock.status === 'dead') && descriptorIdentityStatus(value, owner) === 'dead') {
       return { stopped: true, alreadyStopped: false };
     }
     // A replacement belongs to the next caller; it is never ours to stop.
@@ -887,8 +946,9 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
     if (stopping) return; stopping = true; clearTimeout(timer);
     try { process.stderr.write(`STUDY_CHILD_STOPPED ${reason} pid=${own.pid} instance=${instanceId ?? 'none'}\n`); } catch { /* closed stdio */ }
     await server?.close();
-    setProofPhase('stop');
-    try {
+    const cleanupDeadline = platformNow() + STOP_CLEANUP_MS;
+    // Unsafe/foreign descriptor stays untouched; HTTP still closes.
+    await runCleanupStep('descriptor', () => {
       assertOwnLock(ctx, own);
       const descriptor = readDescriptor(ctx);
       if (value && descriptor.state === 'valid' && JSON.stringify(descriptor.value) === JSON.stringify(value)) {
@@ -898,11 +958,18 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
         fs.unlinkSync(file);
         markAclDirty();
       }
-    } catch { /* Unsafe/foreign descriptor stays untouched; HTTP still closes. */ }
-    finally { setProofPhase(null); }
-    setProofPhase('stop');
-    try { assertOwnLock(ctx, own); releaseOwnedLock(own); markAclDirty(); } catch { /* Never traverse a replaced owner boundary. */ }
-    finally { setProofPhase(null); }
+    }, { deadline: cleanupDeadline });
+    // Never traverse a replaced owner boundary.
+    await runCleanupStep('release', () => {
+      assertOwnLock(ctx, own);
+      // The wait for a held pid file comes out of the same deadline.
+      releaseOwnedLock(own, { waitMs: cleanupDeadline - platformNow() });
+      markAclDirty();
+    }, { deadline: cleanupDeadline });
+    // A release can still give up on a holder that outlived its bound; say so, it is otherwise silent.
+    try {
+      if (sameInode(exactInode(path.join(ctx.training, LOCK)), own)) process.stderr.write('STUDY_CHILD_CLEANUP_LEFT lock\n');
+    } catch { /* unreadable now: nothing more to report */ }
   };
   const checkpoint = () => {
     if (stopping) return;
