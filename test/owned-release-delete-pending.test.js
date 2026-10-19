@@ -37,6 +37,7 @@ const LINGER_MS = 1000;
 const HOLDER = `
 const fs = require('node:fs');
 const file = process.argv[1], lingerMs = Number(process.argv[2]), maxMs = Number(process.argv[3]), kind = process.argv[4];
+const pendingLingerMs = Number(process.argv[5]);
 const mine = fs.lstatSync(file, { bigint: true });
 const handle = kind === 'dir' ? fs.opendirSync(file) : fs.openSync(file, 'r');
 const close = () => (kind === 'dir' ? handle.closeSync() : fs.closeSync(handle));
@@ -51,11 +52,12 @@ const poll = setInterval(() => {
   if (seen === null && Date.now() - started < maxMs) return;
   clearInterval(poll);
   process.stdout.write('seen ' + (seen ?? 'present') + '\\n');
-  setTimeout(() => { close(); process.stdout.write('closed\\n'); process.exit(0); }, lingerMs);
+  setTimeout(() => { close(); process.stdout.write('closed\\n'); process.exit(0); }, seen === 'EPERM' ? pendingLingerMs : lingerMs);
 }, 5);`;
 
-function holdOpen(file, { lingerMs = LINGER_MS, maxMs = 120_000, kind = 'file' } = {}) {
-  const child = registerOwnedProcess(spawn(process.execPath, ['-e', HOLDER, file, String(lingerMs), String(maxMs), kind],
+// `pendingLingerMs` replaces `lingerMs` when the holder saw the name stay behind it (EPERM).
+function holdOpen(file, { lingerMs = LINGER_MS, maxMs = 120_000, kind = 'file', pendingLingerMs = lingerMs } = {}) {
+  const child = registerOwnedProcess(spawn(process.execPath, ['-e', HOLDER, file, String(lingerMs), String(maxMs), kind, String(pendingLingerMs)],
     { stdio: ['ignore', 'pipe', 'pipe'] }), 'delete-pending holder');
   let out = '', err = '';
   child.stdout.on('data', (chunk) => { out += chunk; });
@@ -154,6 +156,12 @@ test('#265 A: removeDeletedLockDir waits only for deleted lock names, and only o
     r = decide(script);
     assert.equal(r.result, false); assert.equal(r.slept, 0, JSON.stringify(r.calls));
   }
+  // A name that answered EPERM and then reads again (an ACL refusal, a live reclaimer's aside):
+  // the wait ends, and nothing but rmdir was ever attempted.
+  let asideReads = 0;
+  r = decide({ rmdir: () => 'ENOTEMPTY', readdir: () => [aside], lstat: () => { asideReads += 1; if (asideReads === 1) throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); return {}; } });
+  assert.equal(r.result, false); assert.equal(r.slept, 1);
+  assert.deepEqual(r.calls.filter((call) => !call.startsWith('lstat') && call !== 'identity' && call !== 'readdir'), ['rmdir', 'rmdir']);
   // Still pending at the bound: the directory is left, as before.
   r = decide({ rmdir: () => 'ENOTEMPTY' });
   assert.equal(r.result, false); assert.equal(r.slept, DELETE_PENDING_WAIT_MS / 20);
@@ -248,6 +256,7 @@ test('#265 A: a release returns only once its directory is gone although another
   const next = gone ? acquireOwnedLock(root, 'held.lock.d') : null;
   const closed = await holder.closed;
   t.diagnostic(`holder ${closed.out.trim().replace(/\n/g, ' | ')}`);
+  assert.equal(closed.code, 0, closed.err);
   assert.equal(gone, true, 'the released directory was still there when release returned');
   releaseOwnedLock(next);
 });
@@ -300,6 +309,7 @@ test('#265 A: a dead lock is reclaimed although another process held its directo
   const handle = acquireOwnedLock(root, 'held.lock.d');
   const closed = await holder.closed;
   t.diagnostic(`holder ${closed.out.trim().replace(/\n/g, ' | ')}`);
+  assert.equal(closed.code, 0, closed.err);
   assert.equal(readOwnedLock(root, 'held.lock.d')?.status, 'alive');
   releaseOwnedLock(handle);
   assert.equal(absent(handle.dir), true);
@@ -309,6 +319,7 @@ test('#265 A: a dead lock is reclaimed although another process held a dead recl
   const root = createOwnedTempDir('holdem-reclaim-orphan-held');
   await deadOwnedLock(root, 'held.lock.d');
   // An orphan aside of a reclaimer that is not running, linked to the stale pid file as a real one is.
+  assert.equal(failureCode(() => process.kill(4194300, 0)), 'ESRCH', 'the orphan reclaimer pid must not be running');
   const orphan = path.join(root, 'held.lock.d', 'pid.reclaim.4194300.0badc0de');
   fs.linkSync(path.join(root, 'held.lock.d', 'pid'), orphan);
   const holder = holdOpen(orphan);
@@ -316,6 +327,7 @@ test('#265 A: a dead lock is reclaimed although another process held a dead recl
   const handle = acquireOwnedLock(root, 'held.lock.d');
   const closed = await holder.closed;
   t.diagnostic(`holder ${closed.out.trim().replace(/\n/g, ' | ')}`);
+  assert.equal(closed.code, 0, closed.err);
   assert.equal(readOwnedLock(root, 'held.lock.d')?.status, 'alive');
   assert.deepEqual(fs.readdirSync(handle.dir), ['pid']);
   releaseOwnedLock(handle);
@@ -339,18 +351,35 @@ for (const [label, held] of [['descriptor', (storeDir) => descriptorPath(storeDi
 }
 
 test('#265 A: a service that cannot release its lock within its deadline leaves it dead, and the stop and the next ensure still converge', { timeout: STOP_BUDGET }, async (t) => {
-  const { storeDir, handle, api } = await launch(t);
-  // Held past the service's cleanup deadline (10 s on Windows) where the deleted name stays.
-  const holder = holdOpen(descriptorPath(storeDir), { lingerMs: DELETE_PENDING ? 14_000 : 300 });
+  // The service's stderr goes to the diagnostics log; CI already sets one, a local run gets its own.
+  const before = process.env.AI_HOLDEM_PLATFORM_DIAGNOSTICS;
+  const diagnostics = before ?? createOwnedTempDir('holdem-study-diagnostics');
+  process.env.AI_HOLDEM_PLATFORM_DIAGNOSTICS = diagnostics;
+  let launched;
+  try { launched = await launch(t); }
+  finally { if (before === undefined) delete process.env.AI_HOLDEM_PLATFORM_DIAGNOSTICS; else process.env.AI_HOLDEM_PLATFORM_DIAGNOSTICS = before; }
+  const { storeDir, handle, api } = launched;
+  // Where the deleted name stays behind the holder, held past the service's cleanup deadline (10 s).
+  const holder = holdOpen(descriptorPath(storeDir), { lingerMs: 300, pendingLingerMs: 14_000 });
   await holder.held;
   const result = await api.stopStudyService(storeDir, { expectedInstanceId: handle.instanceId });
   const closed = await holder.closed;
   t.diagnostic(`holder ${closed.out.trim().replace(/\n/g, ' | ')}`);
+  assert.equal(closed.code, 0, closed.err);
   assert.deepEqual(result, { stopped: true, alreadyStopped: false });
   assert.equal(absent(descriptorPath(storeDir)), true);
   const lock = readOwnedLock(path.join(storeDir, '.training'), 'study.lock.d');
-  if (closed.out.includes('seen EPERM')) assert.equal(lock?.status, 'dead', 'a service that gave up its release leaves a dead lock');
-  else assert.equal(lock, null);
+  if (closed.out.includes('seen EPERM')) {
+    assert.equal(lock?.status, 'dead', 'a service that gave up its release leaves a dead lock');
+    // It gave up because the deadline ran out on a held file, after many attempts — not at once.
+    const line = fs.readFileSync(path.join(diagnostics, 'study-children.log'), 'utf8').split('\n')
+      .find((row) => row.startsWith('STUDY_CHILD_CLEANUP_FAILED step=release') && row.endsWith(` pid=${handle.pid}`));
+    assert.ok(line, 'the service reported no failed release');
+    assert.match(line, / fs=EPERM /);
+    assert.ok(Number(/ tries=(\d+)/.exec(line)[1]) >= 5, line);
+  } else {
+    assert.equal(lock, null);
+  }
   const second = await launch(t, {}, storeDir);
   assert.notEqual(second.handle.instanceId, handle.instanceId);
 });
@@ -397,12 +426,12 @@ test('#265 A: a cleanup step retries only a transient failure, inside one deadli
   tries = 0;
   r = await run(() => { tries += 1; throw Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT own lock absent'), { code: 'STUDY_DESCRIPTOR_CORRUPT' }); });
   assert.equal(r.ok, false); assert.equal(tries, 1);
-  assert.deepEqual(r.lines, ['STUDY_CHILD_CLEANUP_FAILED step=release code=STUDY_DESCRIPTOR_CORRUPT fs=none tries=1\n']);
+  assert.deepEqual(r.lines, [`STUDY_CHILD_CLEANUP_FAILED step=release code=STUDY_DESCRIPTOR_CORRUPT fs=none tries=1 pid=${process.pid}\n`]);
   // A held file that outlasts the deadline: retried until it is spent, then reported.
   tries = 0;
   r = await run(() => { tries += 1; throw transient(); }, { deadline: 200 });
   assert.equal(r.ok, false); assert.equal(tries, 5); assert.equal(r.clock, 200);
-  assert.deepEqual(r.lines, ['STUDY_CHILD_CLEANUP_FAILED step=release code=STUDY_DESCRIPTOR_CORRUPT fs=EPERM tries=5\n']);
+  assert.deepEqual(r.lines, [`STUDY_CHILD_CLEANUP_FAILED step=release code=STUDY_DESCRIPTOR_CORRUPT fs=EPERM tries=5 pid=${process.pid}\n`]);
   // POSIX: EPERM is a refusal, never retried.
   tries = 0;
   r = await run(() => { tries += 1; throw transient(); }, { platform: 'linux' });
@@ -415,7 +444,24 @@ test('#265 A: a cleanup step retries only a transient failure, inside one deadli
   assert.equal(await runCleanupStep('descriptor', () => { first += 1; if (first < 3) throw transient(); }, shared), true);
   assert.equal(await runCleanupStep('release', () => { second += 1; throw transient(); }, shared), false);
   assert.deepEqual([first, second, clock], [3, 2, 120]);
-  assert.deepEqual(lines, ['STUDY_CHILD_CLEANUP_FAILED step=release code=STUDY_DESCRIPTOR_CORRUPT fs=EPERM tries=2\n']);
+  assert.deepEqual(lines, [`STUDY_CHILD_CLEANUP_FAILED step=release code=STUDY_DESCRIPTOR_CORRUPT fs=EPERM tries=2 pid=${process.pid}\n`]);
+});
+
+test('#265 A: a cleanup retry on the default clock reads its deadline without recursing', async () => {
+  const { runCleanupStep } = await service();
+  const transient = () => Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT fs=EPERM'), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EPERM' });
+  const budgets = [];
+  const lines = [];
+  let tries = 0;
+  const ok = await runCleanupStep('release', () => {
+    tries += 1;
+    budgets.push(platformTimeout(15_000));
+    if (tries < 2) throw transient();
+  }, { deadline: platformNow() + 5_000, platform: 'win32', report: (line) => lines.push(line) });
+  assert.deepEqual(lines, []);
+  assert.equal(ok, true);
+  assert.equal(budgets[0], 15_000);
+  assert.ok(budgets[1] > 0 && budgets[1] <= 5_000, `the retry ran with ${budgets[1]} ms`);
 });
 
 test('#265 A: a transaction keeps its body\'s errno when its after-proof fails too, and a proof keeps the errno of a path it could not stat', async () => {

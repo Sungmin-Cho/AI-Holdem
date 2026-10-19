@@ -326,10 +326,12 @@ function reclaimAsideLeftovers(dir, expected) {
 // identify, forever; returning while its removal is pending hands the next owner a lock it cannot
 // read or install. Those holders are short — a whole proof child took 0.2 s at the median and
 // 1.3 s at most in 3,216 CI runs of one, a read takes milliseconds — so whoever removes a lock
-// directory waits for them, bounded. A name that answers EPERM has already been deleted and
-// cannot come back, so waiting for it is safe whoever deleted it; only lock names (pid, reclaim
-// asides) are waited for, and a readable one — a live owner's pid, a live reclaimer's aside —
-// anything else in the directory, a replaced directory, or any other platform ends the wait.
+// directory waits for them, bounded. It waits while every name left is a lock name (pid, reclaim
+// asides) that cannot be read (EPERM, which a delete-pending name answers; so does a name an ACL
+// refuses, and that costs only the bounded wait) or is gone. A readable name — a live owner's pid,
+// a live reclaimer's aside — anything else in the directory, a replaced directory, or any other
+// platform ends the wait. The wait never removes a name: rmdir is not recursive, and a live lock
+// is installed already holding its pid, so no directory a live owner holds can be removed.
 // ENOTEMPTY that outlasts the wait leaves the directory, as before; EPERM/EBUSY from rmdir itself
 // is thrown, as before. Exported for the decision tests only.
 const DELETE_PENDING_RETRY_MS = 20;

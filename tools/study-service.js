@@ -79,21 +79,24 @@ const writeStderr = (line) => { try { process.stderr.write(line); } catch { /* c
 // only on a file another process holds. The first attempt keeps the bounds it always had; every
 // retry runs inside `deadline`, so its proofs and stat calls fail once that is spent instead of
 // starting another child. Any other failure, or the deadline, ends the step — reported on stderr
-// (discarded in production, kept by CI and piped callers) and never thrown, as before.
-export async function runCleanupStep(step, fn, { deadline, platform = process.platform, now = platformNow,
+// (discarded in production, kept by CI and piped callers) and never thrown, as before. `now` is
+// a test clock; without one the retries keep the clock already in force (platformNow reads it,
+// so it must never be handed back to withPlatformDeadline as the clock itself).
+export async function runCleanupStep(step, fn, { deadline, platform = process.platform, now,
   wait = sleep, report = writeStderr } = {}) {
+  const clock = now ?? platformNow;
   for (let tries = 1; ; tries += 1) {
     let failure;
     setProofPhase('stop');
     try {
-      if (tries === 1) fn(); else withPlatformDeadline(deadline, fn, { now });
+      if (tries === 1) fn(); else withPlatformDeadline(deadline, fn, now ? { now } : undefined);
       return true;
     } catch (error) { failure = error; } finally { setProofPhase(null); }
-    if (!transientCleanupError(failure, platform) || now() >= deadline) {
-      report(`STUDY_CHILD_CLEANUP_FAILED step=${step} code=${failure?.code ?? failure?.name ?? 'unknown'} fs=${failure?.fsCode ?? 'none'} tries=${tries}\n`);
+    if (!transientCleanupError(failure, platform) || clock() >= deadline) {
+      report(`STUDY_CHILD_CLEANUP_FAILED step=${step} code=${failure?.code ?? failure?.name ?? 'unknown'} fs=${failure?.fsCode ?? 'none'} tries=${tries} pid=${process.pid}\n`);
       return false;
     }
-    await wait(Math.max(1, Math.min(STOP_CLEANUP_RETRY_MS, deadline - now())));
+    await wait(Math.max(1, Math.min(STOP_CLEANUP_RETRY_MS, deadline - clock())));
   }
 }
 // A win32 checkpoint is two PowerShell children. They once took about a second each, and
