@@ -334,6 +334,17 @@ async function realBackend() {
   const call = async (pathname, options = {}) => {
     const [route, init] = drillRequest(pathname, token, options);
     if (init.method === 'POST') requests.push({ pathname, body: JSON.parse(init.body) });
+    // #301: one connection per request. This client shares the server's event loop,
+    // and answerAll is one synchronous stretch (it never yields to the loop; seconds
+    // on a slow Windows runner). When it outlasts the server's idle close
+    // (keepAliveTimeout 5s plus Node's 1s buffer), no idle timer has run on either
+    // side. The next POST is then written on the kept-alive socket in that same turn
+    // (seen with Node 20 and 22 in CI, Node 26 locally), which cancels the client's
+    // idle timer; the server's overdue timer then closes the socket under the
+    // request, and fetch fails with ECONNRESET (a POST is never retried). A browser
+    // tab is another process, and browsers resend a request whose reused connection
+    // closed before any response; the product controller is unchanged.
+    init.headers = { ...init.headers, connection: 'close' };
     let response = null;
     try {
       response = await fetch(new URL(route, `http://127.0.0.1:${server.port}`), init);
@@ -433,9 +444,10 @@ test('a stale tab may still start the next step once the other tab\'s run is fin
 });
 
 // #301: the test above failed once on Windows with CONNECTION. Same flow with its
-// slow stretch made certain: after the last response the loop stalls past the
+// slow stretch made certain: after answerAll the loop stays blocked past the
 // server's real idle close (keepAliveTimeout, 5s by default, plus Node's 1s
-// buffer), so the next POST is written on a socket the server closes next turn.
+// buffer), as a slow answerAll does by itself, so the next POST is written on a
+// socket whose overdue idle timer the server runs next.
 test('a stale tab\'s next request survives the server closing its idle connection meanwhile', async () => {
   const backend = await realBackend();
   try {
