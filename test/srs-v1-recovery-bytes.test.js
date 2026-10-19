@@ -1,9 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
-import { CAPTURE_INPUTS, PRODUCER_COMMIT, REPO_ROOT, loadFixture, sha256, verifyRecovery } from './helpers/srs-v1-recovery.mjs';
+import {
+  CAPTURE_INPUTS, PRODUCER_COMMIT, RECOVER_AT, REPO_ROOT, RUNNER, loadFixture, semanticFailures, sha256, verifyRecovery,
+} from './helpers/srs-v1-recovery.mjs';
 
 // #272: SR v1 drill pending transactions exactly as main@62ea79c (the last SR v1
 // producer) left them between two of its writes, recovered by the current
@@ -70,4 +73,48 @@ test('current recovery of every SR v1 checkpoint matches the producer\'s own rec
   });
   assert.equal(report.checkpoints, 25);
   assert.deepEqual(report.mismatches, []);
+});
+
+// The bank, profile and SRS writers refuse most of these before they reach a
+// file, so the negative controls cannot exercise every semantic check; this
+// does, on the producer's own recovered bytes.
+test('the semantic checks name each duplicate, rewrite and conversion', () => {
+  const tx = manifest.transactions.find((row) => row.id === 'a-v2-off-policy');
+  const before = fixture.filesOf(tx.checkpoints[0].files);
+  const after = fixture.filesOf(tx.checkpoints[0].expected.files);
+  assert.deepEqual(semanticFailures(tx, before, after), []);
+  const json = (rel) => JSON.parse(after[rel]);
+  const lines = after['profile-events.jsonl'].toString('utf8').split('\n').filter(Boolean);
+  const own = lines.find((line) => JSON.parse(line).evaluationId === tx.evaluationId);
+  const variants = [
+    ['bank evidence banked twice on its item', 'mistakes.json', () => {
+      const bank = json('mistakes.json');
+      bank.items.find((item) => item.evidenceIds.includes(tx.evaluationId)).evidenceIds.push(tx.evaluationId);
+      return bank;
+    }, /2 bank evidence rows for the off-policy answer/],
+    ['review stamped as SR v2', 'mistakes.json', () => {
+      const bank = json('mistakes.json');
+      bank.reviewState[tx.srsPatch.mistakeId].srsVersion = 2;
+      return bank;
+    }, /gained SR v2 fields/],
+    ['review attempt counted twice', 'mistakes.json', () => {
+      const bank = json('mistakes.json');
+      bank.reviewState[tx.srsPatch.mistakeId].attempts += 1;
+      return bank;
+    }, /the SR v1 target is not the captured one/],
+    ['event appended twice', 'profile-events.jsonl', () => `${lines.join('\n')}\n${own}\n`, /2 learning events for the transaction/],
+    ['earlier event rewritten', 'profile-events.jsonl', () => `${lines.slice(1).join('\n')}\n`, /earlier learning events were rewritten/],
+    ['pending left in place', 'drill-session.json', () => ({ ...json('drill-session.json'), pending: {} }), /pending was not cleared/],
+  ];
+  for (const [label, rel, make, expected] of variants) {
+    const value = make();
+    const changed = { ...after, [rel]: Buffer.from(typeof value === 'string' ? value : JSON.stringify(value)) };
+    assert.ok(semanticFailures(tx, before, changed).some((line) => expected.test(line)), label);
+  }
+});
+
+test('the recovery runner refuses a call that names no store', () => {
+  const run = spawnSync(process.execPath, [RUNNER, REPO_ROOT, RECOVER_AT], { encoding: 'utf8', windowsHide: true });
+  assert.equal(run.status, 2);
+  assert.match(run.stderr, /usage/);
 });

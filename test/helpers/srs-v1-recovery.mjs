@@ -154,7 +154,7 @@ export function semanticFailures(tx, before, after) {
   }
   // Counted per evidence id, so the same answer banked twice on one item shows too.
   const banked = bank.items.flatMap((item) => item.evidenceIds).filter((id) => id === tx.evaluationId).length;
-  if (banked !== (tx.grade === 'off-policy' ? 1 : 0)) fail(`${banked} bank evidence rows for a ${tx.grade} answer`);
+  if (banked !== (tx.grade === 'off-policy' ? 1 : 0)) fail(`${banked} bank evidence rows for the ${tx.grade} answer`);
   return failures;
 }
 

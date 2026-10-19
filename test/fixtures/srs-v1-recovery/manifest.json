@@ -12,7 +12,7 @@
     "platform": "darwin-arm64",
     "inputs": {
       "scripts/capture-srs-v1-recovery.mjs": "e1232d399df63b47f20cfc12e47c7ba242c1130f033800094d768932f0c6faaf",
-      "test/helpers/srs-v1-recovery.mjs": "32bfc1675a6e0a57fc1718c00523b1c3dedfa7040c9e2f6f9b24233fbda0289e",
+      "test/helpers/srs-v1-recovery.mjs": "8da73cdc145eb26c4ec51917746d18f90e9888ab580e7ecdbea832146e420eb1",
       "test/helpers/srs-v1-recovery-runner.mjs": "2d1b82096cce49998d52ab0ce798d8cb8f08365b6fa7f83533f5eac8c7c0bf35"
     },
     "reproduced": "two producer processes in separate temp stores produced identical states; no captured byte contains a store path"
@@ -993,7 +993,7 @@
     }
   ],
   "negativeControls": {
-    "codeTree": "0773e7209fac2f92c09de6dc4566ced7d7627eb6",
+    "codeTree": "75f5d67a503a87db3a82c0f06a7288e301fd2c11",
     "unmodified": {
       "checkpoints": 25,
       "mismatches": 0
