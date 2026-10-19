@@ -1,0 +1,1089 @@
+{
+  "schemaVersion": 1,
+  "issue": 272,
+  "producer": {
+    "commit": "62ea79cbf9d1d9b5cdcc1e1ded504d4631c113e4",
+    "api": "tools/drill-cli.js startDrill + answerQuestion (public exports, unmodified)",
+    "recovery": "tools/drill-cli.js nextQuestion, run by test/helpers/srs-v1-recovery-runner.mjs"
+  },
+  "capture": {
+    "command": "node scripts/capture-srs-v1-recovery.mjs --baseline <detached checkout of producer.commit> --write",
+    "node": "v26.0.0",
+    "platform": "darwin-arm64",
+    "inputs": {
+      "scripts/capture-srs-v1-recovery.mjs": "827356b9f47418f24fbb58e660a1e9d2f193270f8b2cbff025ed1aa63d4771bb",
+      "test/helpers/srs-v1-recovery.mjs": "9674bd86c7e923677c86154903c2db248f0b9a123bdc9ceb77c65b4488f4fbd8",
+      "test/helpers/srs-v1-recovery-runner.mjs": "87b779a9329cf46d943951dc5ffab939cd783ea67d9a89eb24bdfa2a706aef15"
+    },
+    "reproduced": "two producer processes in separate temp stores produced identical states; no captured byte contains a store path"
+  },
+  "determinism": {
+    "clock": "global Date frozen and stepped before the producer loads: seeds from 2026-10-01T09:00:00.000Z, reviews at 2026-10-02T09:00:00.000Z, 2026-10-05T09:00:00.000Z, 2026-10-06T09:00:00.000Z, 20s between answers",
+    "uuid": "crypto.randomUUID = sha256(\"srs-v1-capture:<n>\") formatted as a v4 UUID",
+    "recoverAt": "2026-10-06T09:30:00.000Z",
+    "normalization": "none: files are compared as written"
+  },
+  "scope": {
+    "directory": ".training",
+    "checkpointFiles": "every regular file; a file absent from a state is null",
+    "excluded": "*.lock.d (held by a running writer) and *.tmp (atomic-write temps) in checkpoints; after recovery every entry is listed",
+    "boundary": "one checkpoint per distinct durable state between two producer writes (fs rename/link/close/unlink/rm/rmdir/writeFile/appendFile)"
+  },
+  "expected": "the producer's own nextQuestion in a fresh process at recoverAt: files, remaining entries, rewritten files (inode/mtime/size changed) and payload; a second fresh run changes nothing",
+  "scenario": {
+    "seeds": [
+      "2.0.0 6max-100bb-sb-rfi-v2:A7o off-policy",
+      "2.0.0 8max-100bb-hj-vs-lj-open25-v2:JTs off-policy",
+      "2.0.0 9max-100bb-sb-vs-co-open25-v2:A2o off-policy",
+      "1.0.0 6max-100bb-bb-vs-single-raise:A8s off-policy",
+      "1.0.0 6max-100bb-btn-rfi-unopened:K6o off-policy"
+    ],
+    "reviews": [
+      "R1 2.0.0 mistake-review: preferred, off-policy, preferred",
+      "R2 2.0.0 mistake-review: preferred (committed), A off-policy, B preferred",
+      "R3 1.0.0 mistake-review: C mixed (first answer of the run)"
+    ]
+  },
+  "transactions": [
+    {
+      "id": "a-v2-off-policy",
+      "source": {
+        "id": "local-preflop-baseline",
+        "version": "2.0.0",
+        "contentSha256": "1147b530a398c0b424379689d966d9be1fb60b665600b2600993689212fe02f7"
+      },
+      "grade": "off-policy",
+      "attemptNo": 1,
+      "questionId": "drill:2.0.0:8max-100bb-hj-vs-lj-open25-v2:JTs:2",
+      "evaluationId": "9e99b1d4979bf34a13dadea851f545d3154b11f5d1c865fab9c5c4fc22087fd2:d-2-preflop-0:local-preflop-baseline@2.0.0",
+      "srsPatch": {
+        "mistakeId": "4bd14df11215e3d29faa438aacca58c9c8d1055ad045904ee43720d91b9ae7d8:d-1-preflop-0:local-preflop-baseline@2.0.0",
+        "before": {
+          "lastReviewedAt": "2026-10-02T09:00:40.000Z",
+          "nextReviewAt": "2026-10-03T09:00:40.000Z",
+          "intervalDays": 1,
+          "ease": 2.3,
+          "attempts": 1,
+          "correctStreak": 0,
+          "lapses": 1
+        },
+        "patch": {
+          "lastReviewedAt": "2026-10-05T09:00:40.000Z",
+          "attempts": 2,
+          "intervalDays": 1,
+          "ease": 2.3,
+          "lapses": 2,
+          "nextReviewAt": "2026-10-06T09:00:40.000Z"
+        }
+      },
+      "checkpoints": [
+        {
+          "id": "00-pending-saved",
+          "boundary": "renameSync after pending-saved",
+          "issueCheckpoint": "unapplied",
+          "applied": {
+            "srs": false,
+            "bank": false,
+            "profile": false
+          },
+          "files": {
+            "drill-session.json": "87f7e4e97a168701b454bfe4ab35d912c8b6dc60e92e163c701d4a384d440c93",
+            "mistakes.json": "b4fde53dc8f2dad6eead3e695818b3a01120e804ac299cfaef6d4ef58929d2a9",
+            "profile-events.jsonl": "44f11e9462503778121c71d9a7d1c23cb094d00caa5052f7901caf8de89b9eda",
+            "profile.json": "c9c451ee407421690a5358b23a9139006887fb65a354a84e184e86c9cb92f523"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "1c42d99364dc85aefbbaa75e3f0fa9da3cb663ef70f3d52f8e8055cfbedeec7a",
+              "mistakes.json": "b37db24f64c767b5943f3c4fac8006fa1adf3bc0be9af89675d134e3d19ee9e2",
+              "profile-events.jsonl": "57d31724e4ccb240226c4a0e5259fb5af29328bf82077163f9279e1dbfefd7c4",
+              "profile.json": "9c7db91a59d2edb67e152c52a11086eb056c5bff30086e707248602d652eaa38"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "dto": "e0359bff1b0e3863699be7433b80d18d91f909bce3acb0e3ada02e472edfbe1a"
+          }
+        },
+        {
+          "id": "01-profile-event-appended",
+          "boundary": "closeSync after profile-event-appended",
+          "applied": {
+            "srs": false,
+            "bank": false,
+            "profile": false
+          },
+          "files": {
+            "drill-session.json": "87f7e4e97a168701b454bfe4ab35d912c8b6dc60e92e163c701d4a384d440c93",
+            "mistakes.json": "b4fde53dc8f2dad6eead3e695818b3a01120e804ac299cfaef6d4ef58929d2a9",
+            "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+            "profile.json": "c9c451ee407421690a5358b23a9139006887fb65a354a84e184e86c9cb92f523"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "1c42d99364dc85aefbbaa75e3f0fa9da3cb663ef70f3d52f8e8055cfbedeec7a",
+              "mistakes.json": "b37db24f64c767b5943f3c4fac8006fa1adf3bc0be9af89675d134e3d19ee9e2",
+              "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+              "profile.json": "c9c451ee407421690a5358b23a9139006887fb65a354a84e184e86c9cb92f523"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json"
+            ],
+            "dto": "e0359bff1b0e3863699be7433b80d18d91f909bce3acb0e3ada02e472edfbe1a"
+          }
+        },
+        {
+          "id": "02-profile-projection-written",
+          "boundary": "renameSync after profile-projection-written",
+          "applied": {
+            "srs": false,
+            "bank": false,
+            "profile": false
+          },
+          "files": {
+            "drill-session.json": "87f7e4e97a168701b454bfe4ab35d912c8b6dc60e92e163c701d4a384d440c93",
+            "mistakes.json": "b4fde53dc8f2dad6eead3e695818b3a01120e804ac299cfaef6d4ef58929d2a9",
+            "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+            "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "1c42d99364dc85aefbbaa75e3f0fa9da3cb663ef70f3d52f8e8055cfbedeec7a",
+              "mistakes.json": "b37db24f64c767b5943f3c4fac8006fa1adf3bc0be9af89675d134e3d19ee9e2",
+              "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+              "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json"
+            ],
+            "dto": "e0359bff1b0e3863699be7433b80d18d91f909bce3acb0e3ada02e472edfbe1a"
+          }
+        },
+        {
+          "id": "03-profile-flag-saved",
+          "boundary": "renameSync after profile-flag-saved",
+          "issueCheckpoint": "profile-only",
+          "applied": {
+            "srs": false,
+            "bank": false,
+            "profile": true
+          },
+          "files": {
+            "drill-session.json": "85b6e5b6c9af875fcdf0dc94e17313547efc04b7c6a4b107c2dd2e873b0493a0",
+            "mistakes.json": "b4fde53dc8f2dad6eead3e695818b3a01120e804ac299cfaef6d4ef58929d2a9",
+            "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+            "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "1c42d99364dc85aefbbaa75e3f0fa9da3cb663ef70f3d52f8e8055cfbedeec7a",
+              "mistakes.json": "b37db24f64c767b5943f3c4fac8006fa1adf3bc0be9af89675d134e3d19ee9e2",
+              "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+              "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json"
+            ],
+            "dto": "e0359bff1b0e3863699be7433b80d18d91f909bce3acb0e3ada02e472edfbe1a"
+          }
+        },
+        {
+          "id": "04-bank-written",
+          "boundary": "renameSync after bank-written",
+          "applied": {
+            "srs": false,
+            "bank": false,
+            "profile": true
+          },
+          "files": {
+            "drill-session.json": "85b6e5b6c9af875fcdf0dc94e17313547efc04b7c6a4b107c2dd2e873b0493a0",
+            "mistakes.json": "de536a346f436362562754668c0c6afd485547ada8d1dc3874cc6fb28e3f7b1b",
+            "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+            "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "1c42d99364dc85aefbbaa75e3f0fa9da3cb663ef70f3d52f8e8055cfbedeec7a",
+              "mistakes.json": "5fbd15db195e4468bc33a4981b9981b326ba43e16e689c22ba61b81811cdae95",
+              "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+              "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json"
+            ],
+            "dto": "e0359bff1b0e3863699be7433b80d18d91f909bce3acb0e3ada02e472edfbe1a"
+          }
+        },
+        {
+          "id": "05-bank-flag-saved",
+          "boundary": "renameSync after bank-flag-saved",
+          "issueCheckpoint": "through-bank",
+          "applied": {
+            "srs": false,
+            "bank": true,
+            "profile": true
+          },
+          "files": {
+            "drill-session.json": "86cdc92dda45ba36d8139e7c3261a2e60064d1239a0082965bf9a685ecb2f56f",
+            "mistakes.json": "de536a346f436362562754668c0c6afd485547ada8d1dc3874cc6fb28e3f7b1b",
+            "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+            "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "1c42d99364dc85aefbbaa75e3f0fa9da3cb663ef70f3d52f8e8055cfbedeec7a",
+              "mistakes.json": "5fbd15db195e4468bc33a4981b9981b326ba43e16e689c22ba61b81811cdae95",
+              "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+              "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json"
+            ],
+            "dto": "e0359bff1b0e3863699be7433b80d18d91f909bce3acb0e3ada02e472edfbe1a"
+          }
+        },
+        {
+          "id": "06-srs-written",
+          "boundary": "renameSync after srs-written",
+          "applied": {
+            "srs": false,
+            "bank": true,
+            "profile": true
+          },
+          "files": {
+            "drill-session.json": "86cdc92dda45ba36d8139e7c3261a2e60064d1239a0082965bf9a685ecb2f56f",
+            "mistakes.json": "5fbd15db195e4468bc33a4981b9981b326ba43e16e689c22ba61b81811cdae95",
+            "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+            "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "1c42d99364dc85aefbbaa75e3f0fa9da3cb663ef70f3d52f8e8055cfbedeec7a",
+              "mistakes.json": "5fbd15db195e4468bc33a4981b9981b326ba43e16e689c22ba61b81811cdae95",
+              "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+              "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json"
+            ],
+            "dto": "e0359bff1b0e3863699be7433b80d18d91f909bce3acb0e3ada02e472edfbe1a"
+          }
+        },
+        {
+          "id": "07-srs-flag-saved",
+          "boundary": "renameSync after srs-flag-saved",
+          "issueCheckpoint": "srs-applied-pending-not-cleared",
+          "applied": {
+            "srs": true,
+            "bank": true,
+            "profile": true
+          },
+          "files": {
+            "drill-session.json": "70c5baad63c4b0006b4594d18b310a1244d838870a7475759d194792fa397f27",
+            "mistakes.json": "5fbd15db195e4468bc33a4981b9981b326ba43e16e689c22ba61b81811cdae95",
+            "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+            "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "1c42d99364dc85aefbbaa75e3f0fa9da3cb663ef70f3d52f8e8055cfbedeec7a",
+              "mistakes.json": "5fbd15db195e4468bc33a4981b9981b326ba43e16e689c22ba61b81811cdae95",
+              "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+              "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json"
+            ],
+            "dto": "e0359bff1b0e3863699be7433b80d18d91f909bce3acb0e3ada02e472edfbe1a"
+          }
+        },
+        {
+          "id": "08-committed",
+          "boundary": "renameSync after committed",
+          "issueCheckpoint": "complete",
+          "applied": null,
+          "files": {
+            "drill-session.json": "1c42d99364dc85aefbbaa75e3f0fa9da3cb663ef70f3d52f8e8055cfbedeec7a",
+            "mistakes.json": "5fbd15db195e4468bc33a4981b9981b326ba43e16e689c22ba61b81811cdae95",
+            "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+            "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "1c42d99364dc85aefbbaa75e3f0fa9da3cb663ef70f3d52f8e8055cfbedeec7a",
+              "mistakes.json": "5fbd15db195e4468bc33a4981b9981b326ba43e16e689c22ba61b81811cdae95",
+              "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+              "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [],
+            "dto": "e0359bff1b0e3863699be7433b80d18d91f909bce3acb0e3ada02e472edfbe1a"
+          }
+        }
+      ]
+    },
+    {
+      "id": "b-v2-preferred",
+      "source": {
+        "id": "local-preflop-baseline",
+        "version": "2.0.0",
+        "contentSha256": "1147b530a398c0b424379689d966d9be1fb60b665600b2600993689212fe02f7"
+      },
+      "grade": "preferred",
+      "attemptNo": 2,
+      "questionId": "drill:2.0.0:9max-100bb-sb-vs-co-open25-v2:A2o:3",
+      "evaluationId": "e3faed3fac7afc78a5537a0675ba42f11926c4402b09bd5db7bcad34404179b9:d-3-preflop-0:local-preflop-baseline@2.0.0",
+      "srsPatch": {
+        "mistakeId": "a38d0976d8ab00f7974564775033f5863017639dec70de0fffc5044a8c6ee782:d-1-preflop-0:local-preflop-baseline@2.0.0",
+        "before": {
+          "lastReviewedAt": "2026-10-02T09:01:00.000Z",
+          "nextReviewAt": "2026-10-04T09:01:00.000Z",
+          "intervalDays": 2,
+          "ease": 2.3,
+          "attempts": 1,
+          "correctStreak": 0,
+          "lapses": 0
+        },
+        "patch": {
+          "lastReviewedAt": "2026-10-05T09:01:00.000Z",
+          "attempts": 2,
+          "intervalDays": 4,
+          "ease": 2.3,
+          "lapses": 0,
+          "nextReviewAt": "2026-10-09T09:01:00.000Z"
+        }
+      },
+      "checkpoints": [
+        {
+          "id": "00-pending-saved",
+          "boundary": "renameSync after pending-saved",
+          "issueCheckpoint": "unapplied",
+          "applied": {
+            "srs": false,
+            "bank": false,
+            "profile": false
+          },
+          "files": {
+            "drill-session.json": "efba6d494d7619fbaeee70ac3ab666489d547a5577b34494eb819df528530959",
+            "mistakes.json": "5fbd15db195e4468bc33a4981b9981b326ba43e16e689c22ba61b81811cdae95",
+            "profile-events.jsonl": "7b868c25f4c9b76da0a3dd0cfca5156f7f664ac283190e7e940179f29302bf4c",
+            "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "d67dbb608e4e592f255802e899b64ec80913afcb51d2845edaf84499f8b5a6cc",
+              "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+              "profile-events.jsonl": "67709b5c52dccbcd2947c5bee4bac60f2821af285057a4ce954f2a81753b0b23",
+              "profile.json": "e950810464cc8082f82cb21fea5d397c9796d37cfb6defd547defb03d0bf3718"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "dto": "a2fe02bd16d057117e64d4f4cbc2cd64cd67addf21f6376b9b7d6a5b68addf5d"
+          }
+        },
+        {
+          "id": "01-profile-event-appended",
+          "boundary": "closeSync after profile-event-appended",
+          "applied": {
+            "srs": false,
+            "bank": false,
+            "profile": false
+          },
+          "files": {
+            "drill-session.json": "efba6d494d7619fbaeee70ac3ab666489d547a5577b34494eb819df528530959",
+            "mistakes.json": "5fbd15db195e4468bc33a4981b9981b326ba43e16e689c22ba61b81811cdae95",
+            "profile-events.jsonl": "62654758ac8d75b27ffc27c543e80230b3e2e8a406ea769504cc77e800778b71",
+            "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "d67dbb608e4e592f255802e899b64ec80913afcb51d2845edaf84499f8b5a6cc",
+              "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+              "profile-events.jsonl": "62654758ac8d75b27ffc27c543e80230b3e2e8a406ea769504cc77e800778b71",
+              "profile.json": "19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json"
+            ],
+            "dto": "a2fe02bd16d057117e64d4f4cbc2cd64cd67addf21f6376b9b7d6a5b68addf5d"
+          }
+        },
+        {
+          "id": "02-profile-projection-written",
+          "boundary": "renameSync after profile-projection-written",
+          "applied": {
+            "srs": false,
+            "bank": false,
+            "profile": false
+          },
+          "files": {
+            "drill-session.json": "efba6d494d7619fbaeee70ac3ab666489d547a5577b34494eb819df528530959",
+            "mistakes.json": "5fbd15db195e4468bc33a4981b9981b326ba43e16e689c22ba61b81811cdae95",
+            "profile-events.jsonl": "62654758ac8d75b27ffc27c543e80230b3e2e8a406ea769504cc77e800778b71",
+            "profile.json": "e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "d67dbb608e4e592f255802e899b64ec80913afcb51d2845edaf84499f8b5a6cc",
+              "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+              "profile-events.jsonl": "62654758ac8d75b27ffc27c543e80230b3e2e8a406ea769504cc77e800778b71",
+              "profile.json": "e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json"
+            ],
+            "dto": "a2fe02bd16d057117e64d4f4cbc2cd64cd67addf21f6376b9b7d6a5b68addf5d"
+          }
+        },
+        {
+          "id": "03-profile-flag-saved",
+          "boundary": "renameSync after profile-flag-saved",
+          "issueCheckpoint": "profile-only",
+          "applied": {
+            "srs": false,
+            "bank": false,
+            "profile": true
+          },
+          "files": {
+            "drill-session.json": "77e6dd0b02477ca762aeca60c1f4a69015c72d42b910d72a3cdfc49ff308ad65",
+            "mistakes.json": "5fbd15db195e4468bc33a4981b9981b326ba43e16e689c22ba61b81811cdae95",
+            "profile-events.jsonl": "62654758ac8d75b27ffc27c543e80230b3e2e8a406ea769504cc77e800778b71",
+            "profile.json": "e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "d67dbb608e4e592f255802e899b64ec80913afcb51d2845edaf84499f8b5a6cc",
+              "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+              "profile-events.jsonl": "62654758ac8d75b27ffc27c543e80230b3e2e8a406ea769504cc77e800778b71",
+              "profile.json": "e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json"
+            ],
+            "dto": "a2fe02bd16d057117e64d4f4cbc2cd64cd67addf21f6376b9b7d6a5b68addf5d"
+          }
+        },
+        {
+          "id": "04-bank-flag-saved",
+          "boundary": "renameSync after bank-flag-saved",
+          "issueCheckpoint": "through-bank",
+          "applied": {
+            "srs": false,
+            "bank": true,
+            "profile": true
+          },
+          "files": {
+            "drill-session.json": "5af740cbcfca17c4b199bfc5371512132d57aa69266374aec5755c857a688eab",
+            "mistakes.json": "5fbd15db195e4468bc33a4981b9981b326ba43e16e689c22ba61b81811cdae95",
+            "profile-events.jsonl": "62654758ac8d75b27ffc27c543e80230b3e2e8a406ea769504cc77e800778b71",
+            "profile.json": "e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "d67dbb608e4e592f255802e899b64ec80913afcb51d2845edaf84499f8b5a6cc",
+              "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+              "profile-events.jsonl": "62654758ac8d75b27ffc27c543e80230b3e2e8a406ea769504cc77e800778b71",
+              "profile.json": "e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json"
+            ],
+            "dto": "a2fe02bd16d057117e64d4f4cbc2cd64cd67addf21f6376b9b7d6a5b68addf5d"
+          }
+        },
+        {
+          "id": "05-srs-written",
+          "boundary": "renameSync after srs-written",
+          "applied": {
+            "srs": false,
+            "bank": true,
+            "profile": true
+          },
+          "files": {
+            "drill-session.json": "5af740cbcfca17c4b199bfc5371512132d57aa69266374aec5755c857a688eab",
+            "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+            "profile-events.jsonl": "62654758ac8d75b27ffc27c543e80230b3e2e8a406ea769504cc77e800778b71",
+            "profile.json": "e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "d67dbb608e4e592f255802e899b64ec80913afcb51d2845edaf84499f8b5a6cc",
+              "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+              "profile-events.jsonl": "62654758ac8d75b27ffc27c543e80230b3e2e8a406ea769504cc77e800778b71",
+              "profile.json": "e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json"
+            ],
+            "dto": "a2fe02bd16d057117e64d4f4cbc2cd64cd67addf21f6376b9b7d6a5b68addf5d"
+          }
+        },
+        {
+          "id": "06-srs-flag-saved",
+          "boundary": "renameSync after srs-flag-saved",
+          "issueCheckpoint": "srs-applied-pending-not-cleared",
+          "applied": {
+            "srs": true,
+            "bank": true,
+            "profile": true
+          },
+          "files": {
+            "drill-session.json": "740a1cadedc9d224038bbe6af649390c46fcf7da02f91a425ea6ecfb6b74d914",
+            "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+            "profile-events.jsonl": "62654758ac8d75b27ffc27c543e80230b3e2e8a406ea769504cc77e800778b71",
+            "profile.json": "e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "d67dbb608e4e592f255802e899b64ec80913afcb51d2845edaf84499f8b5a6cc",
+              "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+              "profile-events.jsonl": "62654758ac8d75b27ffc27c543e80230b3e2e8a406ea769504cc77e800778b71",
+              "profile.json": "e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json"
+            ],
+            "dto": "a2fe02bd16d057117e64d4f4cbc2cd64cd67addf21f6376b9b7d6a5b68addf5d"
+          }
+        },
+        {
+          "id": "07-committed",
+          "boundary": "renameSync after committed",
+          "issueCheckpoint": "complete",
+          "applied": null,
+          "files": {
+            "drill-session.json": "d67dbb608e4e592f255802e899b64ec80913afcb51d2845edaf84499f8b5a6cc",
+            "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+            "profile-events.jsonl": "62654758ac8d75b27ffc27c543e80230b3e2e8a406ea769504cc77e800778b71",
+            "profile.json": "e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "d67dbb608e4e592f255802e899b64ec80913afcb51d2845edaf84499f8b5a6cc",
+              "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+              "profile-events.jsonl": "62654758ac8d75b27ffc27c543e80230b3e2e8a406ea769504cc77e800778b71",
+              "profile.json": "e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [],
+            "dto": "a2fe02bd16d057117e64d4f4cbc2cd64cd67addf21f6376b9b7d6a5b68addf5d"
+          }
+        }
+      ]
+    },
+    {
+      "id": "c-v1-mixed",
+      "source": {
+        "id": "local-preflop-baseline",
+        "version": "1.0.0",
+        "contentSha256": "7df129ed8503a3df45058a13a52e05b1f8db8d8dd029dd65c31d98c94a9e9eaf"
+      },
+      "grade": "mixed",
+      "attemptNo": 0,
+      "questionId": "drill:1.0.0:6max-100bb-bb-vs-single-raise:A8s:1",
+      "evaluationId": "2b71ffff41d15408934a65fa7446d46f9bf15fdde1a5b034e109ca454e022942:d-1-preflop-0:local-preflop-baseline@1.0.0",
+      "srsPatch": {
+        "mistakeId": "45ebfa8ef610d84a06ff560bffc20789743451a525db7b59dfe8b710ef9b36b1:d-1-preflop-0:local-preflop-baseline@1.0.0",
+        "before": {
+          "lastReviewedAt": null,
+          "nextReviewAt": "2026-10-01T09:03:20.000Z",
+          "intervalDays": 1,
+          "ease": 2.3,
+          "attempts": 0,
+          "correctStreak": 0,
+          "lapses": 0
+        },
+        "patch": {
+          "lastReviewedAt": "2026-10-06T09:00:20.000Z",
+          "attempts": 1,
+          "intervalDays": 1,
+          "ease": 2.3,
+          "lapses": 0,
+          "nextReviewAt": "2026-10-07T09:00:20.000Z"
+        }
+      },
+      "checkpoints": [
+        {
+          "id": "00-pending-saved",
+          "boundary": "renameSync after pending-saved",
+          "issueCheckpoint": "unapplied",
+          "applied": {
+            "srs": false,
+            "bank": false,
+            "profile": false
+          },
+          "files": {
+            "drill-session.json": "52e7705fd58dff742005c9aef487927326205bc7dc756211f9b64d5d7d14d8ca",
+            "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+            "profile-events.jsonl": "62654758ac8d75b27ffc27c543e80230b3e2e8a406ea769504cc77e800778b71",
+            "profile.json": "e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "acb1ee92671f784a5828759fee1f893ee3b01cfeaca9d20effa51175d1e95612",
+              "mistakes.json": "af4aaf15367b0852c3996abe4f3c6775182cb40da6c6b32f563d901a57bdb8b2",
+              "profile-events.jsonl": "48c8fab980db710cccfb5c1d543c577c27bafbc14a1cf7e1e748ca9b9ee80b36",
+              "profile.json": "5fad060947d676b1e8dbf2aa3f9ebf95545f806e40dde3fbf79cd11cd4db4131"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "dto": "f2a47795aa46f4bc755483a3b7a522a3866abbeeec84e1969e408537c692f076"
+          }
+        },
+        {
+          "id": "01-profile-event-appended",
+          "boundary": "closeSync after profile-event-appended",
+          "applied": {
+            "srs": false,
+            "bank": false,
+            "profile": false
+          },
+          "files": {
+            "drill-session.json": "52e7705fd58dff742005c9aef487927326205bc7dc756211f9b64d5d7d14d8ca",
+            "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+            "profile-events.jsonl": "1631c767223055efb19a3d24f842b25d7167e49839e5620999eba18b76afee56",
+            "profile.json": "e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "acb1ee92671f784a5828759fee1f893ee3b01cfeaca9d20effa51175d1e95612",
+              "mistakes.json": "af4aaf15367b0852c3996abe4f3c6775182cb40da6c6b32f563d901a57bdb8b2",
+              "profile-events.jsonl": "1631c767223055efb19a3d24f842b25d7167e49839e5620999eba18b76afee56",
+              "profile.json": "e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json"
+            ],
+            "dto": "f2a47795aa46f4bc755483a3b7a522a3866abbeeec84e1969e408537c692f076"
+          }
+        },
+        {
+          "id": "02-profile-projection-written",
+          "boundary": "renameSync after profile-projection-written",
+          "applied": {
+            "srs": false,
+            "bank": false,
+            "profile": false
+          },
+          "files": {
+            "drill-session.json": "52e7705fd58dff742005c9aef487927326205bc7dc756211f9b64d5d7d14d8ca",
+            "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+            "profile-events.jsonl": "1631c767223055efb19a3d24f842b25d7167e49839e5620999eba18b76afee56",
+            "profile.json": "b572ca0c388254f30174259f9055ea99e647c6d987923402d6f396fa99467517"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "acb1ee92671f784a5828759fee1f893ee3b01cfeaca9d20effa51175d1e95612",
+              "mistakes.json": "af4aaf15367b0852c3996abe4f3c6775182cb40da6c6b32f563d901a57bdb8b2",
+              "profile-events.jsonl": "1631c767223055efb19a3d24f842b25d7167e49839e5620999eba18b76afee56",
+              "profile.json": "b572ca0c388254f30174259f9055ea99e647c6d987923402d6f396fa99467517"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json"
+            ],
+            "dto": "f2a47795aa46f4bc755483a3b7a522a3866abbeeec84e1969e408537c692f076"
+          }
+        },
+        {
+          "id": "03-profile-flag-saved",
+          "boundary": "renameSync after profile-flag-saved",
+          "issueCheckpoint": "profile-only",
+          "applied": {
+            "srs": false,
+            "bank": false,
+            "profile": true
+          },
+          "files": {
+            "drill-session.json": "111d6492a017e0737b8dd105208b7c253e34b1666b6bb51854d42ae55fa5b1fe",
+            "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+            "profile-events.jsonl": "1631c767223055efb19a3d24f842b25d7167e49839e5620999eba18b76afee56",
+            "profile.json": "b572ca0c388254f30174259f9055ea99e647c6d987923402d6f396fa99467517"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "acb1ee92671f784a5828759fee1f893ee3b01cfeaca9d20effa51175d1e95612",
+              "mistakes.json": "af4aaf15367b0852c3996abe4f3c6775182cb40da6c6b32f563d901a57bdb8b2",
+              "profile-events.jsonl": "1631c767223055efb19a3d24f842b25d7167e49839e5620999eba18b76afee56",
+              "profile.json": "b572ca0c388254f30174259f9055ea99e647c6d987923402d6f396fa99467517"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json"
+            ],
+            "dto": "f2a47795aa46f4bc755483a3b7a522a3866abbeeec84e1969e408537c692f076"
+          }
+        },
+        {
+          "id": "04-bank-flag-saved",
+          "boundary": "renameSync after bank-flag-saved",
+          "issueCheckpoint": "through-bank",
+          "applied": {
+            "srs": false,
+            "bank": true,
+            "profile": true
+          },
+          "files": {
+            "drill-session.json": "6db94725002ac4b2f885c05819ed6ed7e0781addf4ef46fcd59cdc924ba6abda",
+            "mistakes.json": "b92deaa71c09e77443e7ad86fe52aa57de79c2055fd72c554afc8eb48fe79748",
+            "profile-events.jsonl": "1631c767223055efb19a3d24f842b25d7167e49839e5620999eba18b76afee56",
+            "profile.json": "b572ca0c388254f30174259f9055ea99e647c6d987923402d6f396fa99467517"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "acb1ee92671f784a5828759fee1f893ee3b01cfeaca9d20effa51175d1e95612",
+              "mistakes.json": "af4aaf15367b0852c3996abe4f3c6775182cb40da6c6b32f563d901a57bdb8b2",
+              "profile-events.jsonl": "1631c767223055efb19a3d24f842b25d7167e49839e5620999eba18b76afee56",
+              "profile.json": "b572ca0c388254f30174259f9055ea99e647c6d987923402d6f396fa99467517"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json",
+              "mistakes.json"
+            ],
+            "dto": "f2a47795aa46f4bc755483a3b7a522a3866abbeeec84e1969e408537c692f076"
+          }
+        },
+        {
+          "id": "05-srs-written",
+          "boundary": "renameSync after srs-written",
+          "applied": {
+            "srs": false,
+            "bank": true,
+            "profile": true
+          },
+          "files": {
+            "drill-session.json": "6db94725002ac4b2f885c05819ed6ed7e0781addf4ef46fcd59cdc924ba6abda",
+            "mistakes.json": "af4aaf15367b0852c3996abe4f3c6775182cb40da6c6b32f563d901a57bdb8b2",
+            "profile-events.jsonl": "1631c767223055efb19a3d24f842b25d7167e49839e5620999eba18b76afee56",
+            "profile.json": "b572ca0c388254f30174259f9055ea99e647c6d987923402d6f396fa99467517"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "acb1ee92671f784a5828759fee1f893ee3b01cfeaca9d20effa51175d1e95612",
+              "mistakes.json": "af4aaf15367b0852c3996abe4f3c6775182cb40da6c6b32f563d901a57bdb8b2",
+              "profile-events.jsonl": "1631c767223055efb19a3d24f842b25d7167e49839e5620999eba18b76afee56",
+              "profile.json": "b572ca0c388254f30174259f9055ea99e647c6d987923402d6f396fa99467517"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json"
+            ],
+            "dto": "f2a47795aa46f4bc755483a3b7a522a3866abbeeec84e1969e408537c692f076"
+          }
+        },
+        {
+          "id": "06-srs-flag-saved",
+          "boundary": "renameSync after srs-flag-saved",
+          "issueCheckpoint": "srs-applied-pending-not-cleared",
+          "applied": {
+            "srs": true,
+            "bank": true,
+            "profile": true
+          },
+          "files": {
+            "drill-session.json": "84064db9d6aad202f0646a8d9f87b088dcb9f9fab3672d7c8aa9fcdb43d9dda3",
+            "mistakes.json": "af4aaf15367b0852c3996abe4f3c6775182cb40da6c6b32f563d901a57bdb8b2",
+            "profile-events.jsonl": "1631c767223055efb19a3d24f842b25d7167e49839e5620999eba18b76afee56",
+            "profile.json": "b572ca0c388254f30174259f9055ea99e647c6d987923402d6f396fa99467517"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "acb1ee92671f784a5828759fee1f893ee3b01cfeaca9d20effa51175d1e95612",
+              "mistakes.json": "af4aaf15367b0852c3996abe4f3c6775182cb40da6c6b32f563d901a57bdb8b2",
+              "profile-events.jsonl": "1631c767223055efb19a3d24f842b25d7167e49839e5620999eba18b76afee56",
+              "profile.json": "b572ca0c388254f30174259f9055ea99e647c6d987923402d6f396fa99467517"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [
+              "drill-session.json"
+            ],
+            "dto": "f2a47795aa46f4bc755483a3b7a522a3866abbeeec84e1969e408537c692f076"
+          }
+        },
+        {
+          "id": "07-committed",
+          "boundary": "renameSync after committed",
+          "issueCheckpoint": "complete",
+          "applied": null,
+          "files": {
+            "drill-session.json": "acb1ee92671f784a5828759fee1f893ee3b01cfeaca9d20effa51175d1e95612",
+            "mistakes.json": "af4aaf15367b0852c3996abe4f3c6775182cb40da6c6b32f563d901a57bdb8b2",
+            "profile-events.jsonl": "1631c767223055efb19a3d24f842b25d7167e49839e5620999eba18b76afee56",
+            "profile.json": "b572ca0c388254f30174259f9055ea99e647c6d987923402d6f396fa99467517"
+          },
+          "expected": {
+            "files": {
+              "drill-session.json": "acb1ee92671f784a5828759fee1f893ee3b01cfeaca9d20effa51175d1e95612",
+              "mistakes.json": "af4aaf15367b0852c3996abe4f3c6775182cb40da6c6b32f563d901a57bdb8b2",
+              "profile-events.jsonl": "1631c767223055efb19a3d24f842b25d7167e49839e5620999eba18b76afee56",
+              "profile.json": "b572ca0c388254f30174259f9055ea99e647c6d987923402d6f396fa99467517"
+            },
+            "entries": [
+              "drill-session.json",
+              "mistakes.json",
+              "profile-events.jsonl",
+              "profile.json"
+            ],
+            "rewritten": [],
+            "dto": "f2a47795aa46f4bc755483a3b7a522a3866abbeeec84e1969e408537c692f076"
+          }
+        }
+      ]
+    }
+  ],
+  "negativeControls": {
+    "codeTree": "220dc18ed9a5f70e2a7315f224c0043065360abc",
+    "unmodified": {
+      "checkpoints": 25,
+      "mismatches": 0
+    },
+    "mutations": [
+      {
+        "id": "v1-patch-rederived-as-v2",
+        "description": "recovery re-derives a v1 pending patch with the SR v2 formula",
+        "files": [
+          "tools/drill-cli.js"
+        ],
+        "detected": true,
+        "mismatches": 22,
+        "first": [
+          "a-v2-off-policy/00-pending-saved: recovery failed PENDING_UNRESOLVED: SRS target is not the captured absolute transition",
+          "a-v2-off-policy/01-profile-event-appended: recovery failed PENDING_UNRESOLVED: SRS target is not the captured absolute transition",
+          "a-v2-off-policy/02-profile-projection-written: recovery failed PENDING_UNRESOLVED: SRS target is not the captured absolute transition"
+        ]
+      },
+      {
+        "id": "srs-target-marked-v2",
+        "description": "applying the captured v1 target also stamps srsVersion 2 on the review",
+        "files": [
+          "tools/drill-cli.js"
+        ],
+        "detected": true,
+        "mismatches": 48,
+        "first": [
+          "a-v2-off-policy/00-pending-saved: mistakes.json 409b40145a9053727d38ebdfab7f35e258ed6a20d7d399b31983b28d68fa9976 != b37db24f64c767b5943f3c4fac8006fa1adf3bc0be9af89675d134e3d19ee9e2",
+          "a-v2-off-policy/00-pending-saved: a-v2-off-policy: the SR v1 target is not the captured one",
+          "a-v2-off-policy/00-pending-saved: a-v2-off-policy: review 4bd14df11215e3d29faa438aacca58c9c8d1055ad045904ee43720d91b9ae7d8:d-1-preflop-0:local-preflop-baseline@2.0.0 gained SR v2 fields"
+        ]
+      },
+      {
+        "id": "srs-attempt-counted-twice",
+        "description": "the SRS write adds another attempt on top of the captured target",
+        "files": [
+          "tools/drill-cli.js"
+        ],
+        "detected": true,
+        "mismatches": 32,
+        "first": [
+          "a-v2-off-policy/00-pending-saved: mistakes.json dd0148f9bf92f8f5a0df9fa93716776c35654b2123c23954d543a35dfd9acf95 != b37db24f64c767b5943f3c4fac8006fa1adf3bc0be9af89675d134e3d19ee9e2",
+          "a-v2-off-policy/00-pending-saved: a-v2-off-policy: the SR v1 target is not the captured one",
+          "a-v2-off-policy/01-profile-event-appended: mistakes.json dd0148f9bf92f8f5a0df9fa93716776c35654b2123c23954d543a35dfd9acf95 != b37db24f64c767b5943f3c4fac8006fa1adf3bc0be9af89675d134e3d19ee9e2"
+        ]
+      },
+      {
+        "id": "profile-event-duplicated",
+        "description": "recovery ignores the journal proof and the store appends without its duplicate check",
+        "files": [
+          "tools/drill-cli.js",
+          "training/profile-store.js"
+        ],
+        "detected": true,
+        "mismatches": 6,
+        "first": [
+          "a-v2-off-policy/01-profile-event-appended: profile.json 19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e != c9c451ee407421690a5358b23a9139006887fb65a354a84e184e86c9cb92f523",
+          "a-v2-off-policy/01-profile-event-appended: rewrote [\"drill-session.json\",\"mistakes.json\",\"profile.json\"], producer rewrote [\"drill-session.json\",\"mistakes.json\"]",
+          "b-v2-preferred/01-profile-event-appended: profile.json e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417 != 19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+        ]
+      },
+      {
+        "id": "profile-consumer-reapplied",
+        "description": "recovery re-applies a profile event the journal already holds",
+        "files": [
+          "tools/drill-cli.js"
+        ],
+        "detected": true,
+        "mismatches": 6,
+        "first": [
+          "a-v2-off-policy/01-profile-event-appended: profile.json 19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e != c9c451ee407421690a5358b23a9139006887fb65a354a84e184e86c9cb92f523",
+          "a-v2-off-policy/01-profile-event-appended: rewrote [\"drill-session.json\",\"mistakes.json\",\"profile.json\"], producer rewrote [\"drill-session.json\",\"mistakes.json\"]",
+          "b-v2-preferred/01-profile-event-appended: profile.json e3201c601c8f0d24a5ab1113944e2d04b81267cb2313e67333ddbd40a13a7417 != 19621228221c60e1c5825580da20b80eedeae0e99c6bce0da4cee33819fb144e"
+        ]
+      },
+      {
+        "id": "session-rewritten-without-pending",
+        "description": "loading a session with nothing pending persists it again",
+        "files": [
+          "tools/drill-cli.js"
+        ],
+        "detected": true,
+        "mismatches": 28,
+        "first": [
+          "a-v2-off-policy/08-committed: rewrote [\"drill-session.json\"], producer rewrote []",
+          "b-v2-preferred/07-committed: rewrote [\"drill-session.json\"], producer rewrote []",
+          "c-v1-mixed/07-committed: rewrote [\"drill-session.json\"], producer rewrote []"
+        ]
+      }
+    ]
+  }
+}
