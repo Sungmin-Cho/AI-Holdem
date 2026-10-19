@@ -78,7 +78,7 @@ test('current recovery of every SR v1 checkpoint matches the producer\'s own rec
 // The bank, profile and SRS writers refuse most of these before they reach a
 // file, so the negative controls cannot exercise every semantic check; this
 // does, on the producer's own recovered bytes.
-test('the semantic checks name each duplicate, rewrite and conversion', () => {
+test('each semantic check names its own failure on the producer\'s recovered bytes', () => {
   const tx = manifest.transactions.find((row) => row.id === 'a-v2-off-policy');
   const before = fixture.filesOf(tx.checkpoints[0].files);
   const after = fixture.filesOf(tx.checkpoints[0].expected.files);
@@ -105,6 +105,22 @@ test('the semantic checks name each duplicate, rewrite and conversion', () => {
     ['event appended twice', 'profile-events.jsonl', () => `${lines.join('\n')}\n${own}\n`, /2 learning events for the transaction/],
     ['earlier event rewritten', 'profile-events.jsonl', () => `${lines.slice(1).join('\n')}\n`, /earlier learning events were rewritten/],
     ['pending left in place', 'drill-session.json', () => ({ ...json('drill-session.json'), pending: {} }), /pending was not cleared/],
+    ['session index moved past the answer', 'drill-session.json', () => {
+      const session = json('drill-session.json');
+      session.index += 1;
+      return session;
+    }, /index \d+, expected \d+/],
+    ['answer recorded with another grade', 'drill-session.json', () => {
+      const session = json('drill-session.json');
+      session.answers[tx.attemptNo].grade = 'preferred';
+      return session;
+    }, /the answer was not committed to its question/],
+    ['another review gained graduatedAt', 'mistakes.json', () => {
+      const bank = json('mistakes.json');
+      const other = Object.keys(bank.reviewState).find((id) => id !== tx.srsPatch.mistakeId);
+      bank.reviewState[other].graduatedAt = null;
+      return bank;
+    }, /gained SR v2 fields/],
   ];
   for (const [label, rel, make, expected] of variants) {
     const value = make();
