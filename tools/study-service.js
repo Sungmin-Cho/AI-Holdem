@@ -86,7 +86,7 @@ export async function runCleanupStep(step, fn, { deadline, platform = process.pl
     let failure;
     setProofPhase('stop');
     try {
-      if (tries === 1) fn(); else withPlatformDeadline(deadline, fn);
+      if (tries === 1) fn(); else withPlatformDeadline(deadline, fn, { now });
       return true;
     } catch (error) { failure = error; } finally { setProofPhase(null); }
     if (!transientCleanupError(failure, platform) || now() >= deadline) {
