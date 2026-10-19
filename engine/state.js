@@ -301,27 +301,78 @@ function sweepOrphanAsides(dir) {
 }
 
 // 비재귀 rmdir. 비어 있지 않은 디렉터리(pid를 기록한 산 락 포함)는 절대 쓸리지 않는다.
-// ENOTEMPTY가 고아 aside 때문이면 한 번 치우고 다시 시도한다.
-function rmdirReclaimed(dir) {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      fs.rmdirSync(dir);
-      return true;
-    } catch (error) {
-      if (error.code === 'ENOENT') return true; // another reclaimer finished the job
-      if (error.code !== 'ENOTEMPTY' && error.code !== 'EEXIST') throw error;
-      if (attempt > 0 || sweepOrphanAsides(dir).removed === 0) return false;
-    }
-  }
+// ENOTEMPTY가 고아 aside 때문이면 한 번 치우고 다시 시도한다. 제거 자체는 removeDeletedLockDir가
+// 한다(#265 A): Windows에서 다른 프로세스가 쥔 채 지워진 이름은 그 핸들이 닫힐 때까지 남는다.
+function rmdirReclaimed(dir, expected) {
+  if (removeDeletedLockDir(dir, expected)) return true; // ENOENT: another reclaimer finished the job
+  if (sweepOrphanAsides(dir).removed === 0) return false;
+  return removeDeletedLockDir(dir, expected);
 }
 
 // pid 파일 없이 aside만 남은 디렉터리는 보유 중이 아니다: 보유자는 항상 dir/pid를 가지며
 // 새 락은 aside를 가질 수 없다(link의 원본이 dir/pid이므로). 고아 aside를 치우고 비면
 // 즉시 rmdir한다. 해당 없음(aside 없음)이면 null.
-function reclaimAsideLeftovers(dir) {
+function reclaimAsideLeftovers(dir, expected) {
   if (listReclaimAsides(dir).length === 0) return null;
   if (sweepOrphanAsides(dir).remaining > 0) return false;
-  return rmdirReclaimed(dir);
+  return rmdirReclaimed(dir, expected);
+}
+
+// #265 A: before libuv 1.49 (Node 20) a Windows delete is delete-on-close. While another process
+// holds a name that was deleted — a client reading a lock, a PowerShell ACL proof — the name stays:
+// opening or stat-ing it answers EPERM, and its directory answers ENOTEMPTY to rmdir until that
+// handle closes. A directory removed while another process holds it stays behind it the same way.
+// Giving up then leaves a lock directory that every later reader takes for an owner it cannot
+// identify, forever; returning while its removal is pending hands the next owner a lock it cannot
+// read or install. Those holders are short — a whole proof child took 0.2 s at the median and
+// 1.3 s at most in 3,216 CI runs of one, a read takes milliseconds — so whoever removes a lock
+// directory waits for them, bounded. It waits while every name left is a lock name (pid, reclaim
+// asides) that cannot be read (EPERM, which a delete-pending name answers; so does a name an ACL
+// refuses, and that costs only the bounded wait) or is gone. A readable name — a live owner's pid,
+// a live reclaimer's aside — anything else in the directory, a replaced directory, or any other
+// platform ends the wait. The wait never removes a name: rmdir is not recursive, and a live lock
+// is installed already holding its pid, so no directory a live owner holds can be removed.
+// ENOTEMPTY that outlasts the wait leaves the directory, as before; EPERM/EBUSY from rmdir itself
+// is thrown, as before. Exported for the decision tests only.
+const DELETE_PENDING_RETRY_MS = 20;
+export const DELETE_PENDING_WAIT_MS = 2000;
+const lockDirOps = {
+  rmdir: (dir) => fs.rmdirSync(dir),
+  readdir: (dir) => fs.readdirSync(dir),
+  lstat: (file) => fs.lstatSync(file),
+  identity: (dir) => inodeKey(dir),
+};
+const lockName = (name) => name === 'pid' || RECLAIM_ASIDE.test(name);
+export function removeDeletedLockDir(dir, expected, {
+  waitMs = DELETE_PENDING_WAIT_MS, platform = process.platform,
+  ops = lockDirOps, sleep = sleepSync, now = () => performance.now(),
+} = {}) {
+  const deadline = now() + Math.max(0, Math.min(DELETE_PENDING_WAIT_MS, waitMs ?? DELETE_PENDING_WAIT_MS));
+  const windows = platform === 'win32';
+  const codeOf = (fn) => { try { fn(); return null; } catch (error) { return error.code ?? 'UNKNOWN'; } };
+  const stillExpected = () => { try { return sameInode(expected, ops.identity(dir)); } catch { return false; } };
+  const onlyDeletedNames = () => {
+    if (!stillExpected()) return false;
+    let names;
+    try { names = ops.readdir(dir); } catch { return false; }
+    // An empty listing: the holder closed them after the rmdir failed.
+    return names.every((name) => lockName(name) && ['EPERM', 'ENOENT'].includes(codeOf(() => ops.lstat(path.join(dir, name)))));
+  };
+  for (;;) {
+    let failure = null;
+    try { ops.rmdir(dir); } catch (error) { failure = error; }
+    if (!failure) {
+      // Removed. On Windows the removal itself can still be pending behind a holder of the
+      // directory; the name is gone, or answers anything but EPERM, once it is not.
+      while (windows && codeOf(() => ops.lstat(dir)) === 'EPERM' && now() < deadline) sleep(DELETE_PENDING_RETRY_MS);
+      return true;
+    }
+    if (failure.code === 'ENOENT') return true;
+    const notEmpty = failure.code === 'ENOTEMPTY' || failure.code === 'EEXIST';
+    if (notEmpty && (!windows || now() >= deadline || !onlyDeletedNames())) return false;
+    if (!notEmpty && (!windows || !['EPERM', 'EBUSY'].includes(failure.code) || now() >= deadline || !stillExpected())) throw failure;
+    sleep(DELETE_PENDING_RETRY_MS);
+  }
 }
 
 /**
@@ -389,7 +440,13 @@ function detachStalePidFile(dir, expected, hooks) {
       fs.closeSync(fd);
     }
     if (matches) {
-      const now = readPidFile(dir);
+      let now;
+      try { now = readPidFile(dir); } catch (error) {
+        // #265 A: on Windows a pid file deleted — by its owner or another reclaimer — while a reader
+        // holds it answers EPERM until that reader closes it. It is not the file judged here.
+        if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+        now = null;
+      }
       if (!now || now.pid !== expectedPidFile.pid || now.startTime !== expectedPidFile.startTime
         || (now.evidence ?? null) !== (expectedPidFile.evidence ?? null)) {
         matches = false;
@@ -398,9 +455,8 @@ function detachStalePidFile(dir, expected, hooks) {
     if (!matches) {
       dropAside();
       // 그 사이 소유자가 해제하며 우리 aside 때문에 rmdir에 실패했다면 여기서 치운다.
-      try { fs.rmdirSync(dir); } catch (error) {
-        if (error.code !== 'ENOTEMPTY' && error.code !== 'EEXIST' && error.code !== 'ENOENT') throw error;
-      }
+      // 그 pid가 아직 delete pending이면 그것까지 기다린다(#265 A).
+      removeDeletedLockDir(dir, expected);
       return false;
     }
     hooks?.beforeUnlinkPid?.(dir);
@@ -418,7 +474,7 @@ function reclaimMutex(dir, hooks) {
   const decided = mutexIdentity(dir);
   if (!decided) return false;
   if (!decided.pidFile) {
-    const leftovers = reclaimAsideLeftovers(dir);
+    const leftovers = reclaimAsideLeftovers(dir, decided);
     if (leftovers !== null) return leftovers;
   }
   if (!isIdentityStale(decided)) return false;
@@ -427,7 +483,7 @@ function reclaimMutex(dir, hooks) {
   hooks?.afterJudge?.(dir);
   if (!detachStalePidFile(dir, confirmed, hooks)) return false;
   hooks?.beforeRmdir?.(dir);
-  return rmdirReclaimed(dir);
+  return rmdirReclaimed(dir, confirmed);
 }
 
 // Lifetime-owned locks require a complete pid+startTime identity. They never use
@@ -461,7 +517,7 @@ function sameOwnedIdentity(expected, current) {
 function reclaimOwnedMutex(dir, startTimeOf = processStartTime, hooks) {
   const decided = mutexIdentity(dir);
   if (decided && !decided.pidFile) {
-    const leftovers = reclaimAsideLeftovers(dir);
+    const leftovers = reclaimAsideLeftovers(dir, decided);
     if (leftovers !== null) return leftovers;
   }
   if (!ownedIdentityIsDead(decided, startTimeOf)) return false;
@@ -470,7 +526,7 @@ function reclaimOwnedMutex(dir, startTimeOf = processStartTime, hooks) {
   hooks?.afterJudge?.(dir);
   if (!detachStalePidFile(dir, confirmed, hooks)) return false;
   hooks?.beforeRmdir?.(dir);
-  return rmdirReclaimed(dir);
+  return rmdirReclaimed(dir, confirmed);
 }
 
 /**
@@ -979,7 +1035,7 @@ export function acquireOwnedLock(gameDir, name, { processStartTime: startTimeOf 
     }
     // pid 파일 없이 회수 aside만 남은 디렉터리는 죽은 회수자의 잔해다(보유 중이 아니다).
     const seen = mutexIdentity(dir);
-    if (seen && !seen.pidFile && reclaimAsideLeftovers(dir) === true) {
+    if (seen && !seen.pidFile && reclaimAsideLeftovers(dir, seen) === true) {
       const handle = installOwnedLock(dir, identity, hooks, state);
       if (handle) return handle;
     }
@@ -1011,7 +1067,7 @@ export function verifyOwnedLock(handle) {
   );
 }
 
-export function releaseOwnedLock(handle) {
+export function releaseOwnedLock(handle, { waitMs } = {}) {
   const current = mutexIdentity(handle.dir);
   const pidFile = current?.pidFile;
   if (
@@ -1021,9 +1077,5 @@ export function releaseOwnedLock(handle) {
     || pidFile.startTime !== handle.startTime
   ) return;
   if (!unlinkStalePidFileLegacy(handle.dir, pidFile)) return;
-  try {
-    fs.rmdirSync(handle.dir);
-  } catch (error) {
-    if (error.code !== 'ENOENT' && error.code !== 'ENOTEMPTY') throw error;
-  }
+  removeDeletedLockDir(handle.dir, handle, { waitMs });
 }
