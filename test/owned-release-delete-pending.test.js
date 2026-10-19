@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
 import { studyBudget } from './helpers/platform.js';
 import { descriptorPath, lockPath, launch, service, until } from './helpers/study-service-fixtures.mjs';
-import { acquireOwnedLock, releaseOwnedLock, readOwnedLock, removeDeletedLockDir, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
+import { acquireOwnedLock, releaseOwnedLock, readOwnedLock, removeDeletedLockDir, withNamedLock, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
 import { platformTimeout, platformNow, withPlatformDeadline } from '../shared/platform-files.js';
 
 const [UV_MAJOR, UV_MINOR] = process.versions.uv.split('.').map(Number);
@@ -542,4 +542,152 @@ test('#265 A: a lock directory without a readable owner still fails closed for i
   await assert.rejects(api.inspectStudyService(storeDir), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
   await assert.rejects(api.stopStudyService(storeDir, { expectedInstanceId: handle.instanceId }), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
   assert.deepEqual(fs.readdirSync(lockPath(storeDir)), [], 'an unknown owner is preserved');
+});
+
+// #265: the short mutex (withNamedLock, withMutation, runExclusive) — publish.lock.d, which every
+// coach-control and publish child takes, .mutex, the training and drill locks. Its waiters poll the
+// owner's pid file every retry, so on a contended lock a waiter often has it open when the owner
+// releases. Before libuv 1.49 on Windows that leaves the name pending behind the waiter: a release
+// that took the directory's ENOTEMPTY as final left an empty directory, which every waiter then takes
+// for a lock inside its mkdir→pid window until it is 6 s old (MUTEX_STALE_MS) — past the 3 s default
+// wait, and a 6 s stall for a coach child under a finalization deadline. A third process opening the
+// pending name meanwhile got EPERM, and its acquire threw it.
+const STATE_HREF = new URL('../engine/state.js', import.meta.url).href;
+
+// Takes the mutex `name` under `root` once, polling every `retryMs`, and reports how it went.
+const WAITER = `
+import { withNamedLock } from ${JSON.stringify(STATE_HREF)};
+import { performance } from 'node:perf_hooks';
+const [root, name, retryMs, timeoutMs] = process.argv.slice(1);
+process.stdout.write('waiting\\n');
+const started = performance.now();
+try {
+  await withNamedLock(root, name, () => {}, { retryMs: Number(retryMs), timeoutMs: Number(timeoutMs) });
+  process.stdout.write('acquired ' + Math.round(performance.now() - started) + '\\n');
+} catch (error) {
+  process.stdout.write('failed ' + (error.code ?? error.message) + ' ' + Math.round(performance.now() - started) + '\\n');
+}`;
+
+function waitForMutex(root, name, { retryMs = 5, timeoutMs = 15_000 } = {}) {
+  const child = registerOwnedProcess(spawn(process.execPath, ['--input-type=module', '-e', WAITER, root, name, String(retryMs), String(timeoutMs)],
+    { stdio: ['ignore', 'pipe', 'pipe'] }), 'short mutex waiter');
+  let out = '', err = '';
+  child.stdout.on('data', (chunk) => { out += chunk; });
+  child.stderr.on('data', (chunk) => { err += chunk; });
+  const closed = new Promise((resolve) => child.on('close', (code) => resolve({ code, out, err })));
+  const waiting = new Promise((resolve, reject) => {
+    child.stdout.on('data', () => { if (out.includes('waiting\n')) resolve(); });
+    closed.then(({ code }) => reject(new Error(`waiter exited ${code} before waiting: ${err}`)));
+  });
+  return { waiting, closed };
+}
+
+test('#265 short mutex: a release leaves no lock directory although another process held its pid file across it', async (t) => {
+  const root = createOwnedTempDir('holdem-mutex-release-held');
+  const dir = path.join(root, 'held.lock.d');
+  let holder;
+  await withNamedLock(root, 'held.lock.d', async () => {
+    holder = holdOpen(path.join(dir, 'pid'), { lingerMs: 300 });
+    await holder.held;
+  });
+  const closed = await holder.closed;
+  t.diagnostic(`holder ${closed.out.trim().replace(/\n/g, ' | ')}`);
+  assert.equal(closed.code, 0, closed.err);
+  // Judged after the holder closed: what is still here is the empty leftover.
+  assert.equal(absent(dir), true, `the released lock directory remains: [${fs.existsSync(dir) ? fs.readdirSync(dir).join(',') : ''}]`);
+  // The next owner, on the default 3 s wait, takes it at once.
+  const started = performance.now();
+  await withNamedLock(root, 'held.lock.d', () => {});
+  assert.ok(performance.now() - started < 1000, `the next acquire waited ${Math.round(performance.now() - started)} ms`);
+});
+
+test('#265 short mutex: a waiter that meets the pid file pending deletion behind another reader waits for the release instead of failing', async (t) => {
+  const root = createOwnedTempDir('holdem-mutex-waiter-pending');
+  const dir = path.join(root, 'held.lock.d');
+  let holder, waiter;
+  await withNamedLock(root, 'held.lock.d', async () => {
+    // The reader keeps the deleted name for a second; the waiter polls through all of it.
+    holder = holdOpen(path.join(dir, 'pid'), { lingerMs: 1000 });
+    await holder.held;
+    waiter = waitForMutex(root, 'held.lock.d');
+    await waiter.waiting;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+  const [held, waited] = await Promise.all([holder.closed, waiter.closed]);
+  t.diagnostic(`holder ${held.out.trim().replace(/\n/g, ' | ')}; waiter ${waited.out.trim().replace(/\n/g, ' | ')}`);
+  assert.equal(held.code, 0, held.err);
+  assert.equal(waited.code, 0, waited.err);
+  const result = /^(acquired|failed) (\S+)(?: (\d+))?$/m.exec(waited.out);
+  assert.equal(result?.[1], 'acquired', `the waiter failed: ${waited.out.trim()}`);
+  // Not the 6 s staleness of an empty leftover: the release itself made way.
+  assert.ok(Number(result[2]) < 5000, `the waiter waited ${result[2]} ms`);
+  assert.equal(absent(dir), true);
+});
+
+test('#265 short mutex: a pid file pending past the waiter\'s deadline still fails it with that EPERM', {
+  skip: WIN32 ? false : 'only Windows keeps a deleted name behind its holder',
+}, async (t) => {
+  const root = createOwnedTempDir('holdem-mutex-pending-bound');
+  const dir = path.join(root, 'held.lock.d');
+  let holder;
+  await withNamedLock(root, 'held.lock.d', async () => {
+    holder = holdOpen(path.join(dir, 'pid'), { lingerMs: 300, pendingLingerMs: DELETE_PENDING_WAIT_MS + 6000 });
+    await holder.held;
+  });
+  try {
+    if (absent(path.join(dir, 'pid'))) {
+      assert.equal(DELETE_PENDING, false, 'libuv 1.46 must keep the deleted name');
+      t.skip('this file system deletes names at once');
+      return;
+    }
+    // The name is still pending: a waiter retries it to its deadline, and then fails as it always did.
+    const started = performance.now();
+    await assert.rejects(withNamedLock(root, 'held.lock.d', () => {}, { timeoutMs: 1000, retryMs: 20 }), { code: 'EPERM' });
+    assert.ok(performance.now() - started >= 900, `the waiter gave up after ${Math.round(performance.now() - started)} ms`);
+  } finally {
+    assert.equal((await holder.closed).code, 0);
+    try { fs.rmdirSync(dir); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+});
+
+// Ordinary contention, no holder: the waiters themselves are the readers.
+const CONTENDER = `
+import { withNamedLock } from ${JSON.stringify(STATE_HREF)};
+import { performance } from 'node:perf_hooks';
+const [root, name, cycles, maxMs] = process.argv.slice(1);
+const errors = {};
+let done = 0, maxWait = 0;
+const end = performance.now() + Number(maxMs);
+while (done < Number(cycles) && performance.now() < end) {
+  const started = performance.now();
+  try {
+    await withNamedLock(root, name, () => { const until = performance.now() + 1; while (performance.now() < until); }, { retryMs: 5, timeoutMs: 20000 });
+    maxWait = Math.max(maxWait, performance.now() - started);
+    done += 1;
+  } catch (error) {
+    errors[error.code ?? 'ERROR'] = (errors[error.code ?? 'ERROR'] ?? 0) + 1;
+  }
+  await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * 10)));
+}
+process.stdout.write(JSON.stringify({ done, errors, maxWait: Math.round(maxWait) }) + '\\n');`;
+
+test('#265 short mutex: contending processes neither fail nor stall on each other\'s reads of the pid file', { timeout: 90_000 }, async (t) => {
+  const root = createOwnedTempDir('holdem-mutex-contention');
+  const runs = Array.from({ length: 4 }, () => {
+    const child = registerOwnedProcess(spawn(process.execPath, ['--input-type=module', '-e', CONTENDER, root, 'busy.lock.d', '150', '12000'],
+      { stdio: ['ignore', 'pipe', 'pipe'] }), 'short mutex contender');
+    let out = '', err = '';
+    child.stdout.on('data', (chunk) => { out += chunk; });
+    child.stderr.on('data', (chunk) => { err += chunk; });
+    return new Promise((resolve) => child.on('close', (code) => resolve({ code, out, err })));
+  });
+  const results = await Promise.all(runs);
+  const reports = results.map(({ code, out, err }) => { assert.equal(code, 0, err); return JSON.parse(out); });
+  t.diagnostic(`contenders ${JSON.stringify(reports)}`);
+  for (const report of reports) {
+    assert.deepEqual(report.errors, {}, `a contender failed: ${JSON.stringify(reports)}`);
+    // An empty leftover holds every waiter for 6 s; a fair wait here is a few milliseconds.
+    assert.ok(report.maxWait < 5000, `a contender stalled: ${JSON.stringify(reports)}`);
+  }
+  assert.equal(absent(path.join(root, 'busy.lock.d')), true);
 });
