@@ -1000,7 +1000,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // The hand whose priority already ran its course in this process (so a
   // later finalize() reconcile does not set it again).
   let finalizationPriorityDone = null;
-  const trainingMayRun = (handNo) => !resultWaitPassed()
+  // #300: a stop admits nothing either. requestStop terminates the evaluator and
+  // explainer children it finds once, then waits for every pipeline; a pipeline
+  // still between items, or queued at the explain lock, must not start a child
+  // after that sweep (the solve path's shouldStop already checks stopRequested).
+  const trainingMayRun = (handNo) => !stopRequested && !resultWaitPassed()
     && (!trainingAdmissionClosed || handNo === finalizationPriorityHand);
   const trainingMayExplain = (handNo) => trainingMayRun(handNo)
     && (finalizationPriorityHand === null || handNo === finalizationPriorityHand);
@@ -3514,6 +3518,20 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     trainingAdmissionClosed = true;
     const running = [...trainingInFlightHands, ...solveHandOf.values()].filter(Number.isInteger);
     if (running.length) writeDeferredRecord((set) => { for (const handNo of running) set.add(handNo); });
+  };
+  // #300: a stop admits nothing new either, so it records what is still running the
+  // same way. A pipeline it refuses (queued at the explain lock, or between items)
+  // never reports, and a running explainer it ends leaves its item unsealed; the
+  // next start must register those hands again. Hands are recorded, not items: like
+  // a hand a pause held back, a recorded hand re-runs every item it has not sealed,
+  // an earlier simple failure in it included. Returned as a patch for requestStop's
+  // own ownership-checked stopping write, since writeDeferredRecord writes nothing
+  // once a stop is requested.
+  const deferredRecordAtStop = () => {
+    const running = [...trainingInFlightHands, ...solveHandOf.values()].filter(Number.isInteger);
+    if (!running.length) return {};
+    const current = (readLoopState()?.trainingDeferredHands ?? []).filter(Number.isInteger);
+    return { trainingDeferredHands: [...new Set([...current, ...running])].sort((a, b) => a - b) };
   };
   const openTrainingAdmission = () => { trainingAdmissionClosed = false; };
   const reopenTrainingAdmission = () => { openTrainingAdmission(); return drainDeferredHands(); };
@@ -7915,7 +7933,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       } else {
         try {
           if (lifecycleStarted && !preserveLoopState && fs.existsSync(loopStatePath)) {
-            writeLoopState({ stopping: true, stoppedAt: undefined, stopRequestedAt: isoNow(now) });
+            writeLoopState({ stopping: true, stoppedAt: undefined, stopRequestedAt: isoNow(now), ...deferredRecordAtStop() });
           }
         } catch (error) {
           stopErrors.push(error);

@@ -328,14 +328,35 @@ async function realBackend() {
   const token = 'next-step-token';
   const server = await startDrillServer({ storeDir, port: 0, token });
   const requests = [];
+  // #301: the controller turns any thrown call into { code: 'CONNECTION' }; keep
+  // what actually threw so an assertion can name it.
+  const failures = [];
   const call = async (pathname, options = {}) => {
     const [route, init] = drillRequest(pathname, token, options);
     if (init.method === 'POST') requests.push({ pathname, body: JSON.parse(init.body) });
-    const response = await fetch(new URL(route, `http://127.0.0.1:${server.port}`), init);
-    const body = await response.json();
-    return { ...body, httpStatus: response.status, ok: response.ok && body.ok === true };
+    // #301: one connection per request. This client shares the server's event loop,
+    // and answerAll is one synchronous stretch (it never yields to the loop; seconds
+    // on a slow Windows runner). When it outlasts the server's idle close
+    // (keepAliveTimeout 5s plus Node's 1s buffer), no idle timer has run on either
+    // side. The next POST is then written on the kept-alive socket in that same turn
+    // (seen with Node 20 and 22 in CI, Node 26 locally), which cancels the client's
+    // idle timer; the server's overdue timer then closes the socket under the
+    // request, and fetch fails with ECONNRESET (a POST is never retried). A browser
+    // tab is another process, and browsers resend a request whose reused connection
+    // closed before any response; the product controller is unchanged.
+    init.headers = { ...init.headers, connection: 'close' };
+    let response = null;
+    try {
+      response = await fetch(new URL(route, `http://127.0.0.1:${server.port}`), init);
+      const body = await response.json();
+      return { ...body, httpStatus: response.status, ok: response.ok && body.ok === true };
+    } catch (error) {
+      const shape = (value) => (value ? { code: value.code ?? null, name: value.name ?? null, message: value.message ?? null } : null);
+      failures.push({ pathname, method: init.method, status: response?.status ?? null, ...shape(error), cause: shape(error.cause) });
+      throw error;
+    }
   };
-  return { storeDir, requests, call, close: () => server.close() };
+  return { storeDir, server: server.server, requests, failures, call, close: () => server.close() };
 }
 /** One browser tab: its own sessionStorage and controller state over a shared backend. */
 function tab(backend, label, api = backend.call) {
@@ -368,7 +389,7 @@ test('a stale idle tab cannot replace another tab\'s unfinished run, and a delib
     const selectors = planNextStep(base()).selectors;
 
     await a.controller.start(selectors, { protectUnfinished: true });
-    assert.equal(a.controller.state.error, null);
+    assert.equal(a.controller.state.error, null, JSON.stringify(backend.failures));
     const original = readSessionFile(backend.storeDir);
     const originalBytes = readSessionBytes(backend.storeDir);
     assert.equal(original.mode, 'assessment'); assert.equal(original.queue.length, 10); assert.equal(original.index, 0);
@@ -397,7 +418,7 @@ test('a stale idle tab cannot replace another tab\'s unfinished run, and a delib
     await b.controller.start({ mode: 'free' });
     const replacement = backend.requests.filter((request) => request.pathname === '/api/start')[2];
     assert.equal(Object.hasOwn(replacement.body, 'protectUnfinished'), false);
-    assert.equal(b.controller.state.error, null);
+    assert.equal(b.controller.state.error, null, JSON.stringify(backend.failures));
     const after = readSessionFile(backend.storeDir);
     assert.notEqual(after.sessionId, original.sessionId);
     assert.equal(after.mode, 'free');
@@ -416,9 +437,30 @@ test('a stale tab may still start the next step once the other tab\'s run is fin
     const finished = readSessionFile(backend.storeDir);
     assert.equal(finished.index, finished.queue.length);
     await b.controller.start(planNextStep(base()).selectors, { protectUnfinished: true });
-    assert.equal(b.controller.state.error, null);
+    assert.equal(b.controller.state.error, null, JSON.stringify(backend.failures));
     assert.equal(readSessionFile(backend.storeDir).mode, 'assessment');
     assert.notEqual(readSessionFile(backend.storeDir).sessionId, finished.sessionId);
+  } finally { await backend.close(); }
+});
+
+// #301: the test above failed once on Windows with CONNECTION. Same flow with its
+// slow stretch made certain: after answerAll the loop stays blocked past the
+// server's real idle close (keepAliveTimeout, 5s by default, plus Node's 1s
+// buffer), as a slow answerAll does by itself, so the next POST is written on a
+// socket whose overdue idle timer the server runs next.
+test('a stale tab\'s next request survives the server closing its idle connection meanwhile', async () => {
+  const backend = await realBackend();
+  try {
+    const a = tab(backend, 'a');
+    const b = tab(backend, 'b');
+    await a.controller.restore(); await b.controller.restore();
+    await a.controller.start({ mode: 'free' });
+    await answerAll(backend.storeDir);
+    const idleCloseMs = backend.server.keepAliveTimeout + (backend.server.keepAliveTimeoutBuffer ?? 1_000);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, idleCloseMs + 250);
+    await b.controller.start(planNextStep(base()).selectors, { protectUnfinished: true });
+    assert.equal(b.controller.state.error, null, JSON.stringify(backend.failures));
+    assert.equal(readSessionFile(backend.storeDir).mode, 'assessment');
   } finally { await backend.close(); }
 });
 
@@ -443,7 +485,7 @@ test('a lost response to a protected start is retried idempotently and its own r
     const [first, second] = backend.requests.filter((request) => request.pathname === '/api/start');
     assert.deepEqual(second.body, first.body, 'the retry is byte-for-byte the same request, guard included');
     assert.equal(first.body.protectUnfinished, true);
-    assert.equal(b.controller.state.error, null); assert.equal(b.controller.state.pending, null);
+    assert.equal(b.controller.state.error, null, JSON.stringify(backend.failures)); assert.equal(b.controller.state.pending, null);
     assert.equal(readSessionFile(backend.storeDir).sessionId, created.sessionId, 'idempotent: no second run');
     assert.equal(b.controller.state.session.sessionId, created.sessionId);
   } finally { await backend.close(); }
