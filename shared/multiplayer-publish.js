@@ -377,12 +377,26 @@ export function sessionHasParticipants(players) {
 
 // #292: whether a session has participants. A roster that can be read decides, unless the
 // engine's seats say otherwise: then neither does. A roster that cannot be read (corrupt,
-// unreadable, the wrong shape) or is absent is no evidence of a session without them: the
+// unreadable, the wrong shape, a row that is not a player) or is absent is no evidence of a
+// session without them: the
 // seats decide, and only a directory with neither file is solo. Each input is what was read,
 // `undefined` for a file that does not exist and `null` for one that could not be read.
 // 'unknown' when nothing can say.
-export function participantSessionOf({ roster, seats } = {}) {
+// A roster list whose every row is a player with its own id; null for one with a row that is
+// not (a corrupt row is no evidence of anything).
+export function usableRosterOf(roster) {
   const list = rosterListOf(roster);
+  if (!list) return null;
+  const ids = new Set();
+  for (const row of list) {
+    if (!isPlain(row) || typeof row.playerId !== 'string' || !row.playerId || ids.has(row.playerId)) return null;
+    ids.add(row.playerId);
+  }
+  return list;
+}
+
+export function participantSessionOf({ roster, seats } = {}) {
+  const list = usableRosterOf(roster);
   const seated = Array.isArray(seats) ? sessionHasParticipants(seats) : null;
   if (list) {
     const listed = sessionHasParticipants(list);

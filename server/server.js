@@ -44,6 +44,7 @@ import {
   sessionHasParticipants,
   participantSessionOf,
   rosterListOf,
+  usableRosterOf,
   nextDecisionFromViews,
 } from '../publish-contract.js';
 
@@ -305,8 +306,9 @@ function publishRoster(root, token) {
   const roster = readRosterState(root);
   const { seats } = readEngineSeatsState(root, token);
   const session = participantSessionOf({ roster, seats });
-  if (session === 'solo') return { multi: false, players: Array.isArray(roster) ? roster : [] };
-  return session === 'multi' && Array.isArray(roster) ? { multi: true, players: roster } : null;
+  const players = usableRosterOf(roster);
+  if (session === 'solo') return { multi: false, players: players ?? [] };
+  return session === 'multi' && players ? { multi: true, players } : null;
 }
 
 function lookupHandRecord(root, engineState, handNo) {

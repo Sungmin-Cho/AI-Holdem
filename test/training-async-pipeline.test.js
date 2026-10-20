@@ -630,6 +630,11 @@ test('server respawn restores training and republish is a no-op', { timeout: 20_
   const token = 'tok-restore';
   const gameEpoch = gameEpochOf(token);
   const evaluation = cannedEvaluation('d-1-preflop-0', gameEpoch);
+  // #292: a game directory always has its roster. Without one, an engine state the relay cannot
+  // read (this one is partial) is no evidence of a session without participants.
+  fs.writeFileSync(path.join(dir, 'players.json'), JSON.stringify([
+    { playerId: 'user', kind: 'human' }, { playerId: 'p1', kind: 'ai' },
+  ]));
   fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({
     sessionToken: token,
     lastHand: {

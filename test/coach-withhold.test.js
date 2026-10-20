@@ -159,12 +159,37 @@ test('#292 코치 노트 말고 다른 것도 실은 기록 attempt는 증거로
     { ...record, body: { ...record.body, coach: [...record.body.coach, ...record.body.coach] } },
   ]) {
     fs.writeFileSync(path.join(ctx.dir, '.publish-attempt.json'), JSON.stringify(mixed));
-    await assert.rejects(
-      ctx.cc.withholdQueued(withholdArgs(ctx, item, { attemptBodySha256: sha256(JSON.stringify(mixed.body)) })),
-      { code: 'WITHHOLD_TARGET_CHANGED' },
-    );
+    // Named or not, a record of this item with more than its note in it is left as it is.
+    for (const extra of [{ attemptBodySha256: sha256(JSON.stringify(mixed.body)) }, {}]) {
+      await assert.rejects(ctx.cc.withholdQueued(withholdArgs(ctx, item, extra)), { code: 'WITHHOLD_NOT_ALLOWED' });
+    }
   }
+  // So is a note with a string its digest does not cover (an extra field).
+  const extraField = { ...record, body: { ...record.body, coach: [{ ...record.body.coach[0], debug: '7c' }] } };
+  fs.writeFileSync(path.join(ctx.dir, '.publish-attempt.json'), JSON.stringify(extraField));
+  await assert.rejects(ctx.cc.withholdQueued(withholdArgs(ctx, item)), { code: 'WITHHOLD_NOT_ALLOWED' });
   assert.equal(fs.readFileSync(authFile, 'utf8'), before);
+});
+
+test('#292 이름을 대지 않은 보류도 슬롯에 남은 그 노트의 기록을 원문 그대로 보존하고 다른 항목의 기록은 건드리지 않는다', async () => {
+  const ctx = setup();
+  const item = await queueNote(ctx);
+  const recorded = recordAttempt(ctx, item, 11);
+  const out = await ctx.cc.withholdQueued(withholdArgs(ctx, item));
+  assert.equal(out.outcome, 'withheld');
+  const [evidence] = ctx.cc.loadAuthority(ctx.dir).withheldPublications;
+  assert.equal(evidence.attemptPublishId, 11);
+  assert.equal(JSON.parse(fs.readFileSync(evidence.attemptEvidencePath, 'utf8')).raw, recorded.raw);
+  // A record of another item is not this withholding's: nothing of it is kept or required.
+  const other = setup();
+  const otherItem = await queueNote(other);
+  const foreign = recordAttempt(other, otherItem, 12);
+  foreign.record.coachAuthority = { ...foreign.record.coachAuthority, queueId: `${otherItem.queueId}:other` };
+  fs.writeFileSync(path.join(other.dir, '.publish-attempt.json'), JSON.stringify(foreign.record));
+  assert.equal((await other.cc.withholdQueued(withholdArgs(other, otherItem))).outcome, 'withheld');
+  const [plain] = other.cc.loadAuthority(other.dir).withheldPublications;
+  assert.equal(plain.attemptEvidencePath, undefined);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(other.dir, '.publish-attempt.json'), 'utf8')), foreign.record);
 });
 
 test('#292 보류한 overfold 노트의 대체 노트는 overfold 표식과 lease를 이어받는다', async () => {

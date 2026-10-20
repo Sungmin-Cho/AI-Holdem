@@ -19,6 +19,7 @@ import {
   SUPPORTED_COACH_AUTHORITY_SCHEMAS,
   canonicalPayloadJson,
   gameEpochOf,
+  isBoundCoachNote,
   isCoachOnlyAttempt,
   payloadSha256,
   proofBearingCoachNote,
@@ -719,8 +720,9 @@ const WITHHOLD_REASONS = new Set(['FORBIDDEN_LITERAL']);
 // carries, so the hand shows nothing a withheld note would). A recorded attempt of the note is
 // copied, byte for byte, beside it before the publisher may remove it as stale. A note the
 // snapshot already proves published is sealed instead; a queue that no longer holds the exact
-// item named, or a recorded attempt that is not the one named, is left alone. Idempotent: the
-// same queueId again answers with what was done the first time.
+// item named, a recorded attempt that is not the one named, or one that carries more than this
+// note, is left alone. Idempotent: the same queueId again answers with what was done the first
+// time.
 function withholdLocked(auth, {
   gameDir, epoch, handNo, queueId, payloadSha256: digest, exactEnvelopePath: namedEnvelope, reason, snapshotFile,
   attemptBodySha256 = null,
@@ -748,20 +750,30 @@ function withholdLocked(auth, {
   }
   if (item.noteKind !== 'coach') fail('WITHHOLD_NOT_ALLOWED', `핸드 ${handNo} 큐 항목은 보류 대상이 아닙니다.`);
   // The recorded attempt is read under the lock the publisher sends it under, so the one kept is
-  // the one it would send.
+  // the one it would send. Whatever way the withholding was asked for, a record of this item is
+  // kept before the publisher may remove it as stale, and only a record that carries this note
+  // alone, bound to this item, may be: one with anything else in it is left as it is, and so is
+  // the queue. A record of another item is not this withholding's.
+  let read;
+  try {
+    read = readRecordedAttempt(gameDir);
+  } catch {
+    fail('WITHHOLD_TARGET_CHANGED', '기록된 게시 시도를 안전하게 읽지 못했습니다.');
+  }
+  let record = null;
+  try { record = read.absent ? null : JSON.parse(read.raw); } catch { record = null; }
+  const bodySha256 = record ? createHash('sha256').update(JSON.stringify(record.body ?? null)).digest('hex') : null;
+  const ofThisItem = record?.coachAuthority?.queueId === queueId;
+  if (attemptBodySha256 !== null && (!ofThisItem || bodySha256 !== attemptBodySha256)) {
+    fail('WITHHOLD_TARGET_CHANGED', '기록된 게시 시도가 보류 대상과 다릅니다.');
+  }
   let attempt = null;
-  if (attemptBodySha256 !== null) {
-    let read;
-    try {
-      read = readRecordedAttempt(gameDir);
-    } catch {
-      fail('WITHHOLD_TARGET_CHANGED', '기록된 게시 시도를 안전하게 읽지 못했습니다.');
+  if (ofThisItem) {
+    if (!isCoachOnlyAttempt(record) || !isBoundCoachNote(record.body.coach[0], record.coachAuthority)) {
+      fail('WITHHOLD_NOT_ALLOWED', '코치 노트 말고 다른 것도 실은 기록이라 보류하지 않습니다.');
     }
-    let record = null;
-    try { record = read.absent ? null : JSON.parse(read.raw); } catch { record = null; }
-    const bodySha256 = createHash('sha256').update(JSON.stringify(record?.body ?? null)).digest('hex');
-    if (!record || !isCoachOnlyAttempt(record) || bodySha256 !== attemptBodySha256 || record.expectedGameEpoch !== epoch
-      || record.coachAuthority?.queueId !== queueId || record.coachAuthority?.payloadSha256 !== digest) {
+    if (record.expectedGameEpoch !== epoch || record.coachAuthority.payloadSha256 !== digest
+      || record.coachAuthority.handNo !== handNo || record.coachAuthority.exactEnvelopePath !== namedEnvelope) {
       fail('WITHHOLD_TARGET_CHANGED', '기록된 게시 시도가 보류 대상과 다릅니다.');
     }
     const evidencePath = path.join(gameDir, `.coach-${epoch.slice(0, 12)}-withheld-h${handNo}-g${item.generation}.attempt.json`);

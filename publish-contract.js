@@ -28,6 +28,7 @@ export {
   sessionHasParticipants,
   participantSessionOf,
   rosterListOf,
+  usableRosterOf,
   projectForSeat,
   nextDecisionFromViews,
   EVENT_SCHEMAS,
@@ -209,6 +210,18 @@ export function isCoachOnlyAttempt(record) {
   return plainObject(record?.coachAuthority) && !record.trainingAuthority && !record.annotationAuthority
     && plainObject(body) && Array.isArray(body.coach) && body.coach.length === 1
     && Object.keys(body).every((key) => COACH_ONLY_BODY_KEYS.has(key));
+}
+
+// #292: a coach note is exactly the proof-bearing form of the queue item it names: every string
+// the participant-card rule judges is one its digest covers, and its proof is that item's. A
+// note with anything else in it (an extra field, an extra decision field) is not that item's.
+export function isBoundCoachNote(note, authority) {
+  if (!plainObject(note) || !plainObject(note.coachProof) || !plainObject(authority)
+    || typeof authority.queueId !== 'string' || note.handNo !== authority.handNo) return false;
+  const digest = payloadSha256(note);
+  return digest === authority.payloadSha256 && note.coachProof.payloadSha256 === digest
+    && note.coachProof.id === publicProofId(authority.queueId)
+    && JSON.stringify(proofBearingCoachNote(note, note.coachProof)) === JSON.stringify(note);
 }
 
 // Re-validates both fields: a child's reply is as untrusted as the relay's.

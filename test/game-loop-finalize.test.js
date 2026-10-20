@@ -2081,7 +2081,11 @@ test('#292 멀티 기계 리뷰의 코치 요약은 새 제목이고 잘린 줄�
   assert.ok(review.split('\n').includes('### 코치 노트 요약'), review);
   assert.equal(review.includes('### 핸드별 코치 노트 요약'), false);
   assert.match(review, /- 핸드 2: 핸드 2는 탈락 뒤 관전으로 지나갔습니다/);
-  assert.equal(review.includes('7h9'), false);
+  // The cut line, which would end in a standing "7h", is not quoted at all.
+  const section = review.slice(review.indexOf('### 코치 노트 요약'));
+  const quoted = section.slice(0, section.search(/\n#{1,6}\s/) >>> 0).split('\n').filter((line) => line.startsWith('- 핸드 '));
+  assert.deepEqual(quoted.map((line) => line.slice(0, 7)), ['- 핸드 2:']);
+  assert.equal(review.includes(' 7h'), false);
   assert.deepEqual(readLoopLog(gameDir).filter((row) => row.event === 'review-coach-note-withheld').map((row) => row.handNo), [1]);
 });
 

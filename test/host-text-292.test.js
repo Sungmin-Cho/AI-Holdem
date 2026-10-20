@@ -63,6 +63,12 @@ test('#292 C: participantSessionOf는 로스터가 정하되 엔진 좌석과 �
     [null, SEATS, 'multi'],
     [{}, undefined, 'unknown'], // the wrong shape is unreadable, not an empty roster
     [{ players: 'x' }, SEATS, 'multi'],
+    // A row that is not a player makes the roster unreadable: the seats decide, or nothing does.
+    [[null], undefined, 'unknown'],
+    [[{}], null, 'unknown'],
+    [[{ playerId: 'user' }, { playerId: 'user' }], undefined, 'unknown'],
+    [[{ playerId: 'user', kind: 'human' }, { playerId: '' }], soloSeats, 'solo'],
+    [[null], SEATS, 'multi'],
   ];
   for (const [roster, seats, expected] of rows) {
     assert.equal(participantSessionOf({ roster, seats }), expected, JSON.stringify({ roster, seats }));

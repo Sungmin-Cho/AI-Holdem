@@ -60,11 +60,13 @@ import {
   recheckRejectionTupleOf,
   rejectionTupleOf,
   sanitizeRejectionFields,
+  isBoundCoachNote,
   isCoachOnlyAttempt,
   participantSessionOf,
   payloadSha256,
   REVIEW_COACH_HEADING,
   validatePrivateRecord,
+  validatePrivateEngineState,
   rosterListOf,
   sessionHasParticipants,
   validateActionAck,
@@ -1582,11 +1584,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // resolution, not a failure.
   const coachAttemptSettled = (record) => {
     const item = record?.coachAuthority;
-    if (!isCoachOnlyAttempt(record) || typeof item.queueId !== 'string') return false;
+    if (!isCoachOnlyAttempt(record) || !isBoundCoachNote(record.body.coach[0], item)) return false;
     const auth = readCoachAuthority();
     const seal = auth?.publishedSeals?.[String(item.handNo)];
     if (seal?.queueId === item.queueId && seal.payloadSha256 === item.payloadSha256) return true;
-    return (auth?.withheldPublications ?? []).some((row) => row.queueId === item.queueId);
+    return (auth?.withheldPublications ?? []).some((row) => row.queueId === item.queueId && row.handNo === item.handNo
+      && row.payloadSha256 === item.payloadSha256 && row.exactEnvelopePath === item.exactEnvelopePath);
   };
 
   // A resend bound to the exact record captured (its body digest and game epoch): the publisher
@@ -1597,7 +1600,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       '--expect-game-epoch', String(record?.expectedGameEpoch)]);
 
   // Removes a settled recorded attempt through the publisher, bound to that record, and checks
-  // that it is gone: the publisher ignores a failed unlink.
+  // that it is gone: the publisher ignores a failed unlink. The result names the record removed,
+  // so a resend bound to it (executePublishUnlocked) knows its own body was the one resolved.
   const discardSettledAttempt = async (args, record) => {
     const bodySha256 = sha256Text(JSON.stringify(record?.body ?? null));
     try {
@@ -1608,7 +1612,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (left && sha256Text(JSON.stringify(left.body ?? null)) === bodySha256) {
         throw codedError('STALE_ATTEMPT_REMAINS', '정리한 코치 게시 시도가 아직 남아 있습니다.');
       }
-      return { ok: true, applied: false, discarded: true };
+      return { ok: true, applied: false, discarded: true, bodySha256, publishId: record?.body?.publishId };
     }
   };
 
@@ -1633,16 +1637,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!verdicts.includes('FORBIDDEN_LITERAL')) return null;
     const authority = replaying ? record?.coachAuthority : envelope?.coachAuthority;
     const handNo = notes[0]?.handNo;
-    // The note judged must be the queue item's own, and the body carry nothing else: bound by
-    // hand, by the digest the item was queued with, and by its public proof. Anything else
-    // withholds nothing and is not sent.
+    // The note judged must be the queue item's own, and the body carry nothing else: exactly
+    // the proof-bearing form of that item (isBoundCoachNote), so every string judged is one its
+    // digest covers. Anything else withholds nothing and is not sent.
     const coachOnly = replaying
       ? isCoachOnlyAttempt(record)
       : Object.keys(envelope ?? {}).every((key) => key === 'coach' || key === 'coachAuthority');
-    if (!coachOnly || notes.length !== 1 || !authority || typeof authority.queueId !== 'string' || handNo !== authority.handNo
-      || typeof authority.exactEnvelopePath !== 'string'
-      || payloadSha256(notes[0]) !== authority.payloadSha256
-      || notes[0]?.coachProof?.payloadSha256 !== authority.payloadSha256) {
+    if (!coachOnly || notes.length !== 1 || typeof authority?.exactEnvelopePath !== 'string'
+      || !isBoundCoachNote(notes[0], authority)) {
       throw codedError('COACH_WITHHOLD_UNBOUND', '다른 참가자의 카드를 인용한 코치 노트가 큐 항목에 묶여 있지 않아 게시하지 않았습니다.');
     }
     // Only the queue item the body was made for. A body the queue has already moved past is
@@ -1697,6 +1699,18 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // claim validation for a readable replay or swallowing I/O failures.
       if (!replaying || error.code !== 'BAD_PUBLISH_ATTEMPT'
         || !(error.cause instanceof SyntaxError)) throw error;
+    }
+    // #292: a resend bound to a record its caller captured judges and changes nothing for any
+    // other record. The publisher, which holds the binding, refuses that one unsent under its
+    // lock (ATTEMPT_CHANGED); an absent record is its to answer too (NO_ATTEMPT). A retirement
+    // keeps its own binding checks (#274).
+    const expected = args.indexOf('--expect-attempt-sha256');
+    if (replaying && record && expected >= 0 && !args.includes('--retire-rejected')) {
+      const epochAt = args.indexOf('--expect-game-epoch');
+      if (sha256Text(JSON.stringify(record.body ?? null)) !== args[expected + 1]
+        || epochAt < 0 || record.expectedGameEpoch !== args[epochAt + 1]) {
+        return spawnPublish(args);
+      }
     }
     // #292: a recorded coach attempt whose item has left the queue for good — sealed once the
     // snapshot proved an answer that was lost, or withheld — is not resent: the publisher
@@ -4719,16 +4733,20 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const coachHostTextVerdict = (note) => {
     const players = readJsonOptional(playersPath, 'PLAYERS');
     const roster = players === null ? undefined : (rosterListOf(players) ?? null);
+    // The engine state counts only as the relay counts it: this game's, complete
+    // (validatePrivateEngineState). Anything else is an engine state that could not be read.
     let engine = null;
     try {
       engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+      if (engine !== null) validatePrivateEngineState(engine, { expectedSessionToken: readLoopState()?.sessionToken ?? null });
     } catch {
       engine = false;
     }
-    const seats = engine === null ? undefined : (Array.isArray(engine?.seats) ? engine.seats : null);
+    const seats = engine === null ? undefined : (engine ? engine.seats : null);
     const session = participantSessionOf({ roster, seats });
     if (session === 'solo') return null;
-    if (session === 'unknown') return 'FORBIDDEN_LITERAL_UNAVAILABLE';
+    // The hand records come from that same engine state: one that could not be read judges nothing.
+    if (session === 'unknown' || engine === false) return 'FORBIDDEN_LITERAL_UNAVAILABLE';
     try {
       assertHostText({ coach: [note] }, (n) => {
         // A record that is not a complete hand record of that hand cannot be judged: its

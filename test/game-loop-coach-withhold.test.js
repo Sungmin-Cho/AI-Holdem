@@ -58,7 +58,7 @@ function newLoop(t, gameDir, extra = {}) {
 // A multiplayer game (host, h1, one AI) whose first hand h1 folded, so h1's cards stay hidden,
 // with a coach note for that hand quoting one of them, accepted and queued as an earlier rule
 // would have done. The loop is still running its relay when this returns.
-async function multiGameWithQueuedLeak(t) {
+async function multiGameWithQueuedLeak(t, { note = (hidden) => `핸드 1에서 h1이 버린 ${hidden}를 다시 봅니다.`, queue = true } = {}) {
   const gameDir = tmpGame();
   const first = newLoop(t, gameDir);
   const setup = { ai: 1, stack: 100, replayReveal: 'all' };
@@ -76,8 +76,9 @@ async function multiGameWithQueuedLeak(t) {
   assert.equal(record?.handNo, 1);
   assert.ok(record.folded.includes('h1') && !record.showdown);
   const hidden = record.holes.h1[0];
-  const leak = `핸드 1에서 h1이 버린 ${hidden}를 다시 봅니다.`;
+  const leak = note(hidden);
   const cc = createCoachControl();
+  if (!queue) return { gameDir, first, cc, leak, hidden, snapshotFile: path.join(gameDir, 'ui-snapshot.json') };
   const owner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
   const statsFile = path.join(gameDir, '.test-coach-stats.json');
   fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0 } } }));
@@ -88,7 +89,7 @@ async function multiGameWithQueuedLeak(t) {
   const accepted = await cc.accept({ gameDir, owner, handNo: 1, generation: descriptor.generation });
   assert.equal(accepted.ok, true, JSON.stringify(accepted));
   const queued = cc.loadAuthority(gameDir).publishQueue['1'];
-  return { gameDir, first, cc, queued, leak, snapshotFile };
+  return { gameDir, first, cc, queued, leak, hidden, snapshotFile };
 }
 
 function assertWithheld(gameDir, cc, queued, leak) {
@@ -278,4 +279,99 @@ test('#292 publisher가 STALE로 답해도 그 기록이 남아 있으면 정리
   assert.equal(failure?.code, 'STALE_ATTEMPT_REMAINS');
   assert.deepEqual(readJson(attemptFile(gameDir)), record);
   assert.equal(cc.loadAuthority(gameDir).publishedSeals['1'].queueId, queued.queueId);
+});
+
+test('#292 digest가 덮지 않는 문자열로는 정상 노트를 보류하지 않는다', { timeout: TIMEOUT }, async (t) => {
+  const { gameDir, first, cc, queued, hidden } = await multiGameWithQueuedLeak(t, { note: () => '프리플랍 콜 범위를 다시 봅니다.' });
+  // The note itself is clean; a field its digest does not cover names h1's hidden card.
+  const envelope = readJson(queued.exactEnvelopePath);
+  envelope.coach[0].debug = `h1 ${hidden}`;
+  fs.writeFileSync(queued.exactEnvelopePath, JSON.stringify(envelope));
+  await first.requestStop();
+  const restarted = newLoop(t, gameDir);
+  const failure = await restarted.resume().then(() => null, (error) => error);
+  await restarted.requestStop();
+  assert.equal(failure?.code, 'COACH_WITHHOLD_UNBOUND');
+  const auth = cc.loadAuthority(gameDir);
+  assert.equal(auth.publishQueue['1'].queueId, queued.queueId);
+  assert.equal(auth.withheldPublications, undefined);
+});
+
+test('#292 proof 없는 legacy overfold 노트의 migration 보류는 relay의 sticky overfold를 지키며 대체 노트로 봉인된다', { timeout: TIMEOUT }, async (t) => {
+  const { gameDir, first, cc, leak, snapshotFile } = await multiGameWithQueuedLeak(t, { queue: false });
+  await first.requestStop();
+  // An earlier relay showed a proof-less overfold note for hand 1; no migration has run yet.
+  const snapshot = fs.existsSync(snapshotFile) ? readJson(snapshotFile) : { revision: 0, publishId: 0, view: null, log: [], coach: [] };
+  snapshot.coach = [{ handNo: 1, text: leak, overfold: true }];
+  fs.writeFileSync(snapshotFile, JSON.stringify(snapshot));
+  const { gameEpochOf } = await import('../publish-contract.js');
+  const epoch = gameEpochOf(readJson(path.join(gameDir, 'state.json')).sessionToken);
+  fs.writeFileSync(path.join(gameDir, '.coach-authority.json'), JSON.stringify({
+    schemaVersion: 2, gameEpoch: epoch, activeOwnerSessionId: readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId,
+    adapterState: 'enabled', legacyMigrationCompleted: false, overfoldLease: null, hands: {}, retiredAttempts: [],
+    publishQueue: {}, publishedSeals: {}, deferred: {}, noNewPlayTimePublishers: false, finalization: null,
+  }));
+  const restarted = newLoop(t, gameDir);
+  await restarted.resume();
+  await restarted.requestStop();
+  const auth = cc.loadAuthority(gameDir);
+  const [evidence] = auth.withheldPublications ?? [];
+  assert.match(evidence?.queueId ?? '', /:migration:1:/);
+  assert.equal(evidence.overfold, true);
+  assert.equal(auth.publishedSeals['1'].queueId, evidence.replacementQueueId);
+  assert.equal(auth.publishedSeals['1'].overfold, true);
+  assert.equal(auth.overfoldLease?.state, 'spent');
+  const stored = readJson(snapshotFile);
+  assert.deepEqual(stored.coach.filter((note) => note.handNo === 1).map((note) => [note.text, note.unavailable, note.overfold]), [[UNAVAILABLE_TEXT, true, true]]);
+  assert.equal(JSON.stringify(stored).includes(leak), false);
+  assert.ok(fs.readFileSync(evidence.exactEnvelopePath, 'utf8').includes(leak));
+});
+
+// The first send of a queued note reaches the relay and is applied, its answer is lost, and a
+// reconcile seals the item before the loop's resend bound to that record runs.
+function ackLostThenReconciledPublisher(dir, gameDir) {
+  const shim = path.join(dir, 'ack-lost-publisher.mjs');
+  const marker = path.join(dir, 'used');
+  fs.writeFileSync(shim, `
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+const args = process.argv.slice(2);
+const real = (argv) => spawnSync(process.execPath, [${JSON.stringify(PUBLISH_CLI)}, ...argv], { encoding: 'utf8' });
+const from = args[args.indexOf('--from') + 1] ?? '';
+if (!args.includes('--retry') && from.includes('.coach-') && !fs.existsSync(${JSON.stringify(marker)})) {
+  fs.writeFileSync(${JSON.stringify(marker)}, '1');
+  const sent = real(args);
+  const out = JSON.parse(sent.stdout.trim());
+  if (!out.ok) { process.stdout.write(sent.stdout); process.exit(1); }
+  spawnSync(process.execPath, [${JSON.stringify(path.join(ROOT, 'tools/coach-control.js'))}, 'reconcile',
+    '--snapshot-file', ${JSON.stringify(path.join(gameDir, 'ui-snapshot.json'))}, '--game-dir', ${JSON.stringify(gameDir)}], { encoding: 'utf8' });
+  const envelope = JSON.parse(fs.readFileSync(from, 'utf8'));
+  const body = { publishId: out.publishId, coach: envelope.coach };
+  fs.writeFileSync(${JSON.stringify(path.join(gameDir, '.publish-attempt.json'))}, JSON.stringify({ body, expectedGameEpoch: envelope.coachAuthority.expectedGameEpoch, coachAuthority: envelope.coachAuthority }));
+  const bodySha256 = createHash('sha256').update(JSON.stringify(body)).digest('hex');
+  process.stdout.write(JSON.stringify({ ok: false, code: 'PUBLISH_FAILED', message: 'lost', attempt: { bodySha256, publishId: out.publishId, expectedGameEpoch: envelope.coachAuthority.expectedGameEpoch } }) + '\\n');
+  process.exit(1);
+}
+const passed = real(args);
+process.stdout.write(passed.stdout);
+process.exit(passed.status ?? 1);
+`);
+  return shim;
+}
+
+test('#292 응답을 잃은 첫 전송 뒤 reconcile이 먼저 봉인해도 그 기록에 결속된 자동 재전송은 정리 결과로 이어 간다', { timeout: TIMEOUT }, async (t) => {
+  const { gameDir, first, cc, queued } = await multiGameWithQueuedLeak(t, { note: () => '프리플랍 콜 범위를 다시 봅니다.' });
+  await first.requestStop();
+  const shimDir = fs.mkdtempSync(path.join(path.dirname(gameDir), 'ack-lost-shim-'));
+  t.after(() => fs.rmSync(shimDir, { recursive: true, force: true }));
+  const restarted = newLoop(t, gameDir, { publishCliPath: ackLostThenReconciledPublisher(shimDir, gameDir) });
+  const failure = await restarted.resume().then(() => null, (error) => error);
+  await restarted.requestStop();
+  assert.equal(failure, null, `${failure?.code} ${failure?.message}`);
+  assert.equal(fs.existsSync(path.join(shimDir, 'used')), true, 'the lost answer was staged');
+  const auth = cc.loadAuthority(gameDir);
+  assert.equal(auth.publishedSeals['1'].queueId, queued.queueId);
+  assert.equal(auth.withheldPublications, undefined);
+  assert.equal(fs.existsSync(attemptFile(gameDir)), false);
 });

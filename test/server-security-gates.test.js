@@ -1833,6 +1833,26 @@ test('#292 라이브 relay는 읽지 못한 로스터를 단일 세션으로 보
       if (fs.existsSync(path.join(solo, 'players.json'))) fs.chmodSync(path.join(solo, 'players.json'), 0o600);
     }
   }
+  // A roster whose rows are not players is no roster: beside an engine state that cannot be read,
+  // nothing places the session. It is not published, and a restored review's old coach summary
+  // and coach note stay withheld.
+  for (const rows of [[null], [{}], [{ playerId: 'user' }, { playerId: 'user' }]]) {
+    const broken = tmpDir();
+    noAiSessionFixtures(broken, { h1Holes: ['Th', '2d'] });
+    seedSnapshot(broken, { coach: [note], review: machineReviewText(['- 핸드 1: 상대는 10♥를 버렸다']) });
+    fs.writeFileSync(path.join(broken, 'players.json'), JSON.stringify(rows));
+    fs.writeFileSync(path.join(broken, 'state.json'), '{not json');
+    await withServer(broken, async ({ port }) => {
+      // The seeded snapshot already holds publishId 1.
+      const refused = await post(port, { publishId: 5, coach: [{ handNo: 1, text: '프리플랍 콜 범위' }] });
+      assert.deepEqual([refused.status, refused.json.code], [500, 'PRIVATE_LITERAL_INVALID'], JSON.stringify(rows));
+    });
+    // The host's live snapshot already fails closed on such a roster (no seat can be parsed);
+    // the ended game's lobby path restores withholding the note and the old summary.
+    const restored = publicSnapshot(loadUiState(broken, TOKEN));
+    assert.deepEqual(restored.coach, [], JSON.stringify(rows));
+    assert.equal(restored.review.includes('10♥'), false, JSON.stringify(rows));
+  }
   // A roster that cannot be read beside an engine state that cannot be read either refuses too.
   const neither = tmpDir();
   noAiSessionFixtures(neither, { h1Holes: ['Th', '2d'] });
