@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { skipOnWin32 } from './helpers/platform.js';
+import { isRunning, skipOnWin32, waitExited } from './helpers/platform.js';
 import crypto from 'node:crypto';
 import {
   RUNTIME_TABLE,
@@ -648,27 +648,6 @@ function killRecordedGrandchild(f) {
   }
 }
 
-// Linux에서는 끝난 고아가 PID 1에 reparent된 뒤 잠시 zombie로 남아 kill(pid, 0)이 성공한다. 실행 중 여부는
-// ps의 상태로 판정한다: 행이 없거나 Z(종료, 미수거)면 더는 실행 중이 아니다.
-function isRunning(pid) {
-  if (!isAlive(pid)) return false;
-  try {
-    const stat = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim();
-    return stat !== '' && !stat.startsWith('Z');
-  } catch {
-    return false; // ps가 행을 못 찾으면 1로 끝난다
-  }
-}
-
-async function waitExited(pid, timeoutMs = 3000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (!isRunning(pid)) return true;
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  return !isRunning(pid);
-}
-
 // 손자가 준비(로그 기록 = TERM 핸들러 설치·stdin 수신 뒤)를 마친 뒤에 신호가 갔어야 재현이 성립한다.
 function assertSignalledAfterReady(f, call) {
   assert.ok(f.killAt.length > 0, '신호가 없었다');
@@ -838,6 +817,7 @@ test('#297 spawnCli.kill: 직계가 살아 있으면 그 프로세스 그룹에,
   sent.length = 0;
   assert.equal(raced.kill('SIGKILL'), false);
   assert.deepEqual(sent, [[-raced.pid, 'SIGKILL']], 'ESRCH 뒤 직계 pid로 다시 보내지 않는다');
+  assert.equal(isRunning(raced.pid), true, 'ESRCH 뒤 직계 핸들로도 신호하지 않았다(음성 대조군)');
   process.kill = original;
   original.call(process, -raced.pid, 'SIGKILL');
   await raced.closed;
@@ -864,6 +844,18 @@ test('#297 spawnCli.kill: 직계가 살아 있으면 그 프로세스 그룹에,
   assert.equal(isRunning(b.pid), true, '다른 자식의 그룹에는 신호가 가지 않는다');
   b.kill('SIGKILL');
   await b.closed;
+});
+
+test('#297 spawnCli observe: 관측자가 모든 이벤트에서 던져도 자식 수명·출력·done/closed는 그대로다', { timeout: 10_000 }, async () => {
+  const seen = [];
+  const child = spawnCli({
+    command: process.execPath, args: ['-e', 'process.stdout.write("a\\nb\\n")'], cwd: os.tmpdir(), env: process.env, input: '',
+    observe: (event) => { seen.push(event.type); throw new Error('observer failure'); },
+  });
+  const result = await child.done;
+  await child.closed;
+  assert.deepEqual([result.code, result.signal, result.stdout], [0, null, 'a\nb\n']);
+  assert.ok(seen.includes('stdout') && seen.includes('exit') && seen.includes('close'), seen.join(','));
 });
 
 test('probe: 카나리 센티널이 응답에 나오면 containment false, 프롬프트에는 카나리 경로만 실린다', async () => {

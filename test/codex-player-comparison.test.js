@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { skipOnWin32 } from './helpers/platform.js';
+import { isRunning, skipOnWin32, waitExited } from './helpers/platform.js';
 import {
   COMPARISON_CAVEATS,
   COMPARISON_LIMITS,
@@ -46,6 +46,7 @@ function fixture(t, { script = {}, deps = {} } = {}) {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const calls = () => (fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '')
     .split('\n').filter(Boolean).map((line) => JSON.parse(line)).filter((record) => record.argv);
+  const killAt = [];
   return {
     dir,
     tmpRoot,
@@ -53,9 +54,13 @@ function fixture(t, { script = {}, deps = {} } = {}) {
     deps: {
       tmpRoot,
       runtimeOpts: { env: { FAKE_CLI_SCRIPT: scriptPath, FAKE_CLI_LOG: logPath }, terminateKillWaitMs: 300 },
-      exec: (spec) => spawnCli({ ...spec, command: process.execPath, args: [FAKE_CLI, ...spec.args] }),
+      exec: (spec) => {
+        const child = spawnCli({ ...spec, command: process.execPath, args: [FAKE_CLI, ...spec.args] });
+        return { ...child, kill: (signal) => { killAt.push(Date.now()); return child.kill(signal); } };
+      },
       ...deps,
     },
+    killAt,
   };
 }
 
@@ -205,15 +210,15 @@ test('계획은 호출 수 상한을 알려 주고 변형은 Luna/model-default�
   ]);
   const plan = comparisonPlan({ samples: 4, timeoutMs: 1000, budgetMs: 600_000 });
   assert.equal(plan.maxModelCalls, 2 * (1 + 2 * 4));
-  assert.equal(plan.worstCaseWallMs, plan.maxModelCalls * 1000);
+  assert.equal(plan.worstCaseCallMs, plan.maxModelCalls * 1000);
   assert.equal(plan.spots.length, 4);
   // 라운드는 스팟 목록을 되풀이한다: 표본 = 스팟 × 라운드, 상한은 phase별 상한의 합으로 잡는다.
   const repeated = comparisonPlan({ samples: 8, rounds: 6, timeoutMs: 120_000, warmupTimeoutMs: 120_000, decideTimeoutMs: 300_000, budgetMs: 3_600_000 });
   assert.equal(repeated.samplesPerVariant, 48);
   assert.equal(repeated.maxModelCalls, 2 * (1 + 2 * 48));
-  assert.equal(repeated.worstCaseWallMs, 3_600_000, '예산이 최악 경과의 상한이다');
+  assert.equal(repeated.worstCaseCallMs, 3_600_000, '호출이 쓸 수 있는 시간은 예산으로 잘린다(종료 확인·정리는 별도)');
   const small = comparisonPlan({ samples: 2, rounds: 3, timeoutMs: 1000, warmupTimeoutMs: 2000, decideTimeoutMs: 3000, budgetMs: 3_600_000 });
-  assert.equal(small.worstCaseWallMs, 2 * (1000 + 6 * (2000 + 3000)));
+  assert.equal(small.worstCaseCallMs, 2 * (1000 + 6 * (2000 + 3000)));
   assert.equal(small.spots.length, 2, '계획의 스팟 목록은 라운드로 늘지 않는다');
 });
 
@@ -566,8 +571,8 @@ test('#297 CLI: --live 중 SIGINT는 새 호출을 멈추고 진행 중 호출�
   assert.match(err, /SIGINT 수신/);
   assert.equal(signals.listenerCount('SIGINT') + signals.listenerCount('SIGTERM'), 0, '신호 처리기는 실행 뒤 남지 않는다');
   const report = JSON.parse(out);
-  // 진행 중이던 표본은 중단으로 끝나고, 멈춤은 다음 표본 경계에서 기록된다.
-  assert.deepEqual(report.aborted, { code: 'STOPPED', variant: null, phase: 'sample', spot: spots[1].id, round: 0, signal: 'SIGINT' });
+  // 진행 중이던 표본은 중단으로 끝나고, 멈춤은 그 표본이 끝난 경계에서 기록된다.
+  assert.deepEqual(report.aborted, { code: 'STOPPED', variant: null, phase: 'sample', spot: spots[0].id, round: 0, signal: 'SIGINT' });
   const sol = report.variants[1];
   assert.deepEqual([sol.samples[0].status, sol.samples[0].errorCode, sol.samples[0].errorPhase], ['interrupted', 'INTERRUPTED', 'decide']);
   const [timeline] = sol.samples[0].timelines.decide;
@@ -623,13 +628,133 @@ test('#297 타임라인: 이벤트 64개 상한·긴 줄·모르는 이름은 bo
   }
 });
 
-async function waitGone(pid, timeoutMs = 3000) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    try { process.kill(pid, 0); } catch (error) { if (error.code === 'ESRCH') return true; }
-    if (Date.now() >= deadline) return false;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+// 실제 어댑터 아래에 OS 프로세스 없는 각본 자식을 물린다. 청크 경계·신호 뒤 출력·종료 시각을 정확히 통제하려는 것이다.
+// plan(spec)은 { chunks, hold, afterKill }을 돌려준다: chunks를 그대로 observe에 넣고, hold면 신호가 올 때까지 끝나지 않으며,
+// 신호를 받으면 5ms 뒤 afterKill 청크를 더 낸 다음 exit·close한다.
+function scriptedChildren(plan) {
+  let nextPid = 910_000;
+  const exec = (spec) => {
+    const script = plan(spec);
+    const observe = spec.observe ?? (() => {});
+    let stdout = '';
+    let finished = false;
+    let settle;
+    let markClosed;
+    const done = new Promise((resolve) => { settle = resolve; });
+    const closed = new Promise((resolve) => { markClosed = resolve; });
+    const emit = (chunk) => { stdout += chunk; observe({ type: 'stdout', chunk }); };
+    const finish = (code, signal) => {
+      if (finished) return;
+      finished = true;
+      observe({ type: 'exit', code, signal });
+      observe({ type: 'close', code, signal });
+      settle({ code, signal, stdout, stderr: '' });
+      markClosed();
+    };
+    setImmediate(() => {
+      for (const chunk of script.chunks) emit(chunk);
+      if (!script.hold) finish(0, null);
+    });
+    const kill = (signal) => {
+      setTimeout(() => { for (const chunk of script.afterKill ?? []) emit(chunk); finish(null, signal); }, 5);
+      return true;
+    };
+    return { pid: nextPid++, kill, done, closed };
+  };
+  return { exec };
+}
+
+const lineOfBytes = (bytes) => {
+  const shell = JSON.stringify({ type: 'item.updated', item: { type: 'reasoning', text: '' } });
+  return JSON.stringify({ type: 'item.updated', item: { type: 'reasoning', text: 'x'.repeat(bytes - Buffer.byteLength(shell)) } });
+};
+
+test('#297 타임라인(각본 자식): 상한 뒤 turn 완료·바이트 기준 64KiB·청크 경계·신호 뒤 출력·잘린 turn을 결정적으로 잰다', async (t) => {
+  const spots = buildComparisonSpots(1);
+  const f = fixture(t);
+  const ev = (event) => `${JSON.stringify(event)}\n`;
+  const korean = JSON.stringify({ type: 'item.updated', item: { type: 'reasoning', text: '가'.repeat(23_000) } });
+  assert.ok(korean.length < 65_536 && Buffer.byteLength(korean) > 65_536, '코드 단위로는 짧고 바이트로는 긴 줄');
+  const exact = lineOfBytes(65_536);
+  const over = lineOfBytes(65_537);
+  assert.deepEqual([Buffer.byteLength(exact), Buffer.byteLength(over)], [65_536, 65_537]);
+  const third = Math.floor(korean.length / 3);
+  const scripted = scriptedChildren((spec) => {
+    const model = modelOf(spec.args);
+    const isResume = spec.args.includes('resume');
+    if (!isResume && !spec.input.includes('비교용')) {
+      return { chunks: [jsonl({ type: 'thread.started', thread_id: 'th-p' }, { type: 'item.completed', item: { type: 'agent_message', text: 'UNAVAILABLE' } })] };
+    }
+    if (!isResume && model === LUNA) {
+      // 경계 줄은 명시한 청크로 쪼개 보낸다(한글 줄은 세 조각). 그 뒤 70개 업데이트, ready, 상한 밖의 turn.completed.
+      return {
+        chunks: [
+          ev({ type: 'thread.started', thread_id: 'th-l' }) + ev({ type: 'turn.started' }),
+          korean.slice(0, third), korean.slice(third, 2 * third), `${korean.slice(2 * third)}\n`,
+          `${exact}\n`, `${over.slice(0, 40_000)}`, `${over.slice(40_000)}\n`,
+          Array.from({ length: 70 }, () => ev({ type: 'item.updated', item: { type: 'reasoning', text: 'r' } })).join(''),
+          ev({ type: 'item.completed', item: { type: 'agent_message', text: 'ready' } }) + ev({ type: 'turn.completed' }),
+        ],
+      };
+    }
+    if (!isResume && model === SOL) {
+      return {
+        hold: true,
+        chunks: [ev({ type: 'thread.started', thread_id: 'th-s' }) + ev({ type: 'turn.started' })],
+        afterKill: [ev({ type: 'item.updated', item: { type: 'reasoning', text: 'late' } })],
+      };
+    }
+    const spot = spots.find((candidate) => spec.input.includes(`decisionId: ${candidate.decisionId}`));
+    return { chunks: [decision(spot, { action: safeAction(spot), reason: '각본 사유' })] };
+  });
+  const report = await runComparison({ samples: 1, timeoutMs: 20_000, warmupTimeoutMs: 300, budgetMs: 60_000 },
+    { tmpRoot: f.tmpRoot, exec: scripted.exec });
+  const [luna, sol] = report.variants;
+
+  const [lunaWarm] = luna.samples[0].timelines.warmup;
+  assert.equal(lunaWarm.oversizeLines, 2, '한글 줄(바이트 초과)과 65,537바이트 줄');
+  assert.equal(lunaWarm.events[2].name, 'item.updated:reasoning', '정확히 65,536바이트인 줄은 이름을 남긴다');
+  assert.equal(lunaWarm.events.length, 64);
+  assert.ok(lunaWarm.eventsDropped > 0);
+  assert.equal(lunaWarm.derived.censored, false, '목록 상한 뒤에 온 turn.completed도 turn 끝으로 본다');
+  assert.equal(Number.isInteger(lunaWarm.derived.turnMs), true);
+  assert.equal(lunaWarm.derived.lastEventToSignalMs, null, '신호가 없으면 null이다');
+
+  const [solWarm] = sol.samples[0].timelines.warmup;
+  assert.deepEqual([sol.samples[0].status, sol.samples[0].errorPhase], ['timeout', 'warmup']);
+  const signalMs = solWarm.kills[0].ms;
+  assert.equal(solWarm.derived.censored, true, '시작만 보인 turn은 잘렸다');
+  assert.equal(solWarm.derived.turnObservedMs, signalMs - solWarm.events[1].ms);
+  assert.equal(solWarm.derived.lastEventToSignalMs, signalMs - solWarm.events[1].ms, '신호 직전의 마지막 줄 기준이다');
+  assert.ok(solWarm.derived.lastEventToSignalMs >= 0);
+  assert.ok(solWarm.lastEventMs > signalMs, '신호 뒤 출력도 관측은 된다');
+  assert.ok(solWarm.events.some(({ name, ms }) => name === 'item.updated:reasoning' && ms > signalMs));
+  assert.equal(solWarm.closed, true);
+  assert.ok(solWarm.derived.signalToCloseMs >= 0);
+  assert.equal(JSON.stringify(report.variants.map((variant) => variant.samples.map((sample) => sample.timelines))).includes('가가가'), false);
+});
+
+for (const name of ['SIGINT', 'SIGTERM']) {
+  test(`#297 CLI: 마지막 표본의 decide 중 ${name}도 STOPPED로 기록되고 complete=false, 종료 코드 3이다`, async (t) => {
+    const spots = buildComparisonSpots(1);
+    const slowSolDecide = { includes: `decisionId: ${spots[0].decisionId}`, argvIncludes: SOL, delayMs: 30_000, reply: decision(spots[0], { action: 'fold' }) };
+    const f = fixture(t, { script: { matchers: [slowSolDecide, ...decisionMatchers(spots)] } });
+    const signals = new EventEmitter();
+    const pending = runCli(['--live', '--json', '--samples', '1', '--timeout-ms', '20000'], { ...f.deps, signalSource: signals });
+    const deadline = Date.now() + 10_000;
+    while (!f.calls().some((call) => call.argv.includes('resume') && modelOf(call.argv) === SOL)) {
+      assert.ok(Date.now() < deadline, 'Sol decide가 시작되지 않았다');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    signals.emit(name);
+    const { code, out } = await pending;
+    assert.equal(code, 3);
+    const report = JSON.parse(out);
+    assert.deepEqual(report.aborted, { code: 'STOPPED', variant: null, phase: 'sample', spot: spots[0].id, round: 0, signal: name });
+    assert.deepEqual([report.executionOk, report.complete, report.ok], [true, false, false]);
+    assert.equal(report.variants[1].samples[0].status, 'interrupted');
+    assert.equal(signals.listenerCount('SIGINT') + signals.listenerCount('SIGTERM'), 0);
+  });
 }
 
 // warmup(create) 입력만 페르소나 이름을 싣는다 — probe(카나리)·decide(스냅샷) 입력에는 없다.
@@ -639,7 +764,7 @@ test('#297 실행: 래퍼 CLI의 warmup 타임아웃은 그룹째 끝나 close�
   if (skipOnWin32(t, 'POSIX process groups; win32 keeps direct-child termination')) return;
   const spots = buildComparisonSpots(2);
   const f = fixture(t, { script: { wrapper: true, matchers: [solWarmup({ delayMs: 30_000 }), ...decisionMatchers(spots)] } });
-  const report = await runComparison({ samples: 2, timeoutMs: 20_000, warmupTimeoutMs: 400, budgetMs: 120_000 }, f.deps);
+  const report = await runComparison({ samples: 2, timeoutMs: 20_000, warmupTimeoutMs: 1500, budgetMs: 120_000 }, f.deps);
   const [luna, sol] = report.variants;
   // 타임아웃은 쓸 만한 관측이고 하네스 사고가 아니다 — 종료가 확인됐으니 중단도 없다.
   // Sol은 응답을 하나도 얻지 못했으므로 "전부 합법"도 공허하게 참이 되지 않는다.
@@ -651,10 +776,10 @@ test('#297 실행: 래퍼 CLI의 warmup 타임아웃은 그룹째 끝나 close�
   assert.deepEqual(sol.samples.map((sample) => [sample.status, sample.errorPhase]), [['timeout', 'warmup'], ['timeout', 'warmup']]);
   assert.deepEqual(sol.summary.timeoutByPhase, { warmup: 2, decide: 0 });
   assert.deepEqual(sol.summary.phases, {
-    warmup: { planned: 2, attempted: 2, answered: 0, timeout: 2, failed: 0, interrupted: 0, terminationUnconfirmed: 0, skipped: 0 },
-    decide: { planned: 2, attempted: 0, answered: 0, timeout: 0, failed: 0, interrupted: 0, terminationUnconfirmed: 0, skipped: 2 },
+    warmup: { planned: 2, attempted: 2, answered: 0, timeout: 2, failed: 0, interrupted: 0, terminationUnconfirmed: 0, unobserved: 0, skipped: 0 },
+    decide: { planned: 2, attempted: 0, answered: 0, timeout: 0, failed: 0, interrupted: 0, terminationUnconfirmed: 0, unobserved: 0, skipped: 2 },
   });
-  assert.deepEqual(luna.summary.phases.decide, { planned: 2, attempted: 2, answered: 2, timeout: 0, failed: 0, interrupted: 0, terminationUnconfirmed: 0, skipped: 0 });
+  assert.deepEqual(luna.summary.phases.decide, { planned: 2, attempted: 2, answered: 2, timeout: 0, failed: 0, interrupted: 0, terminationUnconfirmed: 0, unobserved: 0, skipped: 0 });
   assert.deepEqual(sol.summary.warmupMs.observations, [], '타임아웃의 경과는 응답 지연으로 세지 않는다');
   assert.equal(sol.summary.warmupMs.cold, null);
   assert.equal(luna.summary.legal, 2);
@@ -674,7 +799,10 @@ test('#297 실행: 래퍼 CLI의 warmup 타임아웃은 그룹째 끝나 close�
   // 응답을 맡았던 손자(래퍼가 띄운 프로세스)도 남지 않는다.
   const solCreates = f.calls().filter((call) => modelOf(call.argv) === SOL && call.stdin.includes('비교용'));
   assert.equal(solCreates.length, 2);
-  for (const call of solCreates) assert.equal(await waitGone(call.pid), true, `손자 ${call.pid}가 살아 있다`);
+  // 신호는 손자가 준비(TERM 처리 설치·stdin 수신 뒤 기록)한 뒤에 갔어야 재현이 성립한다.
+  assert.equal(f.killAt.length, 2);
+  solCreates.forEach((call, i) => assert.ok(call.readyAt <= f.killAt[i], `손자 준비 전 신호(ready ${call.readyAt}, kill ${f.killAt[i]})`));
+  for (const call of solCreates) assert.equal(await waitExited(call.pid), true, `손자 ${call.pid}가 실행 중이다`);
   assert.match(formatReport(report), /warmup 신호 SIGKILL → exit \d+ms · close \d+ms/);
 });
 
@@ -700,7 +828,7 @@ test('#297 실행: 그룹을 벗어난 후손이 stdio를 쥐면 종료 미확�
     return adapter;
   };
   try {
-    const report = await runComparison({ samples: 1, timeoutMs: 20_000, warmupTimeoutMs: 400, budgetMs: 120_000 }, {
+    const report = await runComparison({ samples: 1, timeoutMs: 20_000, warmupTimeoutMs: 1500, budgetMs: 120_000 }, {
       ...f.deps, createRuntime, runtimeOpts: { ...f.deps.runtimeOpts, terminateKillWaitMs: 1000 },
     });
     assert.equal(report.ok, false);
@@ -710,6 +838,8 @@ test('#297 실행: 그룹을 벗어난 후손이 stdio를 쥐면 종료 미확�
     assert.deepEqual([sample.status, sample.errorCode, sample.errorPhase], ['termination_unconfirmed', 'CHILD_CLOSE_UNCONFIRMED', 'warmup']);
     assert.deepEqual(sample.errorDetails, { purpose: 'create', signal: 'SIGKILL', waitBudgetMs: 1000, waitedMs: sample.errorDetails.waitedMs, closeConfirmed: false });
     assert.ok(sample.errorDetails.waitedMs >= 1000);
+    const solCreate = f.calls().find((call) => modelOf(call.argv) === SOL && call.stdin.includes('비교용'));
+    assert.ok(solCreate.readyAt <= f.killAt[0], '보유자를 만든 뒤에 신호가 갔다');
 
     // 경계: 직계는 신호 직후 exit했지만 close는 확인 대기를 넘겨, 둘째 정리 시도 중에 왔다.
     const [timeline] = sample.timelines.warmup;
@@ -732,7 +862,7 @@ test('#297 실행: 그룹을 벗어난 후손이 stdio를 쥐면 종료 미확�
     const log = path.join(f.dir, 'calls.jsonl');
     const orphanPid = (fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '').split('\n').filter(Boolean)
       .map((line) => JSON.parse(line)).find((entry) => Number.isInteger(entry.orphanPid))?.orphanPid;
-    if (orphanPid) assert.equal(await waitGone(orphanPid), true, '해제한 후손이 끝나지 않았다');
+    if (orphanPid) assert.equal(await waitExited(orphanPid), true, '해제한 후손이 끝나지 않았다');
   }
 });
 
@@ -881,6 +1011,15 @@ test('실행: warmup 또는 decide가 자식 없이 응답을 돌려주면 그 �
   assert.ok(sol.samples.every((sample) => sample.errorPhase === 'decide'));
   assert.deepEqual(sol.samples[0].observedCalls, { warmup: 1, decide: 0 });
   assert.deepEqual(sol.samples[0].unobservedPhases, ['decide']);
+  // 단계별 분모: 미관측 단계도 결과 항목에 든다 — 시도 = 응답 + 실패 종류의 합.
+  assert.deepEqual(luna.summary.phases.warmup, { planned: 2, attempted: 2, answered: 0, timeout: 0, failed: 0, interrupted: 0, terminationUnconfirmed: 0, unobserved: 2, skipped: 0 });
+  assert.deepEqual(sol.summary.phases.decide, { planned: 2, attempted: 2, answered: 0, timeout: 0, failed: 0, interrupted: 0, terminationUnconfirmed: 0, unobserved: 2, skipped: 0 });
+  for (const variant of report.variants) {
+    for (const phase of Object.values(variant.summary.phases)) {
+      assert.equal(phase.attempted, phase.answered + phase.timeout + phase.failed + phase.interrupted + phase.terminationUnconfirmed + phase.unobserved);
+      assert.equal(phase.planned, phase.attempted + phase.skipped);
+    }
+  }
   assert.equal(report.agreement.comparedSpots, 0);
   for (const variantId of ['luna-default', 'sol-low']) {
     const codes = report.failures.filter((failure) => failure.variant === variantId).map(({ gate, code }) => `${gate}:${code}`);

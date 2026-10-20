@@ -62,6 +62,35 @@ export function writeFakePlayerJs(dir, source) {
   return { command: process.execPath, scriptPath };
 }
 
+// #297: 끝난 고아는 Linux에서 PID 1에 reparent된 뒤 잠시 zombie로 남아 kill(pid, 0)이 성공한다. 실행 중 여부는
+// ps의 상태로 본다 — 행이 없거나 Z(끝났지만 수거되지 않음)면 실행 중이 아니다. win32에는 zombie가 없다.
+export function isRunning(pid) {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error.code === 'ESRCH') return false;
+  }
+  if (process.platform === 'win32') return true;
+  let stat;
+  try {
+    stat = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim();
+  } catch (error) {
+    // ps는 행을 못 찾으면 1로 끝난다. 그 밖의 판독 실패는 사망 증거가 아니다.
+    if (error.status === 1) return false;
+    throw error;
+  }
+  return stat !== '' && !stat.startsWith('Z');
+}
+
+export async function waitExited(pid, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isRunning(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return !isRunning(pid);
+}
+
 export function childTerminated(child) {
   return child.exitCode !== null || child.signalCode !== null;
 }

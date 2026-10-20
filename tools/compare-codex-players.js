@@ -72,7 +72,7 @@ const TIMELINE_ITEM_TYPES = new Set([
   'agent_message', 'reasoning', 'error', 'command_execution', 'file_change', 'mcp_tool_call', 'web_search', 'todo_list',
 ]);
 const TIMELINE_EVENT_LIMIT = 64;
-// 개행 없이 이어지는 출력의 버퍼 상한. 넘으면 그 줄은 이름을 뽑지 않고 `oversizeLines`로만 센다.
+// 한 줄의 UTF-8 바이트 상한(개행 없이 이어지는 버퍼도 같다). 넘으면 그 줄은 이름을 뽑지 않고 `oversizeLines`로만 센다.
 const TIMELINE_LINE_LIMIT = 64 * 1024;
 // error 계열 메시지는 원문을 남기지 않는다 — 이 닫힌 분류만 남긴다.
 const ERROR_CLASSES = Object.freeze([
@@ -196,7 +196,9 @@ export function comparisonPlan(options) {
     spots: buildComparisonSpots(normalized.samples).map(({ id, label, street }) => ({ id, label, street })),
     samplesPerVariant: perVariantSamples,
     maxModelCalls: COMPARISON_VARIANTS.length * (1 + 2 * perVariantSamples),
-    worstCaseWallMs: Math.min(normalized.budgetMs, COMPARISON_VARIANTS.length
+    // 호출 상한의 합과 예산 중 작은 값 — 호출이 쓸 수 있는 최대 시간이다. 종료 확인·dispose는 포함하지 않으며,
+    // 종료를 확인하지 못한 자식이 남으면 프로세스 전체 경과에는 유한한 상한이 없다.
+    worstCaseCallMs: Math.min(normalized.budgetMs, COMPARISON_VARIANTS.length
       * (normalized.timeoutMs + perVariantSamples * (normalized.warmupTimeoutMs + normalized.decideTimeoutMs))),
   };
 }
@@ -290,7 +292,8 @@ function summarize(variant, samples) {
   const actions = {};
   for (const sample of samples) if (sample.legal) actions[sample.action] = (actions[sample.action] ?? 0) + 1;
   const phaseCount = (status, phase) => samples.filter((sample) => sample.status === status && sample.errorPhase === phase).length;
-  // 단계별 분모: 예정(표본 수)·시도(그 단계를 시작함)·응답(그 단계가 결과를 돌려줌)과 실패 종류. 건너뜀은 예정 − 시도다.
+  // 단계별 분모: 예정(표본 수)·시도(그 단계를 시작함)·응답(그 단계가 결과를 돌려줌)과 실패 종류. 건너뜀은 예정 − 시도이고,
+  // 시도 = 응답 + timeout + failed + interrupted + terminationUnconfirmed + unobserved다.
   const phases = Object.fromEntries(SAMPLE_PHASES.map((phase) => {
     const started = samples.filter((sample) => sample.observedCalls?.[phase] !== null && sample.observedCalls?.[phase] !== undefined);
     const failedHere = (status) => phaseCount(status, phase);
@@ -298,7 +301,8 @@ function summarize(variant, samples) {
     return [phase, {
       planned: samples.length, attempted: started.length, answered,
       timeout: failedHere('timeout'), failed: failedHere('failed'), interrupted: failedHere('interrupted'),
-      terminationUnconfirmed: failedHere('termination_unconfirmed'), skipped: samples.length - started.length,
+      terminationUnconfirmed: failedHere('termination_unconfirmed'), unobserved: failedHere('unobserved'),
+      skipped: samples.length - started.length,
     }];
   }));
   return {
@@ -352,15 +356,25 @@ function createCallRecord(phase, mono) {
   const startedAt = mono();
   const record = {
     phase, startedAt, firstStdoutMs: null, stdoutBytes: 0, events: [], eventsDropped: 0, oversizeLines: 0,
-    lastEventMs: null, exit: null, close: null, kills: [], pending: '', skippingOversize: false,
+    // 지표의 기준 시각은 이벤트 목록과 별도로 고정한다 — 목록이 상한에 걸려도 turn 끝이 사라지지 않는다.
+    milestones: { threadStarted: null, turnStarted: null, turnEnded: null },
+    lastEventMs: null, lastEventBeforeSignalMs: null,
+    exit: null, close: null, kills: [], pending: '', skippingOversize: false,
   };
   const at = () => Math.round(mono() - startedAt);
   const pushLine = (line) => {
     if (line.trim() === '') return;
-    record.lastEventMs = at();
+    const ms = at();
+    const label = eventLabel(line.trim());
+    record.lastEventMs = ms;
+    const { milestones } = record;
+    if (label === 'thread.started' && milestones.threadStarted === null) milestones.threadStarted = ms;
+    if (label === 'turn.started' && milestones.turnStarted === null) milestones.turnStarted = ms;
+    if ((label === 'turn.completed' || label.startsWith('turn.failed')) && milestones.turnEnded === null) milestones.turnEnded = ms;
     if (record.events.length >= TIMELINE_EVENT_LIMIT) { record.eventsDropped += 1; return; }
-    record.events.push([record.lastEventMs, eventLabel(line.trim())]);
+    record.events.push([ms, label]);
   };
+  const tooLong = (text) => text.length > TIMELINE_LINE_LIMIT || Buffer.byteLength(text) > TIMELINE_LINE_LIMIT;
   record.observe = (event) => {
     if (event.type === 'stdout') {
       const chunk = String(event.chunk);
@@ -372,10 +386,10 @@ function createCallRecord(phase, mono) {
         // 상한을 넘겨 버린 줄의 나머지는 이름을 뽑지 않는다(그 줄은 이미 oversizeLines에 셌다).
         if (record.skippingOversize) { record.skippingOversize = false; continue; }
         // 한 청크 안에서 완성된 긴 줄도 같은 상한을 받는다 — 청크 경계에 따라 판정이 달라지지 않게.
-        if (line.length > TIMELINE_LINE_LIMIT) { record.oversizeLines += 1; continue; }
+        if (tooLong(line)) { record.oversizeLines += 1; continue; }
         pushLine(line);
       }
-      if (record.pending.length > TIMELINE_LINE_LIMIT) {
+      if (tooLong(record.pending)) {
         if (!record.skippingOversize) record.oversizeLines += 1;
         record.skippingOversize = true;
         record.pending = '';
@@ -384,7 +398,7 @@ function createCallRecord(phase, mono) {
       record.exit = { ms: at(), code: event.code ?? null, signal: event.signal ?? null };
     } else if (event.type === 'close') {
       if (record.pending && !record.skippingOversize) {
-        if (record.pending.length > TIMELINE_LINE_LIMIT) record.oversizeLines += 1;
+        if (tooLong(record.pending)) record.oversizeLines += 1;
         else pushLine(record.pending);
       }
       record.pending = '';
@@ -392,11 +406,14 @@ function createCallRecord(phase, mono) {
       record.close = { ms: at(), code: event.code ?? null, signal: event.signal ?? null };
     }
   };
-  record.recordKill = (signal, delivered) => { record.kills.push({ ms: at(), signal, delivered }); };
+  record.recordKill = (signal, delivered) => {
+    // 신호 직전이 얼마나 조용했는지는 첫 신호 시점에 고정한다 — 신호 뒤 출력이 그 값을 바꾸지 않는다.
+    if (record.kills.length === 0) record.lastEventBeforeSignalMs = record.lastEventMs;
+    record.kills.push({ ms: at(), signal, delivered });
+  };
   return record;
 }
 
-const firstEventMs = (record, label) => record.events.find(([, name]) => name === label)?.[0] ?? null;
 const since = (later, earlier) => (later === null || earlier === null ? null : later - earlier);
 
 /** 보고서용 타임라인. 시각은 모두 이 호출 spawn 기준 ms이고 `spawnAtMs`만 실행 시작 기준이다. */
@@ -405,12 +422,11 @@ const since = (later, earlier) => (later === null || earlier === null ? null : l
 //   threadToTurnMs thread.started → turn.started
 //   turnMs        turn.started → turn.completed/failed (끝까지 관측된 turn만)
 //   censored      turn이 시작됐지만 끝이 관측되지 않았다(신호·exit로 잘림) — 그때 turnObservedMs는 신호(없으면 exit)까지
-//   lastEventToSignalMs 마지막 JSONL 줄 → 첫 신호(신호 직전 얼마나 조용했나)
+//   lastEventToSignalMs 첫 신호 직전의 마지막 JSONL 줄 → 첫 신호(신호 직전 얼마나 조용했나, 신호 뒤 출력은 제외)
+// 기준 시각(thread·turn 시작·끝)은 이벤트 목록 상한과 무관하게 고정 필드에서 읽는다.
 function timelineView(record, runStartedAt) {
   const signalMs = record.kills[0]?.ms ?? null;
-  const threadStart = firstEventMs(record, 'thread.started');
-  const turnStart = firstEventMs(record, 'turn.started');
-  const turnEnd = record.events.find(([, name]) => name === 'turn.completed' || name.startsWith('turn.failed'))?.[0] ?? null;
+  const { threadStarted: threadStart, turnStarted: turnStart, turnEnded: turnEnd } = record.milestones;
   const exitMs = record.exit?.ms ?? null;
   const closeMs = record.close?.ms ?? null;
   const censored = turnStart !== null && turnEnd === null;
@@ -430,7 +446,7 @@ function timelineView(record, runStartedAt) {
       turnMs: since(turnEnd, turnStart),
       censored,
       turnObservedMs: censored ? since(cutAt, turnStart) : null,
-      lastEventToSignalMs: since(signalMs, record.lastEventMs),
+      lastEventToSignalMs: since(signalMs, record.lastEventBeforeSignalMs),
       signalToExitMs: since(exitMs, signalMs),
       signalToCloseMs: since(closeMs, signalMs),
       exitToCloseMs: since(closeMs, exitMs),
@@ -532,15 +548,17 @@ export async function runComparison(rawOptions = {}, deps = {}) {
       const argvFrom = run.argvLog.length;
       run.phase = 'probe';
       let claim;
+      // probe 소요도 러너의 단조 시계로 잰다(어댑터의 elapsedMs는 벽시계 차이다).
+      const probeBegan = now();
       try {
         const result = await run.adapter.probe({ canaryAbsPath, timeoutMs: options.timeoutMs });
         claim = {
-          ok: result.ok === true, containment: result.containment === true, elapsedMs: result.elapsedMs ?? null,
+          ok: result.ok === true, containment: result.containment === true, elapsedMs: Math.round(now() - probeBegan),
           ...(result.notice ? { notice: String(result.notice) } : {}),
         };
         if (claim.notice && UNSAFE_NOTICE.test(claim.notice)) aborted = { code: 'TERMINATION_UNCONFIRMED', variant: run.variant.id, phase: 'probe' };
       } catch (error) {
-        claim = { ok: false, containment: false, elapsedMs: null, notice: `probe 오류: ${error.code ?? 'ERROR'}` };
+        claim = { ok: false, containment: false, elapsedMs: Math.round(now() - probeBegan), notice: `probe 오류: ${error.code ?? 'ERROR'}` };
         if (isUnsafeTermination(error.code)) aborted = { code: 'TERMINATION_UNCONFIRMED', variant: run.variant.id, phase: 'probe' };
       }
       const observed = observeCalls(run.argvLog, argvFrom, run.variant);
@@ -555,6 +573,7 @@ export async function runComparison(rawOptions = {}, deps = {}) {
         verified: unverified === null, unverified,
       };
       run.probeCalls = run.callLog.slice(argvFrom);
+      stopAt({ phase: 'probe' });
     }
 
     // 2) 표본마다 두 설정을 번갈아 돌린다.
@@ -570,6 +589,8 @@ export async function runComparison(rawOptions = {}, deps = {}) {
         if (sample.status === 'termination_unconfirmed' && !aborted) {
           aborted = { code: 'TERMINATION_UNCONFIRMED', variant: run.variant.id, phase: 'sample', spot: entry.spot.id, round: entry.round };
         }
+        // 마지막 표본 중에 온 중단도 남는다. 종료 미확인 중단이 먼저 기록됐으면 그쪽이 우선이다.
+        stopAt({ phase: 'sample', spot: entry.spot.id, round: entry.round });
       }
     }
   } finally {
@@ -685,7 +706,8 @@ function judgeComparison({ options, variants, aborted, mismatches, cleanup }) {
     if (s.legal + s.invalid === 0) fail('allDecisionsLegal', variant.id, 'NO_DECISIONS_OBSERVED');
   }
   const executionOk = !failures.some((failure) => failure.gate === 'executionOk');
-  const complete = variants.every((variant) => variant.gates.complete);
+  // 사람이 멈춘 실행은 측정을 다 얻었더라도 완전한 비교로 치지 않는다(ok와 failures가 어긋나지 않게).
+  const complete = variants.every((variant) => variant.gates.complete) && aborted?.code !== 'STOPPED';
   const allDecisionsLegal = variants.every((variant) => variant.gates.allDecisionsLegal);
   return { executionOk, complete, allDecisionsLegal, ok: executionOk && complete && allDecisionsLegal, failures };
 }

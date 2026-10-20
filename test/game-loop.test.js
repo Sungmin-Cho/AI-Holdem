@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ChildProcess, execFileSync, spawn } from 'node:child_process';
+import { ChildProcess, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,7 +13,7 @@ import {
   readOwnedLock,
   writeJsonAtomic,
 } from '../engine/state.js';
-import { createStartTimeProbe, reusedPidRecord, skipOnWin32 } from './helpers/platform.js';
+import { createStartTimeProbe, isRunning, reusedPidRecord, skipOnWin32 } from './helpers/platform.js';
 import {
   createGameLoop,
   exitCodeFor,
@@ -9017,10 +9017,7 @@ test('#297 interruptDecision through the real codex adapter ends the launcher gr
   const adapter=createPlayerRuntime('codex',{env:{FAKE_CLI_SCRIPT:scriptPath,FAKE_CLI_LOG:logPath},terminateKillWaitMs:1000,
     exec:(spec)=>spawnCli({...spec,command:process.execPath,args:[path.join(ROOT,'test/helpers/fake-cli.js'),...spec.args]})});
   const rows=()=>(fs.existsSync(logPath)?fs.readFileSync(logPath,'utf8'):'').split('\n').filter(Boolean).map(JSON.parse);
-  const running=pid=>{
-    try{process.kill(pid,0);}catch(error){if(error.code==='ESRCH')return false;}
-    try{const stat=execFileSync('ps',['-o','stat=','-p',String(pid)],{encoding:'utf8'}).trim();return stat!==''&&!stat.startsWith('Z');}catch{return false;}
-  };
+  const running=isRunning;
   const leafOf=()=>rows().find(row=>Array.isArray(row.argv)&&row.argv.includes('resume'));
   t.after(()=>{const leaf=leafOf();if(leaf&&running(leaf.pid)){try{process.kill(leaf.pid,'SIGKILL');}catch{}}});
   const {gameDir,loop}=await setupAiFirst(t,{adapter,loopOpts:{playerBudget:{softMs:200,hardMs:20_000}}});

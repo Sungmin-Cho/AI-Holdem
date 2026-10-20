@@ -1096,10 +1096,11 @@ export function createPlayerRuntime(kind, opts = {}) {
   async function confirmChildClose(entry, signal) {
     await Promise.resolve();
     if (entry.closed) return;
-    const started = Date.now();
+    // 대기 시간은 단조 시계로 잰다(벽시계 보정에 흔들리지 않게).
+    const started = performance.now();
     const details = () => ({ runtime: kind, pid: entry.handle.pid ?? null,
       purpose: entry.purpose, model: entry.model, signal,
-      waitBudgetMs: killWaitMs, waitedMs: Date.now() - started,
+      waitBudgetMs: killWaitMs, waitedMs: Math.round(performance.now() - started),
       closeConfirmed: entry.closed });
     // #255 S4 (accepted): on POSIX `ChildProcess.kill` signals the numeric pid. libuv reaps
     // several children in one SIGCHLD pass and then runs their exit callbacks one by one, so

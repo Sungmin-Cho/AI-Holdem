@@ -429,32 +429,40 @@ recorded, so the match remains a hypothesis rather than an observation.
     probe cap. This lets one tool reproduce production caps (warmup 120 s, decide hard
     300 s) or force short caps.
 - **`budgetMs`** is a call-start budget. A phase starts only if the remaining budget covers
-  that phase's cap. Termination confirmation and disposal come on top. All durations use a
-  monotonic clock.
+  that phase's cap. Termination confirmation and disposal come on top. The plan's
+  `worstCaseCallMs` is the smaller of the summed call caps and the budget; it is not a bound
+  on the whole process, which can outlive the report while an unconfirmed child holds stdio.
+  Phase durations (probe included) use the runner's monotonic clock; the adapter's
+  `waitedMs` is monotonic too.
 - **Per-child timelines** (`probe.timelines`, `samples[].timelines.{warmup,decide}`):
   - Recorded per child: spawn offset, first stdout, JSONL event names from a closed
     allow-list (unknown names become `other`, non-JSON lines become `nonjson`), kills
     (time, signal, delivered), exit (code/signal) and close.
   - Bounds: at most 64 names are kept (`eventsDropped` counts the rest), and lines over
-    64 KiB are counted in `oversizeLines` without being parsed.
+    64 KiB of UTF-8 are counted in `oversizeLines` without being parsed, whatever the chunk
+    boundaries. Thread/turn start and end times live in fixed fields, so a turn that ends
+    after the name cap is still seen as ended.
   - Error-class events carry only a closed class (`reconnect`, `rate_limit`,
     `code_mode_unavailable`, `timeout`, `other`), never the message.
   - Derived values are CLI-observed proxies, not provider measurements: `bootMs`,
-    `threadToTurnMs`, `turnMs`, `censored` with `turnObservedMs`, `lastEventToSignalMs`,
-    `signalToExitMs`, `signalToCloseMs` and `exitToCloseMs`.
+    `threadToTurnMs`, `turnMs`, `censored` with `turnObservedMs`, `lastEventToSignalMs`
+    (the last line before the first signal; output after the signal does not change it),
+    `signalToExitMs`, `signalToCloseMs` and `exitToCloseMs`. Unobserved values are `null`.
   - Timelines are rendered after disposal, so a late close shows its real time.
 - **Other new report fields:** `cleanup.attempts[]` (start, duration, open children,
   errors per attempt), `samples[].errorDetails` (purpose, signal, waitBudgetMs, waitedMs,
   closeConfirmed), `summary.phases.{warmup,decide}` (planned, attempted, answered, timeout,
-  failed, interrupted, terminationUnconfirmed, skipped), `summary.warmupMs` (including
+  failed, interrupted, terminationUnconfirmed, unobserved, skipped; attempted equals answered
+  plus every failure kind), `summary.warmupMs` (including
   `cold` for the first create of the variant), `environment` (Node, platform, loadavg) and
   `startedAtIso`.
 - **Raw-text rule:** the no-raw-text rule covers these diagnostic fields. The normalised
   one-line `reason` per legal sample stays as before.
 - **Signals:** SIGINT/SIGTERM during `--live` stops new calls and interrupts the in-flight
   call through the adapter's confirmed-close path. Disposal still runs, and the report is
-  printed as incomplete (`aborted.code: STOPPED`, `complete` gate, exit 3). A second
-  signal takes the default action.
+  printed as incomplete: `aborted.code: STOPPED` is recorded even when the stop lands in the
+  last sample, `complete` is false, and the exit code is 3. A termination-unconfirmed abort
+  keeps priority. A second signal takes the default action.
 - **Gates:** `ok` and the three gates keep their meaning. The new fields are observations
   and do not relax any gate.
 
