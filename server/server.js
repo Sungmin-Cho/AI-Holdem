@@ -31,6 +31,7 @@ import {
   textLeaksPrivate,
   validateHandReplayTrigger,
   validatePrivateEngineState,
+  validatePrivateRecord,
   validateViewsAgainstEngine,
   validateTurnDeadline,
   validateResultHold,
@@ -39,7 +40,10 @@ import {
   assertHostText,
   hostAnnotationLeaks,
   hostCoachLeaks,
+  hostReviewText,
   sessionHasParticipants,
+  participantSessionOf,
+  rosterListOf,
   nextDecisionFromViews,
 } from '../publish-contract.js';
 
@@ -267,6 +271,44 @@ function readPlayers(root) {
   }
 }
 
+// #292: the roster as participantSessionOf reads it: the list, `undefined` when the file does
+// not exist, `null` when it cannot be read or has another shape.
+function readRosterState(root) {
+  try {
+    return rosterListOf(readSecurityJson(root, ['players.json']));
+  } catch (error) {
+    return error?.code === 'ENOENT' ? undefined : null;
+  }
+}
+
+// The engine's seats the same way, and the validated state when it could be read.
+function readEngineSeatsState(root, expectedSessionToken) {
+  let raw;
+  try {
+    raw = readSecurityJson(root, ['state.json']);
+  } catch (error) {
+    return { seats: error?.code === 'ENOENT' ? undefined : null, engineState: null };
+  }
+  try {
+    const engineState = validatePrivateEngineState(raw, { expectedSessionToken });
+    return { seats: engineState.seats, engineState };
+  } catch {
+    return { seats: null, engineState: null };
+  }
+}
+
+// #292: who a publication is for (participantSessionOf). A roster that cannot be read, or that
+// the engine's seats contradict, is no proof of a session without participants, so it no
+// longer skips their checks. A session with participants is not published without its roster
+// (the views are checked against it), nor is one nothing can place. Null means refuse.
+function publishRoster(root, token) {
+  const roster = readRosterState(root);
+  const { seats } = readEngineSeatsState(root, token);
+  const session = participantSessionOf({ roster, seats });
+  if (session === 'solo') return { multi: false, players: Array.isArray(roster) ? roster : [] };
+  return session === 'multi' && Array.isArray(roster) ? { multi: true, players: roster } : null;
+}
+
 function lookupHandRecord(root, engineState, handNo) {
   if (engineState?.hand && engineState.handNo === handNo) {
     return { ...engineState.hand, handNo, seats: engineState.seats };
@@ -276,7 +318,11 @@ function lookupHandRecord(root, engineState, handNo) {
   }
   try {
     const name = `hand-${String(handNo).padStart(4, '0')}.json`;
-    return { ...readSecurityJson(root, ['hands', name]), seats: engineState?.seats };
+    const record = readSecurityJson(root, ['hands', name]);
+    // #292: only that hand's complete record is judged by; a record missing its holes would
+    // read as no hidden card at all.
+    validatePrivateRecord(record, name);
+    return record.handNo === handNo ? { ...record, seats: engineState?.seats } : null;
   } catch {
     return null;
   }
@@ -482,38 +528,43 @@ function restoreAnnotationRow(row, { machine, literals, gate, hostTextLeaks = ()
 // #290: so does a restored coach note. A roster that cannot be read is no proof of a
 // session without participants: the engine's seats decide.
 function restoredHostTextGate(gameDir, expectedSessionToken) {
-  const open = { annotation: () => false, coach: () => false };
-  let roster = null;
-  let rosterMissing = false;
-  try {
-    const players = readSecurityJson(gameDir, ['players.json']);
-    roster = Array.isArray(players) ? players : (Array.isArray(players?.players) ? players.players : null);
-  } catch (error) {
-    rosterMissing = error?.code === 'ENOENT';
-  }
-  if (roster && !sessionHasParticipants(roster)) return open;
-  let engine;
-  try {
-    engine = readSecurityJson(gameDir, ['state.json']);
-  } catch (error) {
-    // Neither file exists: nothing on disk names a participant, and the live relay treats
-    // the directory as a solo session too.
-    if (rosterMissing && error?.code === 'ENOENT') return open;
-    return { annotation: () => true, coach: () => true };
-  }
-  try {
-    const engineState = validatePrivateEngineState(engine, { expectedSessionToken });
-    if (!roster && !sessionHasParticipants(engineState.seats)) return open;
-    // One load reads each hand's record once, however many restored rows name it.
-    const records = new Map();
-    const lookup = (handNo) => {
-      if (!records.has(handNo)) records.set(handNo, lookupHandRecord(gameDir, engineState, handNo));
-      return records.get(handNo);
-    };
-    return { annotation: (row) => hostAnnotationLeaks(row, lookup), coach: (note) => hostCoachLeaks(note, lookup) };
-  } catch {
-    return { annotation: () => true, coach: () => true };
-  }
+  // `lookup` is null for a session without participants; `settled` is false when the
+  // material could not be read, so a caller that keeps the reading reads it again.
+  const open = { annotation: () => false, coach: () => false, lookup: null, settled: true };
+  const closed = { annotation: () => true, coach: () => true, lookup: () => null, settled: false };
+  // #292: the same reading as the live relay (participantSessionOf). Neither file existing
+  // names no participant anywhere, and the live relay treats that directory as solo too.
+  const roster = readRosterState(gameDir);
+  const { seats, engineState } = readEngineSeatsState(gameDir, expectedSessionToken);
+  const session = participantSessionOf({ roster, seats });
+  if (session === 'solo') return open;
+  if (session === 'unknown' || !engineState) return closed;
+  // One load reads each hand's record once, however many restored rows name it.
+  const records = new Map();
+  const lookup = (handNo) => {
+    if (!records.has(handNo)) records.set(handNo, lookupHandRecord(gameDir, engineState, handNo));
+    return records.get(handNo);
+  };
+  return {
+    annotation: (row) => hostAnnotationLeaks(row, lookup), coach: (note) => hostCoachLeaks(note, lookup), lookup, settled: true,
+  };
+}
+
+// #292: what a host is shown of a review (hostReviewText): in a session with participants, or
+// one that cannot be placed, an old coach summary is withheld whole; the stored text is kept as
+// published. A session without participants is shown its review as it is. The reading is made
+// when a review is first shown and kept; one that could not be read is read again next time.
+function hostReviewView(gameDir, expectedSessionToken) {
+  const shown = new Map();
+  let gate = null;
+  return (review) => {
+    if (typeof review !== 'string') return review;
+    if (shown.has(review)) return shown.get(review);
+    if (!gate?.settled) gate = restoredHostTextGate(gameDir, expectedSessionToken);
+    const text = gate.lookup === null ? review : hostReviewText(review);
+    if (gate.settled) shown.set(review, text);
+    return text;
+  };
 }
 
 function restoreHistory(rawHistory, context) {
@@ -739,6 +790,7 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       training: migrated.training,
       trainingAnnotations: restoredAnnotations,
       review: raw.review,
+      hostReview: hostReviewView(gameDir, expectedSessionToken),
       publishId: raw.publishId,
       history: replay.history,
       lastActionAck: raw.lastActionAck,
@@ -750,7 +802,7 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       ...restoreViewerProjection(engineState, raw),
     };
   } catch (error) {
-    if (error.code === 'ENOENT') return emptyState();
+    if (error.code === 'ENOENT') return { ...emptyState(), hostReview: hostReviewView(gameDir, expectedSessionToken) };
     throw error;
   }
 }
@@ -958,7 +1010,8 @@ function hostSnapshot(state, hint = null) {
     resultHold: state.resultHold ?? null,
     viewerRole: viewerRole(state.view, HOST_ID),
   };
-  if (state.review !== undefined) snap.review = state.review;
+  // #292: the stored review stays as published; the host is shown it through the current rule.
+  if (state.review !== undefined) snap.review = state.hostReview ? state.hostReview(state.review) : state.review;
   snap.handReplays = handReplayList(state.handReplays);
   return snap;
 }
@@ -1216,7 +1269,10 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
     const revision=state.revision; const history=state.history; const hint=await currentHint();
     for (const entry of history) {
       if (entry.revision <= client.lastRevision) continue;
-      writeSse(client.res, entry.revision, {...entry.payload,hint:entry.revision===revision&&state.revision===revision?hint:null});
+      const payload = entry.payload?.review !== undefined && state.hostReview
+        ? { ...entry.payload, review: state.hostReview(entry.payload.review) }
+        : entry.payload;
+      writeSse(client.res, entry.revision, {...payload,hint:entry.revision===revision&&state.revision===revision?hint:null});
       client.lastRevision = entry.revision;
     }
   };
@@ -1338,8 +1394,12 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       : nextDecisionFromViews(body.views ?? { [HOST_ID]: body.view });
     try {
       if (body.resultHold !== undefined) validateResultHold(body.resultHold, body.view);
-      const players = readPlayers(root);
-      const multi = sessionHasParticipants(players);
+      const session = publishRoster(root, token);
+      if (!session) {
+        sendJson(res, 500, { ok: false, code: 'PRIVATE_LITERAL_INVALID' });
+        return;
+      }
+      const { players, multi } = session;
       if (multi) {
         if (body.view !== undefined && body.views === undefined) {
           sendJson(res, 400, { ok: false, code: 'VIEWS_REQUIRED' });

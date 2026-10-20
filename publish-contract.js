@@ -23,7 +23,11 @@ export {
   assertHostText,
   hostAnnotationLeaks,
   hostCoachLeaks,
+  hostReviewText,
+  REVIEW_COACH_HEADING,
   sessionHasParticipants,
+  participantSessionOf,
+  rosterListOf,
   projectForSeat,
   nextDecisionFromViews,
   EVENT_SCHEMAS,
@@ -193,6 +197,18 @@ export function isAnnotationOnlyAttempt(record) {
     && body !== null && typeof body === 'object' && !Array.isArray(body)
     && Array.isArray(body.trainingAnnotations)
     && Object.keys(body).every((key) => ANNOTATION_ONLY_BODY_KEYS.has(key));
+}
+
+// #292: the one definition of a recorded attempt that carries a coach note and nothing else
+// (plus the replay trigger the publisher itself attaches) — the only kind a withholding may
+// keep as evidence and let the publisher remove. A view, an action acknowledgement, a training
+// row or an annotation is never dropped by that path.
+const COACH_ONLY_BODY_KEYS = new Set(['publishId', 'coach', 'handReplay']);
+export function isCoachOnlyAttempt(record) {
+  const body = record?.body;
+  return plainObject(record?.coachAuthority) && !record.trainingAuthority && !record.annotationAuthority
+    && plainObject(body) && Array.isArray(body.coach) && body.coach.length === 1
+    && Object.keys(body).every((key) => COACH_ONLY_BODY_KEYS.has(key));
 }
 
 // Re-validates both fields: a child's reply is as untrusted as the relay's.

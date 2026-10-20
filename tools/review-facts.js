@@ -133,10 +133,14 @@ export function coachNotesDigest(snapshotPath, { limit = 10, chars = 220, withho
     return [];
   }
   const notes = Array.isArray(snapshot?.coach) ? snapshot.coach : [];
+  // #292: the line quotes the note cut short, and a cut can leave a card standing alone that
+  // the whole note had glued to the next word ("Ah9" cut after "Ah"). So the quoted text is
+  // judged as well as the note: it is what the host reads (hostReviewText judges this line).
+  const quoted = (note) => note.text.replace(/\s+/g, ' ').trim().slice(0, chars);
   return notes.filter((note) => note && note.unavailable !== true && Number.isSafeInteger(note.handNo) && typeof note.text === 'string')
-    .filter((note) => !withhold(note))
+    .filter((note) => !withhold(note) && !withhold({ handNo: note.handNo, text: quoted(note) }))
     .slice(-limit)
-    .map((note) => `핸드 ${note.handNo}: ${note.text.replace(/\s+/g, ' ').trim().slice(0, chars)}`);
+    .map((note) => `핸드 ${note.handNo}: ${quoted(note)}`);
 }
 
 // Markdown lines for the machine review's process section.

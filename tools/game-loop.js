@@ -60,6 +60,12 @@ import {
   recheckRejectionTupleOf,
   rejectionTupleOf,
   sanitizeRejectionFields,
+  isCoachOnlyAttempt,
+  participantSessionOf,
+  payloadSha256,
+  REVIEW_COACH_HEADING,
+  validatePrivateRecord,
+  rosterListOf,
   sessionHasParticipants,
   validateActionAck,
   validateCoachDecisions,
@@ -311,6 +317,8 @@ const KNOWN_CHILD_ERROR_CODES = new Set([
   'ADAPTER_DISABLED', 'ATTEMPT_TIMEOUT', 'FINALIZATION_ABORTED', 'HAND_ALREADY_PUBLISHED',
   'HAND_DEFERRED', 'HAND_SNAPSHOT_OCCUPIED', 'NO_RESULT', 'PUBLISH_FAILED',
   'QUEUE_ALREADY_SEALED', 'ROLLBACK_REFUSED', 'SUPERSEDED', 'INTERNAL',
+  // #292 withhold-queued refusals.
+  'WITHHOLD_TARGET_CHANGED', 'WITHHOLD_NOT_ALLOWED', 'WITHHOLD_SNAPSHOT_UNREADABLE',
   // #214 writer refusals of a release declaration.
   'RELEASE_TARGET_ALIVE', 'RELEASE_EVIDENCE_REFUTED', 'RELEASE_EVIDENCE_UNVERIFIABLE', 'ROW_CHANGED', 'ALREADY_RELEASED',
   // tools/publish.js
@@ -1558,27 +1566,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
   };
 
-  const runPublish = (args) => {
-    // Replayed bodies and queued/fallback envelopes cross the same output boundary.
-    const from = args.indexOf('--from');
-    const replaying = args.includes('--retry') || args.includes('--retire-rejected');
-    let envelope;
-    try {
-      envelope = replaying
-        ? readRecordedAttemptJson()?.body
-        : (from >= 0 ? readJsonOptional(args[from + 1], 'PUBLISH_ENVELOPE') : null);
-    } catch (error) {
-      // The publisher owns malformed-attempt rejection and its BAD_ATTEMPT code
-      // drives the existing bounded recovery matrix. A syntax-invalid JSON file
-      // has no publishable feedback; let that parser reject it, without bypassing
-      // claim validation for a readable replay or swallowing I/O failures.
-      if (!replaying || error.code !== 'BAD_PUBLISH_ATTEMPT'
-        || !(error.cause instanceof SyntaxError)) throw error;
-    }
-    const feedback = [...(Array.isArray(envelope?.coach) ? envelope.coach.map((note) => note.text) : []), envelope?.review];
-    if (feedback.some((text) => !coachingClaimAllowed(text))) {
-      throw codedError('REFERENCE_AUTHORITY_CLAIM', '게시할 피드백에 근거 범위를 벗어난 표현이 있습니다.');
-    }
+  const spawnPublish = (args) => {
     // After the cutoff every publication must carry the single finalization deadline:
     // publish.js refuses new play-time bodies once `noNewPlayTimePublishers` is set, and
     // the deadline is what bounds the residual drain to the remaining budget.
@@ -1587,6 +1575,146 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       : args;
     opts.onPublishInvoke?.([...deadlined]);
     return runJsonChild(publishCliPath, deadlined);
+  };
+
+  // #292: whether a recorded attempt's coach item has left the queue for good — sealed as
+  // exactly that item, or withheld — so that the publisher's removing it unsent is its
+  // resolution, not a failure.
+  const coachAttemptSettled = (record) => {
+    const item = record?.coachAuthority;
+    if (!isCoachOnlyAttempt(record) || typeof item.queueId !== 'string') return false;
+    const auth = readCoachAuthority();
+    const seal = auth?.publishedSeals?.[String(item.handNo)];
+    if (seal?.queueId === item.queueId && seal.payloadSha256 === item.payloadSha256) return true;
+    return (auth?.withheldPublications ?? []).some((row) => row.queueId === item.queueId);
+  };
+
+  // A resend bound to the exact record captured (its body digest and game epoch): the publisher
+  // refuses any other record unsent and untouched (ATTEMPT_CHANGED).
+  const boundToRecord = (args, record) => (args.includes('--expect-attempt-sha256')
+    ? args
+    : [...args, '--expect-attempt-sha256', sha256Text(JSON.stringify(record?.body ?? null)),
+      '--expect-game-epoch', String(record?.expectedGameEpoch)]);
+
+  // Removes a settled recorded attempt through the publisher, bound to that record, and checks
+  // that it is gone: the publisher ignores a failed unlink.
+  const discardSettledAttempt = async (args, record) => {
+    const bodySha256 = sha256Text(JSON.stringify(record?.body ?? null));
+    try {
+      return await spawnPublish(boundToRecord(args, record));
+    } catch (error) {
+      if (error.code !== 'STALE_COACH_AUTHORITY' && error.code !== 'NO_ATTEMPT') throw error;
+      const left = readRecordedAttemptJson();
+      if (left && sha256Text(JSON.stringify(left.body ?? null)) === bodySha256) {
+        throw codedError('STALE_ATTEMPT_REMAINS', '정리한 코치 게시 시도가 아직 남아 있습니다.');
+      }
+      return { ok: true, applied: false, discarded: true };
+    }
+  };
+
+  // #292: a coach note accepted under an earlier rule may be refused by the current one, and
+  // its body, resent, would hold every later publication. Each coach note about to be sent —
+  // a queued envelope or a recorded attempt's body — is judged here first, on the loop's own
+  // material and by the relay's own rule, so no relay answer decides anything. A note that
+  // cannot be judged is not sent and nothing changes. A refused one is never sent: the coach
+  // control withholds its queue item (identity and any recorded attempt kept as evidence, the
+  // envelope left on disk) and queues the hand's unavailable note in its place. A recorded
+  // attempt of the withheld note is then stale, and the publisher removes exactly that record
+  // unsent; a queued envelope is replaced by its successor. Returns null when the body goes
+  // out as it is.
+  const withheldCoachPublication = async (args, { replaying, record, envelope }) => {
+    const body = replaying ? record?.body : envelope;
+    const notes = Array.isArray(body?.coach) ? body.coach : [];
+    if (!notes.length) return null;
+    const verdicts = notes.map((note) => coachHostTextVerdict(note));
+    if (verdicts.includes('FORBIDDEN_LITERAL_UNAVAILABLE')) {
+      throw codedError('FORBIDDEN_LITERAL_UNAVAILABLE', '코치 노트의 참가자 카드 판정 자료를 읽지 못해 게시하지 않았습니다.');
+    }
+    if (!verdicts.includes('FORBIDDEN_LITERAL')) return null;
+    const authority = replaying ? record?.coachAuthority : envelope?.coachAuthority;
+    const handNo = notes[0]?.handNo;
+    // The note judged must be the queue item's own, and the body carry nothing else: bound by
+    // hand, by the digest the item was queued with, and by its public proof. Anything else
+    // withholds nothing and is not sent.
+    const coachOnly = replaying
+      ? isCoachOnlyAttempt(record)
+      : Object.keys(envelope ?? {}).every((key) => key === 'coach' || key === 'coachAuthority');
+    if (!coachOnly || notes.length !== 1 || !authority || typeof authority.queueId !== 'string' || handNo !== authority.handNo
+      || typeof authority.exactEnvelopePath !== 'string'
+      || payloadSha256(notes[0]) !== authority.payloadSha256
+      || notes[0]?.coachProof?.payloadSha256 !== authority.payloadSha256) {
+      throw codedError('COACH_WITHHOLD_UNBOUND', '다른 참가자의 카드를 인용한 코치 노트가 큐 항목에 묶여 있지 않아 게시하지 않았습니다.');
+    }
+    // Only the queue item the body was made for. A body the queue has already moved past is
+    // the publisher's to discard as stale — unless it was a withholding that moved it, which
+    // a stop may have interrupted before the attempt was removed.
+    const auth = readCoachAuthority();
+    const current = auth?.publishQueue?.[String(handNo)]?.queueId === authority.queueId;
+    const withheld = (auth?.withheldPublications ?? []).some((row) => row.queueId === authority.queueId);
+    if (!current && !withheld) return null;
+    const out = await runCoach([
+      'withhold-queued',
+      '--hand', String(handNo),
+      '--queue-id', authority.queueId,
+      '--payload-sha256', String(authority.payloadSha256),
+      '--envelope-path', authority.exactEnvelopePath,
+      '--reason', 'FORBIDDEN_LITERAL',
+      '--snapshot-file', coachSnapshotPath,
+      ...(replaying ? ['--attempt-body-sha256', sha256Text(JSON.stringify(record?.body ?? null))] : []),
+    ]);
+    log('coach-publish-withheld', { handNo, outcome: out?.outcome ?? 'UNKNOWN', reason: 'FORBIDDEN_LITERAL', retry: replaying });
+    // The recorded attempt now names a queue item that is no longer queued.
+    if (replaying) return { result: { ...(await discardSettledAttempt(args, record)), withheld: true } };
+    const next = readCoachAuthority()?.publishQueue?.[String(handNo)];
+    // Sealed already (the snapshot proved an earlier publication): nothing is left to send.
+    if (!next) return { result: { ok: true, applied: false, withheld: true } };
+    if (out?.replacementQueueId && next.queueId !== out.replacementQueueId) {
+      throw codedError('COACH_WITHHOLD_UNSETTLED', `핸드 ${handNo} 보류 뒤 큐 항목이 대체 노트가 아닙니다.`);
+    }
+    const from = args.indexOf('--from');
+    const replaced = [...args];
+    replaced[from + 1] = next.exactEnvelopePath;
+    return { args: replaced, envelope: readJsonOptional(next.exactEnvelopePath, 'PUBLISH_ENVELOPE') };
+  };
+
+  const runPublish = async (args) => {
+    // Replayed bodies and queued/fallback envelopes cross the same output boundary.
+    const from = args.indexOf('--from');
+    const replaying = args.includes('--retry') || args.includes('--retire-rejected');
+    let record = null;
+    let envelope;
+    try {
+      if (replaying) {
+        record = readRecordedAttemptJson();
+        envelope = record?.body;
+      } else {
+        envelope = from >= 0 ? readJsonOptional(args[from + 1], 'PUBLISH_ENVELOPE') : null;
+      }
+    } catch (error) {
+      // The publisher owns malformed-attempt rejection and its BAD_ATTEMPT code
+      // drives the existing bounded recovery matrix. A syntax-invalid JSON file
+      // has no publishable feedback; let that parser reject it, without bypassing
+      // claim validation for a readable replay or swallowing I/O failures.
+      if (!replaying || error.code !== 'BAD_PUBLISH_ATTEMPT'
+        || !(error.cause instanceof SyntaxError)) throw error;
+    }
+    // #292: a recorded coach attempt whose item has left the queue for good — sealed once the
+    // snapshot proved an answer that was lost, or withheld — is not resent: the publisher
+    // removes exactly that record unsent, which resolves it for the caller.
+    if (replaying && !args.includes('--retire-rejected') && coachAttemptSettled(record)) {
+      return discardSettledAttempt(args, record);
+    }
+    const withheld = await withheldCoachPublication(args, { replaying, record, envelope });
+    if (withheld?.result) return withheld.result;
+    if (withheld) {
+      args = withheld.args;
+      envelope = withheld.envelope;
+    }
+    const feedback = [...(Array.isArray(envelope?.coach) ? envelope.coach.map((note) => note.text) : []), envelope?.review];
+    if (feedback.some((text) => !coachingClaimAllowed(text))) {
+      throw codedError('REFERENCE_AUTHORITY_CLAIM', '게시할 피드백에 근거 범위를 벗어난 표현이 있습니다.');
+    }
+    return spawnPublish(args);
   };
 
   const serverHealthy = async (port, { stopAware = false } = {}) => {
@@ -4582,22 +4710,50 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return note;
   };
 
-  const coachHostTextLeaks = (note, handNo, { event = 'coach-host-text-refused' } = {}) => {
+  // The relay's participant-card rule (assertHostText) on the loop's own material. Null when
+  // the note may be shown, FORBIDDEN_LITERAL when it quotes another participant's hidden card,
+  // FORBIDDEN_LITERAL_UNAVAILABLE when it cannot be judged (the hand's record, a hand number,
+  // or a session nothing can place). #292: a roster that does not exist, or that the engine's
+  // seats contradict, is no evidence of a session without participants (participantSessionOf).
+  // A corrupt roster still fails as BAD_PLAYERS.
+  const coachHostTextVerdict = (note) => {
     const players = readJsonOptional(playersPath, 'PLAYERS');
-    if (!sessionHasParticipants(players)) return false;
-    const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+    const roster = players === null ? undefined : (rosterListOf(players) ?? null);
+    let engine = null;
     try {
-      assertHostText({ coach: [{ ...note, handNo }] }, (n) => {
-        const record = fullHandRecord(n);
-        return record ? { ...record, seats: engine?.seats } : null;
-      });
-      return false;
-    } catch (error) {
-      // FORBIDDEN_LITERAL: a quoted card. FORBIDDEN_LITERAL_UNAVAILABLE: the hand record could
-      // not be read; refused either way, the code keeps the two apart in the log.
-      log(event, { handNo, code: error.code ?? 'ERROR' });
-      return true;
+      engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+    } catch {
+      engine = false;
     }
+    const seats = engine === null ? undefined : (Array.isArray(engine?.seats) ? engine.seats : null);
+    const session = participantSessionOf({ roster, seats });
+    if (session === 'solo') return null;
+    if (session === 'unknown') return 'FORBIDDEN_LITERAL_UNAVAILABLE';
+    try {
+      assertHostText({ coach: [note] }, (n) => {
+        // A record that is not a complete hand record of that hand cannot be judged: its
+        // missing holes would read as no hidden card.
+        let record = null;
+        try {
+          record = fullHandRecord(n);
+          if (record) validatePrivateRecord(record, `hand ${n}`);
+        } catch {
+          return null;
+        }
+        return record?.handNo === n ? { ...record, seats } : null;
+      });
+      return null;
+    } catch (error) {
+      return error.code === 'FORBIDDEN_LITERAL' ? 'FORBIDDEN_LITERAL' : 'FORBIDDEN_LITERAL_UNAVAILABLE';
+    }
+  };
+
+  const coachHostTextLeaks = (note, handNo, { event = 'coach-host-text-refused' } = {}) => {
+    const code = coachHostTextVerdict({ ...note, handNo });
+    // FORBIDDEN_LITERAL: a quoted card. FORBIDDEN_LITERAL_UNAVAILABLE: the hand record could
+    // not be read; refused either way, the code keeps the two apart in the log.
+    if (code) log(event, { handNo, code });
+    return code !== null;
   };
 
   const readCoachAuthority = () => readJsonOptional(coachAuthorityPath, 'COACH_AUTHORITY');
@@ -6739,7 +6895,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       ...(losses.length ? losses : ['- 칩을 잃은 핸드가 없습니다.']), '',
       '### 결정 점검(엔진 계산)', '',
       ...(checks.length ? checks : ['- 자동 점검에서 두드러진 패턴이 없었습니다.']), '',
-      ...(notes.length ? ['### 핸드별 코치 노트 요약', '', ...notes.map((note) => `- ${note}`), ''] : []),
+      ...(notes.length ? [REVIEW_COACH_HEADING, '', ...notes.map((note) => `- ${note}`), ''] : []),
       '## 각 AI의 실제 아키타입 공개 + 읽기 평가', '',
       '설정된 성향은 게임 시작 시의 정책 설정입니다. 아래 관찰 기록만으로 그 성향이 입증되거나 상대 읽기가 정확했다고 판단할 수는 없습니다.',
       ...(names.length ? names : ['AI 성향 기록을 확인할 수 없습니다.']), '',

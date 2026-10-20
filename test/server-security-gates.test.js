@@ -17,7 +17,7 @@ import {
 } from '../publish-contract.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { toPublicSummary } from '../training/public-view.js';
-import { startServer } from '../server/server.js';
+import { loadUiState, publicSnapshot, startServer } from '../server/server.js';
 import {
   FIXTURE_ARCHETYPE,
   FIXTURE_CONFIG_DIGEST,
@@ -760,7 +760,7 @@ test('M1: forged identity and detail leaves are rejected at the server, snapshot
 
 // --- M4: 복원된 history는 live merge와 같은 다섯 술어를 통과한 재투영이다 ---
 
-function seedSnapshot(dir, { training = [], trainingAnnotations = [], history = [], view = null, coach = [] }) {
+function seedSnapshot(dir, { training = [], trainingAnnotations = [], history = [], view = null, coach = [], review }) {
   fs.writeFileSync(path.join(dir, 'ui-snapshot.json'), JSON.stringify({
     revision: history.length + 1,
     publishId: history.length + 1,
@@ -770,6 +770,7 @@ function seedSnapshot(dir, { training = [], trainingAnnotations = [], history = 
     training,
     trainingAnnotations,
     history,
+    ...(review === undefined ? {} : { review }),
   }));
 }
 
@@ -1671,6 +1672,225 @@ test('#290 로스터를 읽지 못해도 엔진 좌석이 참가자를 보이면
       assert.deepEqual((await snapshotOf(port)).coach.map((row) => row.text), [note.text], roster);
     });
   }
+});
+
+// #292 A: a review written under an earlier rule may quote, in its coach summary, a note the
+// current rule withholds. The stored review is kept byte for byte (the loop proves its
+// publication from it); a host in a session with participants is sent the old summary
+// withheld whole, on every host path, whatever cards it names.
+function machineReviewText(coachLines, heading = '### 핸드별 코치 노트 요약') {
+  return [
+    '## 내 성향 통계', '', '- 플레이한 핸드: 1핸드', '',
+    '## 결정적 핸드 2~3개 리플레이', '',
+    heading, '', ...coachLines, '',
+    '## 각 AI의 실제 아키타입 공개 + 읽기 평가', '', '- 관찰 기록',
+    '## 다음 게임에서 연습할 것', '', '- 판단 보조를 본다.',
+  ].join('\n');
+}
+
+const sha256Of = (text) => createHash('sha256').update(text).digest('hex');
+const SECTION_WITHHELD = '- 이전 버전에서 만든 코치 노트 요약이라 현재 공개 규칙으로 확인할 수 없어 표시하지 않습니다.';
+
+test('#292 구버전 기계 리뷰의 코치 요약은 멀티 호스트에게 통째로 가려 보내고 저장 리뷰는 바이트 그대로다', async () => {
+  const dir = tmpDir();
+  noAiSessionFixtures(dir, { h1Holes: ['Th', '2d'] });
+  const review = machineReviewText(['- 핸드 1: 상대는 10♥를 버렸다', '- 핸드 1: 내 AhKh로 3벳했다']);
+  seedSnapshot(dir, {
+    review,
+    history: [{ revision: 1, at: '2026-01-01T00:00:00.000Z', payload: { review } }],
+  });
+  const stored = () => JSON.parse(fs.readFileSync(path.join(dir, 'ui-snapshot.json'), 'utf8'));
+  await withServer(dir, async ({ port }) => {
+    const shown = (await snapshotOf(port)).review;
+    for (const quoted of ['10♥', 'AhKh로']) assert.equal(shown.includes(quoted), false, quoted);
+    assert.ok(shown.includes(SECTION_WITHHELD));
+    assert.ok(shown.includes('## 다음 게임에서 연습할 것'));
+    const sse = await collectSse(port);
+    for (const quoted of ['10♥', 'AhKh로']) assert.equal(sse.includes(quoted), false, quoted);
+    assert.ok(sse.includes('현재 공개 규칙으로 확인할 수 없어 표시하지 않습니다'));
+    // A later publication rewrites the file: the review in it, and in its history, is unchanged.
+    const rewrite = await post(port, { publishId: 5, training: [summaryOf()] });
+    assert.deepEqual([rewrite.status, rewrite.json.applied], [200, true], JSON.stringify(rewrite.json));
+    assert.equal(sha256Of(stored().review), sha256Of(review));
+    assert.equal(stored().history.find((entry) => entry.payload?.review !== undefined).payload.review, review);
+    // The same review published live is stored as sent and shown the same way.
+    const republished = await post(port, { publishId: 6, review });
+    assert.deepEqual([republished.status, republished.json.applied], [200, true], JSON.stringify(republished.json));
+    assert.equal(stored().review, review);
+    assert.equal((await snapshotOf(port)).review, shown);
+    assert.equal((await collectSse(port)).includes('10♥'), false);
+  });
+  // An ended game opened from the lobby is read through loadUiState + publicSnapshot.
+  const lobby = hostSnapshotReview(dir);
+  assert.equal(lobby.includes('10♥'), false);
+  assert.ok(lobby.includes(SECTION_WITHHELD));
+});
+
+function hostSnapshotReview(dir) {
+  return publicSnapshot(loadUiState(dir, TOKEN)).review;
+}
+
+test('#292 solo 세션과 현재 제목의 코치 요약은 그대로 보인다', async () => {
+  const legacy = machineReviewText(['- 핸드 1: 상대는 10♥를 버렸다']);
+  const current = machineReviewText(['- 핸드 1: 내 AhKh로 3벳했다'], '### 코치 노트 요약');
+  const multi = tmpDir();
+  noAiSessionFixtures(multi, { h1Holes: ['Th', '2d'] });
+  seedSnapshot(multi, { review: current });
+  await withServer(multi, async ({ port }) => {
+    assert.equal((await snapshotOf(port)).review, current);
+  });
+  const solo = tmpDir();
+  writeSecurityFixtures(solo, { hands: [handRecordFixture(1, { holes: { user: ['Ah', 'Kh'], p1: ['Th', '2d'] } })] });
+  seedSnapshot(solo, { review: legacy, history: [{ revision: 1, at: '2026-01-01T00:00:00.000Z', payload: { review: legacy } }] });
+  await withServer(solo, async ({ port }) => {
+    assert.equal((await snapshotOf(port)).review, legacy);
+    assert.ok((await collectSse(port)).includes('10♥'));
+  });
+});
+
+test('#292 참가자 세션을 판별할 수 없으면 구버전 코치 요약을 가린다', async () => {
+  const dir = tmpDir();
+  noAiSessionFixtures(dir, { h1Holes: ['Th', '2d'] });
+  const review = machineReviewText(['- 핸드 1: 프리플랍 콜 범위를 다시 봅니다']);
+  seedSnapshot(dir, { review });
+  fs.writeFileSync(path.join(dir, 'players.json'), '{not json');
+  fs.writeFileSync(path.join(dir, 'state.json'), '{not json');
+  const shown = hostSnapshotReview(dir);
+  assert.equal(shown.includes('프리플랍 콜 범위'), false);
+  assert.ok(shown.includes(SECTION_WITHHELD));
+  assert.ok(shown.includes('## 다음 게임에서 연습할 것'));
+});
+
+// #292: a past hand is judged only by its complete record. One whose holes are gone would read
+// as no hidden card at all, so a note naming that hand cannot be judged and is refused.
+test('#292 지난 핸드의 기록이 온전하지 않으면 그 핸드를 말하는 코치 노트는 판정 불가로 거절한다', async () => {
+  const dir = tmpDir();
+  const rows = [{ playerId: 'user', kind: 'human' }, { playerId: 'h1', kind: 'human', participantId: 'part-1' }];
+  const hand = (handNo, h1) => {
+    const record = handRecordFixture(handNo, { holes: { user: ['Ah', 'Kh'], h1 } });
+    delete record.holes.p1;
+    delete record.startStacks.p1;
+    delete record.endStacks.p1;
+    return record;
+  };
+  writeSecurityFixtures(dir, {
+    players: rows,
+    hands: [hand(1, ['Th', '2d']), hand(2, ['9c', '8c'])],
+    config: { replayReveal: 'all', aiCount: 0, humanCount: 2 },
+    state: { policySeed: null, seats: rows.map((row) => ({ playerId: row.playerId, stack: 10_000, out: false, kind: 'human' })) },
+  });
+  const archive = path.join(dir, 'hands', 'hand-0001.json');
+  await withServer(dir, async ({ port }) => {
+    let publishId = 0;
+    for (const spoiled of [{ handNo: 1 }, { ...JSON.parse(fs.readFileSync(archive, 'utf8')), handNo: 3 }]) {
+      fs.writeFileSync(archive, JSON.stringify(spoiled));
+      const refused = await post(port, { publishId: (publishId += 1), coach: [{ handNo: 1, text: '상대는 10♥를 버렸다' }] });
+      assert.deepEqual([refused.status, refused.json.code], [500, 'FORBIDDEN_LITERAL_UNAVAILABLE'], JSON.stringify(spoiled).slice(0, 40));
+    }
+    // The last hand is read from the engine and is judged as before.
+    const leak = await post(port, { publishId: (publishId += 1), coach: [{ handNo: 2, text: '상대는 9c를 버렸다' }] });
+    assert.deepEqual([leak.status, leak.json.code], [400, 'FORBIDDEN_LITERAL']);
+  });
+});
+
+// #292 C: the live relay no longer reads a roster it cannot read as "no participants". The
+// engine's seats decide; a session they say has participants is not published without its
+// roster, and nothing is stored.
+test('#292 라이브 relay는 읽지 못한 로스터를 단일 세션으로 보지 않는다', async () => {
+  const note = { handNo: 1, text: '상대는 10♥를 버렸다' };
+  const spoilers = {
+    missing: (file) => fs.rmSync(file),
+    corrupt: (file) => fs.writeFileSync(file, '{not json'),
+    shape: (file) => fs.writeFileSync(file, JSON.stringify({ roster: [] })),
+    ...(process.platform === 'win32' ? {} : { unreadable: (file) => fs.chmodSync(file, 0o000) }),
+  };
+  for (const [name, spoil] of Object.entries(spoilers)) {
+    const multi = tmpDir();
+    noAiSessionFixtures(multi, { h1Holes: ['Th', '2d'] });
+    const file = path.join(multi, 'players.json');
+    spoil(file);
+    try {
+      await withServer(multi, async ({ port }) => {
+        const refused = await post(port, { publishId: 1, coach: [note] });
+        assert.deepEqual([refused.status, refused.json.code], [500, 'PRIVATE_LITERAL_INVALID'], name);
+        const clean = await post(port, { publishId: 2, coach: [{ handNo: 1, text: '프리플랍 콜 범위' }] });
+        assert.deepEqual([clean.status, clean.json.code], [500, 'PRIVATE_LITERAL_INVALID'], name);
+        assert.deepEqual((await snapshotOf(port)).coach, [], name);
+      });
+    } finally {
+      if (fs.existsSync(file)) fs.chmodSync(file, 0o600);
+    }
+    // A solo session's engine names no participant: a spoiled roster still publishes.
+    const solo = tmpDir();
+    writeSecurityFixtures(solo);
+    spoil(path.join(solo, 'players.json'));
+    try {
+      await withServer(solo, async ({ port }) => {
+        const accepted = await post(port, { publishId: 1, coach: [{ handNo: 1, text: '프리플랍 콜 범위' }] });
+        assert.equal(accepted.status, 200, `${name} ${JSON.stringify(accepted.json)}`);
+      });
+    } finally {
+      if (fs.existsSync(path.join(solo, 'players.json'))) fs.chmodSync(path.join(solo, 'players.json'), 0o600);
+    }
+  }
+  // A roster that cannot be read beside an engine state that cannot be read either refuses too.
+  const neither = tmpDir();
+  noAiSessionFixtures(neither, { h1Holes: ['Th', '2d'] });
+  fs.writeFileSync(path.join(neither, 'players.json'), '{not json');
+  fs.writeFileSync(path.join(neither, 'state.json'), '{not json');
+  await withServer(neither, async ({ port }) => {
+    const refused = await post(port, { publishId: 1, coach: [{ handNo: 1, text: '프리플랍 콜 범위' }] });
+    assert.deepEqual([refused.status, refused.json.code], [500, 'PRIVATE_LITERAL_INVALID']);
+  });
+  // Both files absent is the bare relay directory: still solo.
+  const bare = tmpDir();
+  await withServer(bare, async ({ port }) => {
+    assert.equal((await post(port, { publishId: 1, coach: [{ handNo: 1, text: '프리플랍 콜 범위' }] })).status, 200);
+  });
+});
+
+// #292 C: a roster the engine's seats contradict decides nothing either way.
+test('#292 로스터와 엔진 좌석이 참가자 구성에서 어긋나면 게시하지 않는다', async () => {
+  const soloRoster = [{ playerId: 'user', kind: 'human' }, { playerId: 'p1', kind: 'ai', archetype: FIXTURE_ARCHETYPE }];
+  for (const roster of [[], soloRoster]) {
+    const dir = tmpDir();
+    noAiSessionFixtures(dir, { h1Holes: ['Th', '2d'] });
+    fs.writeFileSync(path.join(dir, 'players.json'), JSON.stringify(roster));
+    await withServer(dir, async ({ port }) => {
+      const refused = await post(port, { publishId: 1, coach: [{ handNo: 1, text: '상대는 10♥를 버렸다' }] });
+      assert.deepEqual([refused.status, refused.json.code], [500, 'PRIVATE_LITERAL_INVALID'], JSON.stringify(roster));
+      assert.deepEqual((await snapshotOf(port)).coach, []);
+    });
+  }
+  // The other way round: a roster naming a participant the engine does not seat.
+  const solo = tmpDir();
+  writeSecurityFixtures(solo);
+  fs.writeFileSync(path.join(solo, 'players.json'), JSON.stringify([
+    { playerId: 'user', kind: 'human' }, { playerId: 'h1', kind: 'human', participantId: 'part-1' },
+  ]));
+  await withServer(solo, async ({ port }) => {
+    const refused = await post(port, { publishId: 1, coach: [{ handNo: 1, text: '프리플랍 콜 범위' }] });
+    assert.deepEqual([refused.status, refused.json.code], [500, 'PRIVATE_LITERAL_INVALID']);
+  });
+});
+
+// #292 D: in a multiplayer session a coach note must name its hand; one that does not is
+// refused as unjudgeable instead of being let through unread.
+test('#292 멀티 세션의 라이브 코치 노트는 정수 handNo가 없으면 FORBIDDEN_LITERAL_UNAVAILABLE이다', async () => {
+  const dir = tmpDir();
+  noAiSessionFixtures(dir, { h1Holes: ['Th', '2d'] });
+  await withServer(dir, async ({ port }) => {
+    let publishId = 0;
+    for (const handNo of [undefined, '1', null, 1.5]) {
+      const note = { text: '상대는 10♥를 버렸다' };
+      if (handNo !== undefined) note.handNo = handNo;
+      const refused = await post(port, { publishId: (publishId += 1), coach: [note] });
+      assert.deepEqual([refused.status, refused.json.code], [500, 'FORBIDDEN_LITERAL_UNAVAILABLE'], String(handNo));
+    }
+    const accepted = await post(port, { publishId: (publishId += 1), coach: [{ handNo: 1, text: '프리플랍 콜 범위를 다시 봅니다.' }] });
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.json));
+    assert.deepEqual((await snapshotOf(port)).coach.map((row) => row.handNo), [1]);
+  });
 });
 
 test('#289 config가 AI를 세는데 좌석이 모두 human으로 적힌 세션은 빈 deny 목록을 허용하지 않는다', async () => {
