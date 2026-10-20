@@ -630,8 +630,9 @@ test('#297 타임라인: 이벤트 64개 상한·긴 줄·모르는 이름은 bo
 });
 
 // 실제 어댑터 아래에 OS 프로세스 없는 각본 자식을 물린다. 청크 경계·신호 뒤 출력·종료 시각을 정확히 통제하려는 것이다.
-// plan(spec)은 { chunks, hold, afterKill }을 돌려준다: chunks를 그대로 observe에 넣고, hold면 신호가 올 때까지 끝나지 않으며,
-// 신호를 받으면 5ms 뒤 afterKill 청크를 더 낸 다음 exit·close한다.
+// plan(spec)은 { chunks, hold, afterKill, exitAfterMs, closeAfterMs }를 돌려준다: chunks를 그대로 observe에 넣고, hold면
+// 신호가 올 때까지 끝나지 않으며, 신호를 받으면 5ms 뒤 afterKill 청크를 더 낸 다음 exit·close한다. hold가 아니면
+// exitAfterMs 뒤에 exit하고, exit와 close 사이에는 closeAfterMs를 둔다(기본 0 — 같은 콜백).
 function scriptedChildren(plan) {
   let nextPid = 910_000;
   const exec = (spec) => {
@@ -648,13 +649,18 @@ function scriptedChildren(plan) {
       if (finished) return;
       finished = true;
       observe({ type: 'exit', code, signal });
-      observe({ type: 'close', code, signal });
-      settle({ code, signal, stdout, stderr: '' });
-      markClosed();
+      const close = () => {
+        observe({ type: 'close', code, signal });
+        settle({ code, signal, stdout, stderr: '' });
+        markClosed();
+      };
+      if (script.closeAfterMs) setTimeout(close, script.closeAfterMs); else close();
     };
     setImmediate(() => {
       for (const chunk of script.chunks) emit(chunk);
-      if (!script.hold) finish(0, null);
+      if (!script.hold) {
+        if (script.exitAfterMs) setTimeout(() => finish(0, null), script.exitAfterMs); else finish(0, null);
+      }
     });
     const kill = (signal) => {
       setTimeout(() => { for (const chunk of script.afterKill ?? []) emit(chunk); finish(null, signal); }, 5);
@@ -839,8 +845,11 @@ test('#297 타임라인(각본 자식): turn 시작을 신호 뒤에야 처음 �
     if (!isResume && modelOf(spec.args) === SOL) {
       return { hold: true, chunks: [ev({ type: 'thread.started', thread_id: 'th-s' })], afterKill: [ev({ type: 'turn.started' })] };
     }
-    // Luna: turn이 시작된 뒤 완료 없이 스스로 exit한다 — 신호가 없으면 exit가 잘린 경계다.
-    if (!isResume) return { chunks: [ev({ type: 'thread.started', thread_id: 'th-l' }) + ev({ type: 'turn.started' })] };
+    // Luna: turn이 시작된 뒤 완료 없이 스스로 exit한다 — 신호가 없으면 exit가 잘린 경계다. 시작·exit·close를 서로
+    // 다른 시각에 두어 경계를 close·0으로 잘못 잡는 계산과 구별한다.
+    if (!isResume) {
+      return { chunks: [ev({ type: 'thread.started', thread_id: 'th-l' }) + ev({ type: 'turn.started' })], exitAfterMs: 60, closeAfterMs: 60 };
+    }
     const spot = spots.find((candidate) => spec.input.includes(`decisionId: ${candidate.decisionId}`));
     return { chunks: [decision(spot, { action: safeAction(spot), reason: '각본 사유' })] };
   });
@@ -856,8 +865,9 @@ test('#297 타임라인(각본 자식): turn 시작을 신호 뒤에야 처음 �
   const [exited] = report.variants[0].samples[0].timelines.warmup;
   assert.deepEqual(exited.kills, [], '신호 없이 스스로 끝났다');
   assert.equal(exited.derived.censored, true);
-  assert.equal(exited.derived.turnObservedMs, exited.exitMs - exited.events[1].ms, '신호가 없으면 exit까지가 관측 구간이다');
-  assert.ok(exited.derived.turnObservedMs >= 0);
+  assert.ok(exited.events[1].ms < exited.exitMs && exited.exitMs < exited.closeMs, '각본대로 시작 < exit < close');
+  assert.equal(exited.derived.turnObservedMs, exited.exitMs - exited.events[1].ms, '신호가 없으면 exit까지가 관측 구간이다(close가 아니다)');
+  assert.ok(exited.derived.turnObservedMs >= 30, `관측 구간은 exit까지의 실제 길이다: ${exited.derived.turnObservedMs}`);
 });
 
 test('#297 CLI: 중단 신호로 끝낸 호출의 close를 확인하지 못하면 STOPPED보다 TERMINATION_UNCONFIRMED가 우선하고 executionOk=false다', async (t) => {
