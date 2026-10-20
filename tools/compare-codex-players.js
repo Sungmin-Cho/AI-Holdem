@@ -28,8 +28,9 @@
 //   - `budgetMs`는 **새 호출 시작** 예산이다: 남은 예산이 그 단계 상한보다 작으면 그 단계를 시작하지 않는다. 진행 중
 //     호출의 종료 확인과 dispose는 그 뒤에 더해지고, 종료를 확인하지 못한 자식이 stdio를 쥐고 있으면 보고서를 낸 뒤에도
 //     프로세스가 그 close까지 남을 수 있다(자식을 강제로 정리하지 않는다). 시계는 모두 단조 시계다.
-//   - `--live` 실행 중 SIGINT·SIGTERM을 받으면 새 호출을 멈추고 진행 중 호출은 중단 신호로 끝내며(종료 확인 경로는
-//     그대로), dispose 뒤 불완전 보고서를 낸다. 둘째 신호는 기본 동작(즉시 종료)이다. CLI 자식은 자기 프로세스
+//   - `--live` 실행 중 SIGINT·SIGTERM을 받으면 새 호출을 멈추고 진행 중인 warmup·decide는 중단 신호로 끝내며(종료
+//     확인 경로는 그대로), dispose 뒤 불완전 보고서를 낸다. probe는 중단 신호를 받지 않으므로 끝나거나 자기 상한
+//     (`--timeout-ms`)에 이를 때까지 기다린다. 둘째 신호는 기본 동작(즉시 종료)이며 자식 정리를 보장하지 않는다. CLI 자식은 자기 프로세스
 //     그룹에서 돌기 때문에(POSIX) 터미널의 Ctrl-C가 그들에게 직접 가지 않는다.
 import fs from 'node:fs';
 import os from 'node:os';
@@ -286,23 +287,21 @@ function summarize(variant, samples) {
   const attempted = samples.filter((sample) => sample.status !== 'skipped');
   const decided = samples.filter((sample) => typeof sample.decideMs === 'number');
   const latencies = decided.map((sample) => sample.decideMs);
-  // warmup은 응답을 받은(세션을 연) 것만 지연으로 싣는다 — 타임아웃의 경과는 상한이지 응답 시간이 아니다.
-  const warmed = samples.filter((sample) => typeof sample.warmupMs === 'number' && sample.errorPhase !== 'warmup');
+  // warmup은 실제 자식이 응답한(answered) 것만 지연으로 싣는다 — 타임아웃의 경과는 상한이지 응답 시간이 아니다.
+  const warmed = samples.filter((sample) => typeof sample.warmupMs === 'number' && sample.phaseOutcomes?.warmup === 'answered');
   const warmups = warmed.map((sample) => sample.warmupMs);
   const actions = {};
   for (const sample of samples) if (sample.legal) actions[sample.action] = (actions[sample.action] ?? 0) + 1;
-  const phaseCount = (status, phase) => samples.filter((sample) => sample.status === status && sample.errorPhase === phase).length;
-  // 단계별 분모: 예정(표본 수)·시도(그 단계를 시작함)·응답(그 단계가 결과를 돌려줌)과 실패 종류. 건너뜀은 예정 − 시도이고,
-  // 시도 = 응답 + timeout + failed + interrupted + terminationUnconfirmed + unobserved다.
+  // 단계별 분모: 표본마다 단계 결과(`phaseOutcomes`)를 따로 기록해 서로 배타적으로 센다. 시도 = 응답 + timeout + failed +
+  // interrupted + terminationUnconfirmed + unobserved이고, 건너뜀은 예정 − 시도다.
   const phases = Object.fromEntries(SAMPLE_PHASES.map((phase) => {
-    const started = samples.filter((sample) => sample.observedCalls?.[phase] !== null && sample.observedCalls?.[phase] !== undefined);
-    const failedHere = (status) => phaseCount(status, phase);
-    const answered = started.filter((sample) => sample.errorPhase !== phase).length;
+    const outcome = (kind) => samples.filter((sample) => sample.phaseOutcomes?.[phase] === kind).length;
+    const attemptedHere = samples.filter((sample) => (sample.phaseOutcomes?.[phase] ?? null) !== null).length;
     return [phase, {
-      planned: samples.length, attempted: started.length, answered,
-      timeout: failedHere('timeout'), failed: failedHere('failed'), interrupted: failedHere('interrupted'),
-      terminationUnconfirmed: failedHere('termination_unconfirmed'), unobserved: failedHere('unobserved'),
-      skipped: samples.length - started.length,
+      planned: samples.length, attempted: attemptedHere, answered: outcome('answered'),
+      timeout: outcome('timeout'), failed: outcome('failed'), interrupted: outcome('interrupted'),
+      terminationUnconfirmed: outcome('termination_unconfirmed'), unobserved: outcome('unobserved'),
+      skipped: samples.length - attemptedHere,
     }];
   }));
   return {
@@ -310,7 +309,7 @@ function summarize(variant, samples) {
     legal: count('ok'), invalid: count('invalid'), timeout: count('timeout'), failed: count('failed'),
     interrupted: count('interrupted'),
     terminationUnconfirmed: count('termination_unconfirmed'), skipped: count('skipped'),
-    timeoutByPhase: { warmup: phaseCount('timeout', 'warmup'), decide: phaseCount('timeout', 'decide') },
+    timeoutByPhase: { warmup: phases.warmup.timeout, decide: phases.decide.timeout },
     phases,
     // unobserved: 응답은 받았지만 그 단계에서 자식 argv가 하나도 관측되지 않은 표본. 합법 응답으로 세지 않는다.
     unobserved: count('unobserved'),
@@ -499,6 +498,11 @@ export async function runComparison(rawOptions = {}, deps = {}) {
   let cleanup = null;
   // 어댑터는 만들어지는 대로 runs에 넣는다 — 둘째 생성이 던져도 첫째는 finally에서 dispose된다.
   const runs = [];
+  // 중단 요청을 그 경계에서 기록한다. 이미 다른 중단(종료 미확인)이 있으면 그쪽이 우선이다.
+  const stopAt = (where) => {
+    if (!aborted && stopRequested()) aborted = { code: 'STOPPED', variant: null, ...where, signal: stopSignal.reason?.signal ?? null };
+    return Boolean(aborted);
+  };
 
   try {
     for (const variant of COMPARISON_VARIANTS) {
@@ -538,10 +542,6 @@ export async function runComparison(rawOptions = {}, deps = {}) {
     }
     // 1) 실제 no-tool probe. 어댑터의 통과 주장은 실제 probe 자식 argv가 관측되고 요청한 모델/effort와 일치할 때만
     //    `verified`다. 통과(verified)하지 못한 설정은 표본을 돌지 않거나(실패·미관측) 불합격으로 보고된다(불일치).
-    const stopAt = (where) => {
-      if (!aborted && stopRequested()) aborted = { code: 'STOPPED', variant: null, ...where, signal: stopSignal.reason?.signal ?? null };
-      return Boolean(aborted);
-    };
     for (const run of runs) {
       if (stopAt({ phase: 'probe' })) break;
       if (deadline - now() < options.timeoutMs) { run.probe = probeNotRun('예산 소진으로 probe를 건너뜁니다.'); continue; }
@@ -597,6 +597,8 @@ export async function runComparison(rawOptions = {}, deps = {}) {
     // 3) 어댑터는 항상 dispose한다. 한 번 실패하면 짧게 기다렸다가 다시 확인한다.
     cleanup = await disposeAll(runs, tmp, { mono, monoStartedAt });
   }
+  // 측정을 다 얻은 뒤 정리 중에 온 중단도 남긴다.
+  stopAt({ phase: 'cleanup' });
 
   // 타임라인은 dispose 뒤에 렌더링한다 — 정리 중에 늦게 닫힌 자식도 그 close 시각으로 보인다.
   const render = (records) => records.map((record) => timelineView(record, monoStartedAt));
@@ -719,6 +721,9 @@ function skipped(entry, reason) {
     warmupMs: null, decideMs: null, warmupIndex: null, argvModel: null, argvEffort: null, mismatch: null, errorDetails: null,
     // 단계별로 관측된 실제 자식 argv 수. null = 그 단계를 돌리지 않았다. 돌렸는데 0이면 unobservedPhases에 든다.
     observedCalls: { warmup: null, decide: null }, unobservedPhases: [],
+    // 단계별 결과: null = 돌리지 않음, answered = 자식이 관측된 응답, unobserved = 자식 없이 돌아온 응답,
+    // 그 밖에는 그 단계의 실패 종류(timeout·failed·interrupted·termination_unconfirmed).
+    phaseOutcomes: { warmup: null, decide: null },
     // 내부 전용: 단계별 자식 기록. 보고서에는 dispose 뒤 `timelines`로 렌더링되어 나간다.
     phaseCalls: { warmup: [], decide: [] },
   };
@@ -748,6 +753,11 @@ async function runSample({ run, entry, position, prompt, options, deadline, now,
     const adapterWrong = record.adapterModel !== variant.model;
     record.mismatch = observed.wrong > 0 || adapterWrong ? mismatchRecord(variant, record.adapterModel, observed) : null;
     record.unobservedPhases = SAMPLE_PHASES.filter((phase) => record.observedCalls[phase] === 0);
+    for (const phase of SAMPLE_PHASES) {
+      if (record.phaseOutcomes[phase] === 'returned') {
+        record.phaseOutcomes[phase] = record.observedCalls[phase] === 0 ? 'unobserved' : 'answered';
+      }
+    }
     // 어댑터가 응답을 돌려줬어도 그 단계에서 자식이 관측되지 않았으면 측정이 아니다. 어댑터 해석 모델이 요청과
     // 같다는 것도 실행의 증거가 아니다. 이미 실패·타임아웃·종료 미확인인 표본은 그 진단을 유지한다.
     if (record.unobservedPhases.length > 0 && (record.status === 'ok' || record.status === 'invalid')) {
@@ -770,6 +780,7 @@ async function runSample({ run, entry, position, prompt, options, deadline, now,
     record.errorDetails = errorDetails(error);
     if (isUnsafeTermination(record.errorCode)) { record.status = 'termination_unconfirmed'; run.halted = true; }
     else record.status = record.errorCode === 'TIMEOUT' ? 'timeout' : record.errorCode === 'INTERRUPTED' ? 'interrupted' : 'failed';
+    record.phaseOutcomes[phase] = record.status;
     return finish();
   };
 
@@ -785,6 +796,7 @@ async function runSample({ run, entry, position, prompt, options, deadline, now,
     }));
     record.warmupMs = Math.round(now() - began);
     endPhase('warmup');
+    record.phaseOutcomes.warmup = 'returned';
   } catch (error) {
     record.warmupMs = Math.round(now() - began);
     endPhase('warmup');
@@ -802,6 +814,7 @@ async function runSample({ run, entry, position, prompt, options, deadline, now,
     }));
     record.decideMs = Math.round(now() - began);
     endPhase('decide');
+    record.phaseOutcomes.decide = 'returned';
   } catch (error) {
     record.decideMs = Math.round(now() - began);
     endPhase('decide');
@@ -961,7 +974,7 @@ export async function main(argv, { stdout = process.stdout, stderr = process.std
   for (const name of ['SIGINT', 'SIGTERM']) {
     const handler = () => {
       detach();
-      stderr.write(`${name} 수신: 새 호출을 멈추고 진행 중 호출을 정리합니다(다시 보내면 즉시 종료).\n`);
+      stderr.write(`${name} 수신: 새 호출을 멈추고 진행 중인 warmup·decide를 중단해 정리합니다. 진행 중인 probe는 끝나거나 상한에 이를 때까지 기다립니다(다시 보내면 정리 없이 즉시 종료).\n`);
       controller.abort({ signal: name });
     };
     handlers.set(name, handler);

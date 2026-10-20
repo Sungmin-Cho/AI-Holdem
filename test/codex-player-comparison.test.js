@@ -111,6 +111,7 @@ function scriptedRuntime(spots, scenarioFor = () => ({})) {
       async decide({ message }) {
         log.decides.push(pin.model);
         emit('decide', 'resume');
+        if (scenario.decideThrows) throw Object.assign(new Error('scripted'), { code: scenario.decideThrows });
         const spot = spots.find((candidate) => candidate.message === message);
         return { raw: JSON.stringify({ decisionId: spot.decisionId, action: safeAction(spot), reason: '각본 사유' }) };
       },
@@ -732,6 +733,98 @@ test('#297 타임라인(각본 자식): 상한 뒤 turn 완료·바이트 기준
   assert.equal(solWarm.closed, true);
   assert.ok(solWarm.derived.signalToCloseMs >= 0);
   assert.equal(JSON.stringify(report.variants.map((variant) => variant.samples.map((sample) => sample.timelines))).includes('가가가'), false);
+});
+
+test('#297 단계 집계: 두 단계가 모두 미관측이거나 미관측 뒤 실패해도 단계마다 따로·배타적으로 센다', async (t) => {
+  const spots = buildComparisonSpots(1);
+  const f = fixture(t);
+  // luna: warmup·decide 모두 자식 없이 성공 주장. sol: warmup은 자식 없이 성공 주장, decide는 실패.
+  const scripted = scriptedRuntime(spots, (model) => (model === LUNA
+    ? { silent: ['warmup', 'decide'] } : { silent: ['warmup'], decideThrows: 'CLI_FAILED' }));
+  const report = await runComparison({ samples: 1, timeoutMs: 20_000 }, { tmpRoot: f.tmpRoot, ...scripted.deps });
+  const [luna, sol] = report.variants;
+  const empty = { planned: 1, attempted: 1, answered: 0, timeout: 0, failed: 0, interrupted: 0, terminationUnconfirmed: 0, unobserved: 0, skipped: 0 };
+  assert.deepEqual(luna.samples[0].phaseOutcomes, { warmup: 'unobserved', decide: 'unobserved' });
+  assert.deepEqual(luna.summary.phases, { warmup: { ...empty, unobserved: 1 }, decide: { ...empty, unobserved: 1 } });
+  assert.deepEqual(sol.samples[0].phaseOutcomes, { warmup: 'unobserved', decide: 'failed' });
+  assert.deepEqual(sol.summary.phases, { warmup: { ...empty, unobserved: 1 }, decide: { ...empty, failed: 1 } });
+  for (const variant of report.variants) {
+    assert.deepEqual(variant.summary.warmupMs.observations, [], '자식이 관측되지 않은 warmup은 지연으로 싣지 않는다');
+  }
+});
+
+test('#297 CLI: 모든 표본을 얻은 뒤 정리 중에 온 SIGINT도 STOPPED(cleanup)로 남고 complete=false, 종료 코드 3이다', async (t) => {
+  const spots = buildComparisonSpots(1);
+  const f = fixture(t, { script: { matchers: decisionMatchers(spots) } });
+  const signals = new EventEmitter();
+  let releaseDispose;
+  const barrier = new Promise((resolve) => { releaseDispose = resolve; });
+  let disposing = 0;
+  const createRuntime = (kind, opts) => {
+    const adapter = createPlayerRuntime(kind, opts);
+    const original = adapter.dispose.bind(adapter);
+    adapter.dispose = async () => { disposing += 1; await barrier; return original(); };
+    return adapter;
+  };
+  const pending = runCli(['--live', '--json', '--samples', '1', '--timeout-ms', '20000'], { ...f.deps, createRuntime, signalSource: signals });
+  const deadline = Date.now() + 15_000;
+  while (disposing === 0) {
+    assert.ok(Date.now() < deadline, '정리가 시작되지 않았다');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  signals.emit('SIGINT');
+  releaseDispose();
+  const { code, out } = await pending;
+  const report = JSON.parse(out);
+  for (const variant of report.variants) assert.equal(variant.samples[0].status, 'ok', '측정은 다 얻었다');
+  assert.deepEqual(report.aborted, { code: 'STOPPED', variant: null, phase: 'cleanup', signal: 'SIGINT' });
+  assert.deepEqual([report.executionOk, report.complete, report.ok, code], [true, false, false, 3]);
+  assert.equal(report.cleanup.removed, true);
+});
+
+test('#297 CLI: 진행 중인 probe는 중단 신호를 받지 않고 끝난 뒤 STOPPED(probe)로 멈춘다 — 표본은 시작하지 않는다', async (t) => {
+  const spots = buildComparisonSpots(1);
+  const slowProbe = { includes: '다음 파일을 읽어', delayMs: 800, reply: reply('UNAVAILABLE') };
+  const f = fixture(t, { script: { matchers: [slowProbe, ...decisionMatchers(spots)] } });
+  const signals = new EventEmitter();
+  const pending = runCli(['--live', '--json', '--samples', '1', '--timeout-ms', '20000'], { ...f.deps, signalSource: signals });
+  const deadline = Date.now() + 10_000;
+  while (f.calls().length === 0) {
+    assert.ok(Date.now() < deadline, 'probe가 시작되지 않았다');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  signals.emit('SIGTERM');
+  const { code, out } = await pending;
+  const report = JSON.parse(out);
+  assert.deepEqual(report.aborted, { code: 'STOPPED', variant: null, phase: 'probe', signal: 'SIGTERM' });
+  assert.equal(report.variants[0].probe.attempted, true, '진행 중 probe는 끝까지 갔다');
+  assert.equal(report.variants[0].probe.timelines[0].kills.length, 0, 'probe 자식에는 신호를 보내지 않았다');
+  assert.equal(f.calls().filter((call) => call.stdin.includes('비교용') || call.argv.includes('resume')).length, 0, '표본은 시작하지 않았다');
+  assert.equal(code, 3);
+  assert.equal(signals.listenerCount('SIGINT') + signals.listenerCount('SIGTERM'), 0);
+});
+
+test('#297 타임라인(각본 자식): 일반 비JSON 줄과 개행 없이 끝난 64KiB 초과 출력도 원문 없이 센다', async (t) => {
+  const spots = buildComparisonSpots(1);
+  const f = fixture(t);
+  const scripted = scriptedChildren((spec) => {
+    const isResume = spec.args.includes('resume');
+    if (!isResume && !spec.input.includes('비교용')) {
+      return { chunks: [jsonl({ type: 'thread.started', thread_id: 'th-p' }, { type: 'item.completed', item: { type: 'agent_message', text: 'UNAVAILABLE' } })] };
+    }
+    if (!isResume && modelOf(spec.args) === LUNA) return { chunks: ['NOT-JSON-RAW-LINE\n', 'y'.repeat(40_000), 'y'.repeat(30_000)] };
+    if (!isResume) return { chunks: [jsonl({ type: 'thread.started', thread_id: 'th-s' }, { type: 'item.completed', item: { type: 'agent_message', text: 'ready' } })] };
+    const spot = spots.find((candidate) => spec.input.includes(`decisionId: ${candidate.decisionId}`));
+    return { chunks: [decision(spot, { action: safeAction(spot), reason: '각본 사유' })] };
+  });
+  const report = await runComparison({ samples: 1, timeoutMs: 20_000 }, { tmpRoot: f.tmpRoot, exec: scripted.exec });
+  const [timeline] = report.variants[0].samples[0].timelines.warmup;
+  assert.deepEqual(timeline.events.map(({ name }) => name), ['nonjson']);
+  assert.equal(timeline.oversizeLines, 1, '개행 없이 끝난 긴 출력도 한 줄로 센다');
+  assert.equal(report.variants[0].samples[0].status, 'failed', '깨진 스트림은 세션이 아니다(판정은 계측과 무관)');
+  const text = JSON.stringify(report.variants.map((variant) => variant.samples.map((sample) => sample.timelines)));
+  assert.equal(text.includes('NOT-JSON-RAW-LINE'), false);
+  assert.equal(text.includes('yyyy'), false);
 });
 
 for (const name of ['SIGINT', 'SIGTERM']) {

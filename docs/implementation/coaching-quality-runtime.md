@@ -382,9 +382,10 @@ from the earlier schema /1 success or from fixture tests.
 The installed `codex` command is the npm launcher (`@openai/codex/bin/codex.js`). It runs
 the platform binary as a child with inherited stdio, forwards only SIGINT/SIGTERM/SIGHUP,
 and waits for that child. A SIGKILL sent only to the launcher pid therefore leaves the
-binary running its request while it holds the adapter's stdout/stderr pipes. The adapter's
-close confirmation (`killWaitMs`, 2 s) then fails with `CHILD_CLOSE_UNCONFIRMED`, and a
-later disposal succeeds once the binary finishes on its own.
+binary running its request while it holds the adapter's stdout/stderr pipes. When the binary
+keeps those pipes open past the adapter's close confirmation (`killWaitMs`, 2 s), the timeout
+or interrupt fails with `CHILD_CLOSE_UNCONFIRMED`, and a later disposal succeeds once the
+binary finishes on its own. A binary that ends within that wait is still confirmed.
 
 Observed directly on codex-cli 0.163.0: signalling the launcher 1.5 s after
 `turn.started` gave exit +1 ms but close +11.4 s. The binary completed its turn. The same
@@ -452,17 +453,20 @@ recorded, so the match remains a hypothesis rather than an observation.
 - **Other new report fields:** `cleanup.attempts[]` (start, duration, open children,
   errors per attempt), `samples[].errorDetails` (purpose, signal, waitBudgetMs, waitedMs,
   closeConfirmed), `summary.phases.{warmup,decide}` (planned, attempted, answered, timeout,
-  failed, interrupted, terminationUnconfirmed, unobserved, skipped; attempted equals answered
-  plus every failure kind), `summary.warmupMs` (including
+  failed, interrupted, terminationUnconfirmed, unobserved, skipped; counted from each sample's
+  own `phaseOutcomes`, so attempted equals answered plus every failure kind), `summary.warmupMs` (including
   `cold` for the first create of the variant), `environment` (Node, platform, loadavg) and
   `startedAtIso`.
 - **Raw-text rule:** the no-raw-text rule covers these diagnostic fields. The normalised
   one-line `reason` per legal sample stays as before.
-- **Signals:** SIGINT/SIGTERM during `--live` stops new calls and interrupts the in-flight
-  call through the adapter's confirmed-close path. Disposal still runs, and the report is
+- **Signals:** SIGINT/SIGTERM during `--live` stops new calls and interrupts an in-flight
+  warmup or decide through the adapter's confirmed-close path. An in-flight probe takes no
+  signal, so it runs to completion or to its own cap (`--timeout-ms`, up to 300 s) first. A
+  stop that lands during disposal is recorded as `phase: cleanup`. Disposal still runs, and the report is
   printed as incomplete: `aborted.code: STOPPED` is recorded even when the stop lands in the
   last sample, `complete` is false, and the exit code is 3. A termination-unconfirmed abort
-  keeps priority. A second signal takes the default action.
+  keeps priority. A second signal takes the default action, which does not guarantee child
+  cleanup.
 - **Gates:** `ok` and the three gates keep their meaning. The new fields are observations
   and do not relax any gate.
 
