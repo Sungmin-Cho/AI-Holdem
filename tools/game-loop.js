@@ -1705,7 +1705,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // lock (ATTEMPT_CHANGED); an absent record is its to answer too (NO_ATTEMPT). A retirement
     // keeps its own binding checks (#274).
     const expected = args.indexOf('--expect-attempt-sha256');
-    if (replaying && record && expected >= 0 && !args.includes('--retire-rejected')) {
+    const retiring = args.includes('--retire-rejected');
+    if (replaying && record && expected >= 0 && !retiring) {
       const epochAt = args.indexOf('--expect-game-epoch');
       if (sha256Text(JSON.stringify(record.body ?? null)) !== args[expected + 1]
         || epochAt < 0 || record.expectedGameEpoch !== args[epochAt + 1]) {
@@ -1715,10 +1716,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     // #292: a recorded coach attempt whose item has left the queue for good — sealed once the
     // snapshot proved an answer that was lost, or withheld — is not resent: the publisher
     // removes exactly that record unsent, which resolves it for the caller.
-    if (replaying && !args.includes('--retire-rejected') && coachAttemptSettled(record)) {
+    // A retirement concerns an annotation-only record bound by the publisher: nothing is judged
+    // or changed on its account, whatever the slot holds by then.
+    if (replaying && !retiring && coachAttemptSettled(record)) {
       return discardSettledAttempt(args, record);
     }
-    const withheld = await withheldCoachPublication(args, { replaying, record, envelope });
+    const withheld = retiring ? null : await withheldCoachPublication(args, { replaying, record, envelope });
     if (withheld?.result) return withheld.result;
     if (withheld) {
       args = withheld.args;
@@ -4734,19 +4737,21 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const players = readJsonOptional(playersPath, 'PLAYERS');
     const roster = players === null ? undefined : (rosterListOf(players) ?? null);
     // The engine state counts only as the relay counts it: this game's, complete
-    // (validatePrivateEngineState). Anything else is an engine state that could not be read.
-    let engine = null;
+    // (validatePrivateEngineState). `undefined` when the file does not exist; anything else that
+    // is not that (unreadable, null, partial, another game's) is `false`.
+    let engine;
     try {
-      engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
-      if (engine !== null) validatePrivateEngineState(engine, { expectedSessionToken: readLoopState()?.sessionToken ?? null });
-    } catch {
-      engine = false;
+      engine = JSON.parse(fs.readFileSync(engineStatePath, 'utf8'));
+      validatePrivateEngineState(engine, { expectedSessionToken: readLoopState()?.sessionToken ?? null });
+    } catch (error) {
+      engine = error?.code === 'ENOENT' ? undefined : false;
     }
-    const seats = engine === null ? undefined : (engine ? engine.seats : null);
+    const seats = engine === undefined ? undefined : (engine ? engine.seats : null);
     const session = participantSessionOf({ roster, seats });
     if (session === 'solo') return null;
-    // The hand records come from that same engine state: one that could not be read judges nothing.
-    if (session === 'unknown' || engine === false) return 'FORBIDDEN_LITERAL_UNAVAILABLE';
+    // A session nothing can place, or one whose hand records have no engine state of this game
+    // behind them, judges nothing.
+    if (session === 'unknown' || !engine) return 'FORBIDDEN_LITERAL_UNAVAILABLE';
     try {
       assertHostText({ coach: [note] }, (n) => {
         // A record that is not a complete hand record of that hand cannot be judged: its

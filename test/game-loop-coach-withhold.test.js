@@ -375,3 +375,36 @@ test('#292 응답을 잃은 첫 전송 뒤 reconcile이 먼저 봉인해도 그 
   assert.equal(auth.withheldPublications, undefined);
   assert.equal(fs.existsSync(attemptFile(gameDir)), false);
 });
+
+// The engine state the loop judges by must be this game's, complete, as the relay requires: an
+// absent, null, partial or other game's state judges nothing, and nothing is withheld or sent.
+for (const [name, spoil] of [
+  ['absent', (file) => fs.rmSync(file)],
+  ['null', (file) => fs.writeFileSync(file, 'null')],
+  ['partial', (file) => fs.writeFileSync(file, JSON.stringify({ sessionToken: readJson(file).sessionToken, seats: readJson(file).seats }))],
+  ['another game', (file) => fs.writeFileSync(file, JSON.stringify({ ...readJson(file), sessionToken: 'another-game-token' }))],
+]) {
+  test(`#292 엔진 상태가 ${name}이면 코치 노트를 판정하지 않고 보류하지도 보내지도 않는다`, { timeout: TIMEOUT }, async (t) => {
+    const { gameDir, first, cc, queued } = await multiGameWithQueuedLeak(t);
+    await first.requestStop();
+    const sent = [];
+    let spoiled = false;
+    const restarted = newLoop(t, gameDir, {
+      onPublishInvoke: (args) => sent.push(args),
+      // The drain reconciles first, then judges the queued note: the state changes in between.
+      onCoachInvoke: (args) => {
+        if (args[0] !== 'reconcile' || spoiled) return;
+        spoiled = true;
+        spoil(path.join(gameDir, 'state.json'));
+      },
+    });
+    const failure = await restarted.resume().then(() => null, (error) => error);
+    await restarted.requestStop();
+    assert.equal(spoiled, true, 'the drain was reached');
+    assert.equal(failure?.code, 'FORBIDDEN_LITERAL_UNAVAILABLE', `${name}: ${failure?.code}`);
+    const auth = cc.loadAuthority(gameDir);
+    assert.equal(auth.publishQueue['1'].queueId, queued.queueId);
+    assert.equal(auth.withheldPublications, undefined);
+    assert.equal(sent.some((args) => args.includes(queued.exactEnvelopePath)), false);
+  });
+}
