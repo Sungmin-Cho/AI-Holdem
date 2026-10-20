@@ -338,8 +338,10 @@ function walkStrings(value, visit) {
 export function hostTextFieldsOf(body) {
   const fields = [];
   for (const note of body.coach ?? []) {
+    // #292: a coach note always names its hand (the loop's own and a migrated one alike);
+    // one that does not is refused, not skipped.
     const handNo = note?.handNo;
-    walkStrings(note, (text) => fields.push({ handNo, text }));
+    walkStrings(note, (text) => fields.push({ handNo, text, strict: true }));
   }
   for (const item of body.training ?? []) {
     walkStrings(item, (text) => fields.push({ handNo: item?.handNo, text }));
@@ -361,10 +363,48 @@ function annotationHandNo(evaluationId) {
   return Number.isSafeInteger(handNo) && handNo >= 1 ? handNo : null;
 }
 
+// The roster shapes the literal collector accepts: an array or { players: [...] }. Null for
+// anything else.
+export function rosterListOf(players) {
+  if (Array.isArray(players)) return players;
+  return Array.isArray(players?.players) ? players.players : null;
+}
+
 export function sessionHasParticipants(players) {
-  // The roster shapes the literal collector accepts: an array or { players: [...] }.
-  const list = Array.isArray(players) ? players : (Array.isArray(players?.players) ? players.players : []);
+  const list = rosterListOf(players) ?? [];
   return list.some((row) => row?.playerId !== HOST_ID && (isHumanSeat(row) || /^h[1-8]$/.test(row?.playerId)));
+}
+
+// #292: whether a session has participants. A roster that can be read decides, unless the
+// engine's seats say otherwise: then neither does. A roster that cannot be read (corrupt,
+// unreadable, the wrong shape, a row that is not a player) or is absent is no evidence of a
+// session without them: the
+// seats decide, and only a directory with neither file is solo. Each input is what was read,
+// `undefined` for a file that does not exist and `null` for one that could not be read.
+// 'unknown' when nothing can say.
+// A roster list whose every row is a player with its own id; null for one with a row that is
+// not (a corrupt row is no evidence of anything).
+export function usableRosterOf(roster) {
+  const list = rosterListOf(roster);
+  if (!list) return null;
+  const ids = new Set();
+  for (const row of list) {
+    if (!isPlain(row) || typeof row.playerId !== 'string' || !row.playerId || ids.has(row.playerId)) return null;
+    ids.add(row.playerId);
+  }
+  return list;
+}
+
+export function participantSessionOf({ roster, seats } = {}) {
+  const list = usableRosterOf(roster);
+  const seated = Array.isArray(seats) ? sessionHasParticipants(seats) : null;
+  if (list) {
+    const listed = sessionHasParticipants(list);
+    if (seated !== null && seated !== listed) return 'unknown';
+    return listed ? 'multi' : 'solo';
+  }
+  if (seated !== null) return seated ? 'multi' : 'solo';
+  return roster === undefined && seats === undefined ? 'solo' : 'unknown';
 }
 
 const SUIT_SYMBOLS = { s: '♠♤', h: '♥♡', d: '♦♢', c: '♣♧' };
@@ -440,6 +480,44 @@ export function hostCoachLeaks(note, lookupRecord) {
   } catch {
     return true;
   }
+}
+
+// #292: the machine review quotes coach notes in one section, a line per note. Until this
+// version the section was headed "### 핸드별 코치 노트 요약" and quoted every published note
+// under whatever rule had accepted it, and a review is sealed as written. From this version
+// the section is headed REVIEW_COACH_HEADING and holds only lines the current rule passes,
+// judged when the review is written (the quoted line itself as well as the note). When a
+// session with participants shows a review, an old section is withheld whole: what is hidden
+// then depends on the review's form alone, never on whose cards are hidden, so it tells the
+// host nothing about them. Nothing else in a review quotes a note (the LLM stages are never
+// given one); an LLM text that copies the old heading only hides its own section. The stored
+// review is never changed.
+export const REVIEW_COACH_HEADING = '### 코치 노트 요약';
+const LEGACY_REVIEW_COACH_HEADING = '### 핸드별 코치 노트 요약';
+export const REVIEW_SECTION_WITHHELD = '- 이전 버전에서 만든 코치 노트 요약이라 현재 공개 규칙으로 확인할 수 없어 표시하지 않습니다.';
+const MARKDOWN_HEADING = /^#{1,6}\s/;
+
+export function hostReviewText(review) {
+  if (typeof review !== 'string') return review;
+  const out = [];
+  let inSection = false;
+  let replaced = false;
+  let changed = false;
+  for (const raw of review.split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    if (MARKDOWN_HEADING.test(line)) {
+      inSection = line.trim() === LEGACY_REVIEW_COACH_HEADING;
+      replaced = false;
+      out.push(raw);
+    } else if (!inSection || line.trim() === '') {
+      out.push(raw);
+    } else {
+      changed = true;
+      if (!replaced) out.push(REVIEW_SECTION_WITHHELD);
+      replaced = true;
+    }
+  }
+  return changed ? out.join('\n') : review;
 }
 
 export function projectForSeat(payload, seat) {

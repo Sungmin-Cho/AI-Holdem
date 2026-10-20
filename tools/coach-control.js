@@ -4,7 +4,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { withNamedLock, writeJsonAtomic, ownedProcessStartTime as defaultOwnedProcessStartTime } from '../engine/state.js';
 import { processStartTime as defaultProcessStartTime } from '../engine/process-identity.js';
 import {
@@ -13,11 +13,14 @@ import {
   processAlive as defaultProcessAlive, coachProcessStartTime as defaultCoachProcessStartTime,
 } from './coach-evidence.js';
 import { readPersistedSolver } from './solver-runtime.js';
+import { readRecordedAttempt } from './rejection-audit.js';
 import {
   MAX_PUBLISH_BODY_BYTES,
   SUPPORTED_COACH_AUTHORITY_SCHEMAS,
   canonicalPayloadJson,
   gameEpochOf,
+  isBoundCoachNote,
+  isCoachOnlyAttempt,
   payloadSha256,
   proofBearingCoachNote,
   publicProofId,
@@ -225,7 +228,7 @@ function migrationEnvelopePath(gameDir, epoch, handNo, digest) {
 function nextGeneration(auth, handNo) {
   const live = auth.hands[keyOf(handNo)]?.generation ?? 0;
   let retired = 0;
-  for (const row of auth.retiredAttempts) {
+  for (const row of [...auth.retiredAttempts, ...(auth.withheldPublications ?? [])]) {
     if (row.handNo === handNo && row.generation > retired) retired = row.generation;
   }
   const queued = auth.publishQueue[keyOf(handNo)]?.generation ?? 0;
@@ -705,6 +708,134 @@ function sealUnavailable(auth, {
   return { ok: true, queueId, noteKind: 'unavailable' };
 }
 
+// #292: why a queued note may be withheld. The publisher's own judgment of the note against
+// the rule the relay applies (assertHostText) refused it; nothing else (a relay answer, a
+// network failure, an unreadable record) withholds one.
+const WITHHOLD_REASONS = new Set(['FORBIDDEN_LITERAL']);
+
+// #292: a note accepted under an earlier rule and not yet published can be refused by the
+// current one, and resending it forever would hold every later publication. Withholding moves
+// it out of the queue for good, with its identity kept as evidence and its envelope left on
+// disk, and queues the hand's unavailable note in its place (the text every unavailable note
+// carries, so the hand shows nothing a withheld note would). A recorded attempt of the note is
+// copied, byte for byte, beside it before the publisher may remove it as stale. A note the
+// snapshot already proves published is sealed instead; a queue that no longer holds the exact
+// item named, a recorded attempt that is not the one named, or one that carries more than this
+// note, is left alone. Idempotent: the same queueId again answers with what was done the first
+// time.
+function withholdLocked(auth, {
+  gameDir, epoch, handNo, queueId, payloadSha256: digest, exactEnvelopePath: namedEnvelope, reason, snapshotFile,
+  attemptBodySha256 = null,
+}) {
+  const key = keyOf(handNo);
+  const prior = (auth.withheldPublications ?? []).find((row) => row.queueId === queueId);
+  if (prior) {
+    if (prior.handNo !== handNo || prior.payloadSha256 !== digest || prior.exactEnvelopePath !== namedEnvelope) {
+      fail('WITHHOLD_TARGET_CHANGED');
+    }
+    return { ok: true, outcome: 'already-withheld', replacementQueueId: prior.replacementQueueId };
+  }
+  // Whether the note was already published is read from the snapshot. One that exists but
+  // cannot be read proves nothing either way, so nothing is withheld on it. One that does not
+  // exist holds no note the relay could show.
+  if (fs.existsSync(snapshotFile) && !readSnapshot(snapshotFile)) {
+    fail('WITHHOLD_SNAPSHOT_UNREADABLE', 'ui-snapshot을 읽지 못해 게시 여부를 확인할 수 없습니다.');
+  }
+  reconcileLocked(auth, snapshotFile);
+  if (auth.publishedSeals[key]?.queueId === queueId) return { ok: true, outcome: 'published' };
+  const item = auth.publishQueue[key];
+  if (!item || item.queueId !== queueId || item.payloadSha256 !== digest || item.handNo !== handNo
+    || item.exactEnvelopePath !== namedEnvelope) {
+    fail('WITHHOLD_TARGET_CHANGED', `핸드 ${handNo} 큐 항목이 보류 대상과 다릅니다.`);
+  }
+  if (item.noteKind !== 'coach') fail('WITHHOLD_NOT_ALLOWED', `핸드 ${handNo} 큐 항목은 보류 대상이 아닙니다.`);
+  // The recorded attempt is read under the lock the publisher sends it under, so the one kept is
+  // the one it would send. Whatever way the withholding was asked for, a record of this item is
+  // kept before the publisher may remove it as stale, and only a record that carries this note
+  // alone, bound to this item, may be: one with anything else in it is left as it is, and so is
+  // the queue. A record of another item is not this withholding's.
+  let read;
+  try {
+    read = readRecordedAttempt(gameDir);
+  } catch {
+    fail('WITHHOLD_TARGET_CHANGED', '기록된 게시 시도를 안전하게 읽지 못했습니다.');
+  }
+  let record = null;
+  try { record = read.absent ? null : JSON.parse(read.raw); } catch { record = null; }
+  const bodySha256 = record ? createHash('sha256').update(JSON.stringify(record.body ?? null)).digest('hex') : null;
+  const ofThisItem = record?.coachAuthority?.queueId === queueId;
+  if (attemptBodySha256 !== null && (!ofThisItem || bodySha256 !== attemptBodySha256)) {
+    fail('WITHHOLD_TARGET_CHANGED', '기록된 게시 시도가 보류 대상과 다릅니다.');
+  }
+  let attempt = null;
+  if (ofThisItem) {
+    if (!isCoachOnlyAttempt(record) || !isBoundCoachNote(record.body.coach[0], record.coachAuthority)) {
+      fail('WITHHOLD_NOT_ALLOWED', '코치 노트 말고 다른 것도 실은 기록이라 보류하지 않습니다.');
+    }
+    if (record.expectedGameEpoch !== epoch || record.coachAuthority.payloadSha256 !== digest
+      || record.coachAuthority.handNo !== handNo || record.coachAuthority.exactEnvelopePath !== namedEnvelope) {
+      fail('WITHHOLD_TARGET_CHANGED', '기록된 게시 시도가 보류 대상과 다릅니다.');
+    }
+    const evidencePath = path.join(gameDir, `.coach-${epoch.slice(0, 12)}-withheld-h${handNo}-g${item.generation}.attempt.json`);
+    writeJsonAtomic(evidencePath, { raw: read.raw });
+    attempt = {
+      attemptPublishId: record.body?.publishId ?? null,
+      attemptBodySha256: bodySha256,
+      attemptEvidencePath: evidencePath,
+      attemptRecordSha256: createHash('sha256').update(read.raw).digest('hex'),
+    };
+  }
+  const generation = nextGeneration(auth, handNo);
+  const exactEnvelopePath = coachPaths(gameDir, epoch, 'withheld', handNo, generation, 0).exactEnvelopePath;
+  // An overfold note keeps its claim: the hand's single overfold note is spent either way, and
+  // the relay keeps an overfold mark a snapshot already holds for the hand (a legacy note).
+  const tuple = { handNo, text: UNAVAILABLE_TEXT, unavailable: true, ...(item.overfold ? { overfold: true } : {}) };
+  const replacementDigest = payloadSha256(tuple);
+  const replacementQueueId = `${epoch}:${handNo}:${generation}:${replacementDigest}`;
+  const proof = { id: publicProofId(replacementQueueId), payloadSha256: replacementDigest };
+  // The envelope first: a stop before the authority write leaves the queue as it was, and the
+  // next attempt writes the same file again.
+  writeEnvelope(exactEnvelopePath, coachEnvelope(tuple, proof, {
+    expectedGameEpoch: epoch,
+    queueId: replacementQueueId,
+    handNo,
+    generation,
+    exactEnvelopePath,
+    payloadSha256: replacementDigest,
+    reason: `withheld:${reason}`,
+  }));
+  auth.withheldPublications = [...(auth.withheldPublications ?? []), {
+    queueId,
+    handNo,
+    generation: item.generation,
+    sourceOwnerSessionId: item.sourceOwnerSessionId,
+    sourceAttempt: item.sourceAttempt,
+    noteKind: item.noteKind,
+    exactEnvelopePath: item.exactEnvelopePath,
+    payloadSha256: item.payloadSha256,
+    publicProofId: item.publicProofId,
+    overfold: Boolean(item.overfold),
+    reason,
+    replacementQueueId,
+    ...(attempt ?? {}),
+  }];
+  auth.publishQueue[key] = queueItem({
+    queueId: replacementQueueId,
+    epoch,
+    handNo,
+    generation,
+    owner: item.sourceOwnerSessionId,
+    attempt: item.sourceAttempt,
+    noteKind: 'unavailable',
+    exactEnvelopePath,
+    digest: replacementDigest,
+    proofId: proof.id,
+    overfold: item.overfold,
+  });
+  if (auth.overfoldLease?.queueId === queueId) auth.overfoldLease.queueId = replacementQueueId;
+  return { ok: true, outcome: 'withheld', replacementQueueId, exactEnvelopePath };
+}
+
 export function createCoachControl(deps = {}) {
   const nowNs = deps.now ?? (() => process.hrtime.bigint());
   const writeAuthority = deps.writeAuthority ?? writeJsonAtomic;
@@ -1102,6 +1233,26 @@ export function createCoachControl(deps = {}) {
         gameDir, epoch, owner, handNo, generation, reason, snapshotFile, replaceDeferred,
       });
       persist(gameDir, auth);
+      return result;
+    });
+  }
+
+  async function withholdQueued({
+    gameDir, handNo, queueId, payloadSha256: digest, exactEnvelopePath, reason, snapshotFile, attemptBodySha256 = null,
+  }) {
+    const sha = /^[0-9a-f]{64}$/;
+    if (!Number.isSafeInteger(handNo) || handNo < 1 || typeof queueId !== 'string' || !queueId
+      || !sha.test(digest ?? '') || typeof exactEnvelopePath !== 'string' || !exactEnvelopePath
+      || !WITHHOLD_REASONS.has(reason) || !snapshotFile
+      || (attemptBodySha256 !== null && !sha.test(attemptBodySha256))) {
+      fail('USAGE', 'withhold-queued에는 --hand, --queue-id, --payload-sha256, --envelope-path, --reason, --snapshot-file이 필요합니다.');
+    }
+    return withLock(gameDir, () => {
+      const { epoch, auth } = requireAuth(gameDir, { requireActiveOwner: false });
+      const result = withholdLocked(auth, {
+        gameDir, epoch, handNo, queueId, payloadSha256: digest, exactEnvelopePath, reason, snapshotFile, attemptBodySha256,
+      });
+      if (result.outcome !== 'already-withheld') persist(gameDir, auth);
       return result;
     });
   }
@@ -1641,6 +1792,7 @@ export function createCoachControl(deps = {}) {
     accept,
     watchAccept,
     completeUnavailable,
+    withholdQueued,
     reconcile,
     heartbeat,
     fence,
@@ -1781,6 +1933,17 @@ export async function runCoachControlCli(argv = process.argv.slice(2), deps = {}
     });
   } else if (command === 'completeness') {
     result = { ok: true, ...cc.completeness(gameDir, Number(opts.completed ?? opts.sample)) };
+  } else if (command === 'withhold-queued') {
+    result = await cc.withholdQueued({
+      gameDir,
+      handNo: Number(opts.hand),
+      queueId: opts['queue-id'],
+      payloadSha256: opts['payload-sha256'],
+      exactEnvelopePath: opts['envelope-path'],
+      reason: opts.reason,
+      snapshotFile: opts['snapshot-file'],
+      attemptBodySha256: opts['attempt-body-sha256'] ?? null,
+    });
   } else if (command === 'reconcile') {
     result = await cc.reconcile({ gameDir, snapshotFile: opts['snapshot-file'] });
   } else if (command === 'heartbeat') {

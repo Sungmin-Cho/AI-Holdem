@@ -32,7 +32,7 @@ import {
 } from '../tools/game-loop.js';
 import { gameEpochOf, payloadSha256, publicProofId } from '../publish-contract.js';
 import { reviewWaivable } from '../tools/recovery-exit.js';
-import { createCoachControl } from '../tools/coach-control.js';
+import { createCoachControl, UNAVAILABLE_TEXT } from '../tools/coach-control.js';
 import { defaultEvaluate } from '../tools/training-pipeline.js';
 import { createSessionManager } from '../tools/session-manager.js';
 import { inspectStudyService, stopStudyService } from '../tools/study-service.js';
@@ -2041,6 +2041,99 @@ test('#290 멀티 세션 기계 리뷰는 호스트에게 보내지 않는 코�
   assert.match(snapshot.review, /핸드 2: 핸드 2는 탈락 뒤 관전으로 지나갔습니다/);
   assert.equal(snapshot.review.includes('7♥'), false, snapshot.review);
   assert.deepEqual(readLoopLog(gameDir).filter((row) => row.event === 'review-coach-note-withheld').map((row) => row.handNo), [1]);
+});
+
+// #292: the machine review's coach summary is now headed REVIEW_COACH_HEADING and holds only
+// lines the current rule passes — the quoted line too: a cut at 220 characters can leave a
+// card standing alone that the whole note had glued to a digit ("7h9" cut after "7h").
+test('#292 멀티 기계 리뷰의 코치 요약은 새 제목이고 잘린 줄이 숨은 카드를 남기면 인용하지 않는다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedHostBustMultiGame(gameDir);
+  const epoch = gameEpochOf(init.sessionToken);
+  const owner = '29229229-2920-4292-8292-292292292292';
+  const sealed = (note) => {
+    const queueId = `${epoch}:sealed:${note.handNo}`;
+    const proof = { id: publicProofId(queueId), payloadSha256: payloadSha256(note) };
+    return {
+      note: { ...note, coachProof: proof },
+      seal: { queueId, handNo: note.handNo, noteKind: 'coach', payloadSha256: proof.payloadSha256, publicProofId: proof.id, overfold: false, publishedAtRevision: 1 },
+    };
+  };
+  // h1 folded 7h 2c in hand 1. The whole note glues "7h" to a digit; its 220-character cut does not.
+  const cut = sealed({ handNo: 1, text: `${'a'.repeat(217)} 7h9 다음 결정` });
+  const clean = sealed({ handNo: 2, text: '핸드 2는 탈락 뒤 관전으로 지나갔습니다.' });
+  fs.writeFileSync(path.join(gameDir, 'ui-snapshot.json'), JSON.stringify({
+    revision: 1, publishId: 1, view: { gameOver: true, handNo: 2 }, log: [], coach: [cut.note, clean.note], history: [],
+  }));
+  writeJsonAtomic(path.join(gameDir, '.coach-authority.json'), {
+    schemaVersion: 2, gameEpoch: epoch, activeOwnerSessionId: owner, adapterState: 'enabled', legacyMigrationCompleted: true,
+    overfoldLease: null, hands: {}, retiredAttempts: [], publishQueue: {}, publishedSeals: { 1: cut.seal, 2: clean.seal },
+    deferred: {}, noNewPlayTimePublishers: false, finalization: null,
+  });
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: null, loopOpts: { controlProtocolVersion: 1 }, stateOverrides: { handNo: 2, upperRuntime: null, ownerSessionId: owner },
+  });
+  await loop.resume();
+  await loop.run();
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.phase, 'done', JSON.stringify(state.halt ?? null));
+  const { review } = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  assert.ok(review.split('\n').includes('### 코치 노트 요약'), review);
+  assert.equal(review.includes('### 핸드별 코치 노트 요약'), false);
+  assert.match(review, /- 핸드 2: 핸드 2는 탈락 뒤 관전으로 지나갔습니다/);
+  // The cut line, which would end in a standing "7h", is not quoted at all.
+  const section = review.slice(review.indexOf('### 코치 노트 요약'));
+  const quoted = section.slice(0, section.search(/\n#{1,6}\s/) >>> 0).split('\n').filter((line) => line.startsWith('- 핸드 '));
+  assert.deepEqual(quoted.map((line) => line.slice(0, 7)), ['- 핸드 2:']);
+  assert.equal(review.includes(' 7h'), false);
+  assert.deepEqual(readLoopLog(gameDir).filter((row) => row.event === 'review-coach-note-withheld').map((row) => row.handNo), [1]);
+});
+
+// #292 B at finalization: the residual drain publishes every queued note through the same gate,
+// so a note an earlier rule queued and the current one refuses ends as the hand's unavailable
+// note, and the game still finishes.
+test('#292 finalization residual drain은 현재 규칙이 거절할 큐 노트를 보류하고 대체 노트로 끝낸다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedHostBustMultiGame(gameDir);
+  const epoch = gameEpochOf(init.sessionToken);
+  const owner = '29229229-2920-4292-8292-292292292293';
+  const leak = '상대 h1은 7♥ 2♣를 들고 폴드했습니다.';
+  const tuple = { handNo: 1, text: leak };
+  const digest = payloadSha256(tuple);
+  const queueId = `${epoch}:1:1:${digest}`;
+  const exactEnvelopePath = path.join(gameDir, `.coach-${epoch.slice(0, 12)}-${owner}-h1-g1-a1.envelope.json`);
+  const proof = { id: publicProofId(queueId), payloadSha256: digest };
+  writeJsonAtomic(exactEnvelopePath, {
+    coach: [{ ...tuple, coachProof: proof }],
+    coachAuthority: { expectedGameEpoch: epoch, queueId, handNo: 1, generation: 1, exactEnvelopePath, payloadSha256: digest },
+  });
+  writeJsonAtomic(path.join(gameDir, '.coach-authority.json'), {
+    schemaVersion: 2, gameEpoch: epoch, activeOwnerSessionId: owner, adapterState: 'enabled', legacyMigrationCompleted: true,
+    overfoldLease: null, hands: {}, retiredAttempts: [],
+    publishQueue: {
+      1: {
+        queueId, gameEpoch: epoch, handNo: 1, generation: 1, sourceOwnerSessionId: owner, sourceAttempt: 1, noteKind: 'coach',
+        exactEnvelopePath, payloadSha256: digest, publicProofId: proof.id, publicationState: 'pending', overfold: false,
+      },
+    },
+    publishedSeals: {}, deferred: {}, noNewPlayTimePublishers: false, finalization: null,
+  });
+  const { loop, calls } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper: null, loopOpts: { controlProtocolVersion: 1 }, stateOverrides: { handNo: 2, upperRuntime: null, ownerSessionId: owner },
+  });
+  await loop.resume();
+  await loop.run();
+  const state = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.equal(state.phase, 'done', JSON.stringify(state.halt ?? null));
+  const auth = createCoachControl().loadAuthority(gameDir);
+  assert.equal(auth.withheldPublications?.[0]?.queueId, queueId);
+  assert.equal(auth.publishedSeals['1'].queueId, auth.withheldPublications[0].replacementQueueId);
+  assert.deepEqual(Object.keys(auth.publishQueue), []);
+  const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  assert.equal(JSON.stringify(snapshot).includes(leak), false);
+  assert.deepEqual(snapshot.coach.filter((note) => note.handNo === 1).map((note) => note.text), [UNAVAILABLE_TEXT]);
+  assert.equal(publishInvocations(calls).some((args) => args.includes(exactEnvelopePath)), false);
+  assert.ok(fs.readFileSync(exactEnvelopePath, 'utf8').includes(leak));
 });
 
 test('#288 호스트가 먼저 탈락한 멀티 토너먼트는 상위 모델 없이도 기계 리뷰로 끝난다', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
