@@ -839,7 +839,8 @@ test('#297 타임라인(각본 자식): turn 시작을 신호 뒤에야 처음 �
     if (!isResume && modelOf(spec.args) === SOL) {
       return { hold: true, chunks: [ev({ type: 'thread.started', thread_id: 'th-s' })], afterKill: [ev({ type: 'turn.started' })] };
     }
-    if (!isResume) return { chunks: [jsonl({ type: 'thread.started', thread_id: 'th-l' }, { type: 'item.completed', item: { type: 'agent_message', text: 'ready' } })] };
+    // Luna: turn이 시작된 뒤 완료 없이 스스로 exit한다 — 신호가 없으면 exit가 잘린 경계다.
+    if (!isResume) return { chunks: [ev({ type: 'thread.started', thread_id: 'th-l' }) + ev({ type: 'turn.started' })] };
     const spot = spots.find((candidate) => spec.input.includes(`decisionId: ${candidate.decisionId}`));
     return { chunks: [decision(spot, { action: safeAction(spot), reason: '각본 사유' })] };
   });
@@ -851,6 +852,12 @@ test('#297 타임라인(각본 자식): turn 시작을 신호 뒤에야 처음 �
   assert.equal(timeline.derived.censored, true);
   assert.equal(timeline.derived.turnObservedMs, null, '관측하지 못한 구간을 음수나 0으로 만들지 않는다');
   assert.equal(timeline.derived.lastEventToSignalMs, timeline.kills[0].ms - timeline.events[0].ms);
+
+  const [exited] = report.variants[0].samples[0].timelines.warmup;
+  assert.deepEqual(exited.kills, [], '신호 없이 스스로 끝났다');
+  assert.equal(exited.derived.censored, true);
+  assert.equal(exited.derived.turnObservedMs, exited.exitMs - exited.events[1].ms, '신호가 없으면 exit까지가 관측 구간이다');
+  assert.ok(exited.derived.turnObservedMs >= 0);
 });
 
 test('#297 CLI: 중단 신호로 끝낸 호출의 close를 확인하지 못하면 STOPPED보다 TERMINATION_UNCONFIRMED가 우선하고 executionOk=false다', async (t) => {
@@ -876,8 +883,15 @@ test('#297 CLI: 중단 신호로 끝낸 호출의 close를 확인하지 못하�
       assert.ok(Date.now() < deadline, 'Sol decide가 시작되지 않았다');
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
+    // 대조: 신호 전에는 decide 자식에 kill이 없고, 잠시 기다려도 watchdog(20초)이 대신 끝내지 않는다.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(f.killAt.length, 0, '신호 전에 kill이 있었다');
+    const emittedAt = Date.now();
     signals.emit('SIGINT');
     const { code, out } = await pending;
+    // 이 결과는 watchdog이 아니라 중단 신호가 만든 것이다 — kill은 신호 직후에 한 번 갔다.
+    assert.equal(f.killAt.length, 1);
+    assert.ok(f.killAt[0] - emittedAt < 5_000, `kill이 신호 직후가 아니다(${f.killAt[0] - emittedAt}ms)`);
     const report = JSON.parse(out);
     assert.deepEqual([report.aborted.code, report.aborted.variant, report.aborted.phase], ['TERMINATION_UNCONFIRMED', 'sol-low', 'sample']);
     assert.equal(report.variants[1].samples[0].status, 'termination_unconfirmed');
