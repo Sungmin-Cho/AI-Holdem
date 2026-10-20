@@ -420,7 +420,8 @@ const since = (later, earlier) => (later === null || earlier === null ? null : l
 //   bootMs        spawn → thread.started
 //   threadToTurnMs thread.started → turn.started
 //   turnMs        turn.started → turn.completed/failed (끝까지 관측된 turn만)
-//   censored      turn이 시작됐지만 끝이 관측되지 않았다(신호·exit로 잘림) — 그때 turnObservedMs는 신호(없으면 exit)까지
+//   censored      turn이 시작됐지만 끝이 관측되지 않았다(신호·exit로 잘림) — 그때 turnObservedMs는 신호(없으면 exit)까지.
+//                 turn 시작을 그 경계 뒤에야 처음 봤다면 관측한 구간이 없으므로 null이다(0으로 보정하지 않는다)
 //   lastEventToSignalMs 첫 신호 직전의 마지막 JSONL 줄 → 첫 신호(신호 직전 얼마나 조용했나, 신호 뒤 출력은 제외)
 // 기준 시각(thread·turn 시작·끝)은 이벤트 목록 상한과 무관하게 고정 필드에서 읽는다.
 function timelineView(record, runStartedAt) {
@@ -444,7 +445,7 @@ function timelineView(record, runStartedAt) {
       threadToTurnMs: since(turnStart, threadStart),
       turnMs: since(turnEnd, turnStart),
       censored,
-      turnObservedMs: censored ? since(cutAt, turnStart) : null,
+      turnObservedMs: censored && cutAt !== null && turnStart <= cutAt ? cutAt - turnStart : null,
       lastEventToSignalMs: since(signalMs, record.lastEventBeforeSignalMs),
       signalToExitMs: since(exitMs, signalMs),
       signalToCloseMs: since(closeMs, signalMs),

@@ -784,7 +784,7 @@ test('#297 CLI: 모든 표본을 얻은 뒤 정리 중에 온 SIGINT도 STOPPED(
 
 test('#297 CLI: 진행 중인 probe는 중단 신호를 받지 않고 끝난 뒤 STOPPED(probe)로 멈춘다 — 표본은 시작하지 않는다', async (t) => {
   const spots = buildComparisonSpots(1);
-  const slowProbe = { includes: '다음 파일을 읽어', delayMs: 800, reply: reply('UNAVAILABLE') };
+  const slowProbe = { includes: '다음 파일을 읽어', delayMs: 2000, reply: reply('UNAVAILABLE') };
   const f = fixture(t, { script: { matchers: [slowProbe, ...decisionMatchers(spots)] } });
   const signals = new EventEmitter();
   const pending = runCli(['--live', '--json', '--samples', '1', '--timeout-ms', '20000'], { ...f.deps, signalSource: signals });
@@ -825,6 +825,72 @@ test('#297 타임라인(각본 자식): 일반 비JSON 줄과 개행 없이 끝�
   const text = JSON.stringify(report.variants.map((variant) => variant.samples.map((sample) => sample.timelines)));
   assert.equal(text.includes('NOT-JSON-RAW-LINE'), false);
   assert.equal(text.includes('yyyy'), false);
+});
+
+test('#297 타임라인(각본 자식): turn 시작을 신호 뒤에야 처음 봤으면 잘린 구간 길이는 null이다', async (t) => {
+  const spots = buildComparisonSpots(1);
+  const f = fixture(t);
+  const ev = (event) => `${JSON.stringify(event)}\n`;
+  const scripted = scriptedChildren((spec) => {
+    const isResume = spec.args.includes('resume');
+    if (!isResume && !spec.input.includes('비교용')) {
+      return { chunks: [jsonl({ type: 'thread.started', thread_id: 'th-p' }, { type: 'item.completed', item: { type: 'agent_message', text: 'UNAVAILABLE' } })] };
+    }
+    if (!isResume && modelOf(spec.args) === SOL) {
+      return { hold: true, chunks: [ev({ type: 'thread.started', thread_id: 'th-s' })], afterKill: [ev({ type: 'turn.started' })] };
+    }
+    if (!isResume) return { chunks: [jsonl({ type: 'thread.started', thread_id: 'th-l' }, { type: 'item.completed', item: { type: 'agent_message', text: 'ready' } })] };
+    const spot = spots.find((candidate) => spec.input.includes(`decisionId: ${candidate.decisionId}`));
+    return { chunks: [decision(spot, { action: safeAction(spot), reason: '각본 사유' })] };
+  });
+  const report = await runComparison({ samples: 1, timeoutMs: 20_000, warmupTimeoutMs: 300 }, { tmpRoot: f.tmpRoot, exec: scripted.exec });
+  const sample = report.variants[1].samples[0];
+  const [timeline] = sample.timelines.warmup;
+  assert.equal(sample.status, 'timeout');
+  assert.ok(timeline.events.find(({ name }) => name === 'turn.started').ms > timeline.kills[0].ms, '각본대로 turn 시작은 신호 뒤에 왔다');
+  assert.equal(timeline.derived.censored, true);
+  assert.equal(timeline.derived.turnObservedMs, null, '관측하지 못한 구간을 음수나 0으로 만들지 않는다');
+  assert.equal(timeline.derived.lastEventToSignalMs, timeline.kills[0].ms - timeline.events[0].ms);
+});
+
+test('#297 CLI: 중단 신호로 끝낸 호출의 close를 확인하지 못하면 STOPPED보다 TERMINATION_UNCONFIRMED가 우선하고 executionOk=false다', async (t) => {
+  if (skipOnWin32(t, 'POSIX sessions and process groups')) return;
+  const spots = buildComparisonSpots(1);
+  const f = fixture(t);
+  const release = path.join(f.dir, 'release-holder');
+  const holderDecide = { includes: `decisionId: ${spots[0].decisionId}`, argvIncludes: SOL, delayMs: 30_000, orphanUntil: release, reply: decision(spots[0], { action: 'fold' }) };
+  fs.writeFileSync(path.join(f.dir, 'script.json'), JSON.stringify({ default: { reply: reply('ready') }, matchers: [holderDecide, ...decisionMatchers(spots)] }));
+  let disposeCalls = 0;
+  const createRuntime = (kind, opts) => {
+    const adapter = createPlayerRuntime(kind, opts);
+    const original = adapter.dispose.bind(adapter);
+    // 첫 정리 시도는 보유자가 남은 채로 실패하고, 둘째 시도 전에 보유자를 풀어 준다.
+    adapter.dispose = () => { disposeCalls += 1; if (disposeCalls === 3) fs.writeFileSync(release, ''); return original(); };
+    return adapter;
+  };
+  const signals = new EventEmitter();
+  try {
+    const pending = runCli(['--live', '--json', '--samples', '1', '--timeout-ms', '20000'], { ...f.deps, createRuntime, signalSource: signals });
+    const deadline = Date.now() + 10_000;
+    while (!f.calls().some((call) => call.argv.includes('resume') && modelOf(call.argv) === SOL)) {
+      assert.ok(Date.now() < deadline, 'Sol decide가 시작되지 않았다');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    signals.emit('SIGINT');
+    const { code, out } = await pending;
+    const report = JSON.parse(out);
+    assert.deepEqual([report.aborted.code, report.aborted.variant, report.aborted.phase], ['TERMINATION_UNCONFIRMED', 'sol-low', 'sample']);
+    assert.equal(report.variants[1].samples[0].status, 'termination_unconfirmed');
+    assert.deepEqual([report.executionOk, report.complete, report.ok, code], [false, false, false, 3]);
+    assert.ok(report.failures.some(({ gate, code: failure }) => gate === 'executionOk' && failure === 'TERMINATION_UNCONFIRMED'));
+    assert.equal(report.failures.some(({ code: failure }) => failure === 'STOPPED'), false, '종료 미확인이 먼저 기록되면 그쪽이 우선이다');
+  } finally {
+    if (!fs.existsSync(release)) fs.writeFileSync(release, '');
+    const log = path.join(f.dir, 'calls.jsonl');
+    const orphanPid = (fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '').split('\n').filter(Boolean)
+      .map((line) => JSON.parse(line)).find((entry) => Number.isInteger(entry.orphanPid))?.orphanPid;
+    if (orphanPid) assert.equal(await waitExited(orphanPid), true, '해제한 보유자가 끝나지 않았다');
+  }
 });
 
 for (const name of ['SIGINT', 'SIGTERM']) {
