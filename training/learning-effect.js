@@ -382,13 +382,26 @@ export function evaluateLearningEffect({ events, exposureLog, runLog, enrollment
   const itemsOfRun = (runId, asOfIso) => {
     const out = [];
     let ineligible = 0;
+    const indices = new Set();
+    let events = 0;
     for (const event of valid) {
       if (event.studyRun?.id !== runId || Date.parse(event.appliedAt) > Date.parse(asOfIso)) continue;
+      events += 1;
+      if (Number.isSafeInteger(event.studyRun.index)) indices.add(event.studyRun.index);
       const item = itemOf(event, chartOf);
       if (!item || item.classKey === null || item.legalCount === null) ineligible += 1;
       else out.push(item);
     }
-    return { items: out.sort((a, b) => a.index - b.index), ineligible };
+    return { items: out.sort((a, b) => a.index - b.index), ineligible, indices, events };
+  };
+  // 점수에 쓰지 않는 실행의 문항 분모: 계획 문항 인덱스마다 응답 여부를 센다. 같은 인덱스의 중복 이벤트는 문항이 아니라
+  // 진단값(`duplicateEvents`)이다 — 그래야 n + 제외 합이 계획 문항 수와 맞는다.
+  const diagnostics = { duplicateEvents: 0 };
+  const unscored = (entry, run, exclude, answeredReason = 'INCOMPLETE_RUN') => {
+    const answered = [...run.indices].filter((index) => index >= 0 && index < entry.total).length;
+    diagnostics.duplicateEvents += Math.max(0, run.events - answered);
+    exclude(answeredReason, answered);
+    exclude('UNANSWERED', Math.max(0, entry.total - answered));
   };
 
   // M1 문항 적격: 그 문항의 응답 직전까지 같은 동치군의 노출 사건이 없어야 깨끗하다(자기 응답 제외).
@@ -399,11 +412,11 @@ export function evaluateLearningEffect({ events, exposureLog, runLog, enrollment
     let planned = 0;
     for (const entry of selection.selected) {
       planned += entry.total;
-      const { items, ineligible } = itemsOfRun(entry.runId, asOfIso);
+      const run = itemsOfRun(entry.runId, asOfIso);
+      const { items, ineligible } = run;
       if (entry.status !== 'complete') {
         // 미완료 슬롯의 응답은 점수에 쓰지 않는다. 응답한 문항·답하지 않은 문항을 사유별로 센다(0점으로 접지 않는다).
-        exclude('INCOMPLETE_RUN', items.length + ineligible);
-        exclude('UNANSWERED', Math.max(0, entry.total - items.length - ineligible));
+        unscored(entry, run, exclude);
         continue;
       }
       exclude('INELIGIBLE_EVENT', ineligible);
@@ -441,12 +454,10 @@ export function evaluateLearningEffect({ events, exposureLog, runLog, enrollment
       const retest = itemsOfRun(entry.runId, postAsOf);
       if (entry.status !== 'complete') {
         // 점수에 쓰지 않는 retest의 문항도 분모에 남긴다: 기준 미완료면 그 사유로, 미완료 retest면 응답·미응답으로.
-        const answered = retest.items.length + retest.ineligible;
-        if (entry.status === 'BASELINE_INCOMPLETE') exclude('BASELINE_INCOMPLETE', entry.total);
-        else {
-          exclude('INCOMPLETE_RUN', answered);
-          exclude('UNANSWERED', Math.max(0, entry.total - answered));
-        }
+        if (entry.status === 'BASELINE_INCOMPLETE') {
+          exclude('BASELINE_INCOMPLETE', entry.total);
+          diagnostics.duplicateEvents += Math.max(0, retest.events - retest.indices.size);
+        } else unscored(entry, retest, exclude);
         continue;
       }
       const baselineByPair = new Map(itemsOfRun(entry.assessmentId, baseAsOfFinal).items.map((item) => [`${item.spotKey}:${item.handClass}`, item]));
@@ -513,7 +524,7 @@ export function evaluateLearningEffect({ events, exposureLog, runLog, enrollment
     items: { baseline: { planned: baselineItems.planned, clean: baselineItems.clean.length, excluded: baselineItems.excluded },
       post: { planned: postItems.planned, clean: postItems.clean.length, excluded: postItems.excluded } },
     exposure: { ledgerStatus: exposureLog?.status ?? 'absent', covered: exposureCovered, trackStart },
-    m1, m2, pattern, descriptive,
+    m1, m2, pattern, descriptive, diagnostics,
     caveats: [
       '보고서는 현재 보존된 자료로 다시 계산한 값이다. 최종 결과를 남기려면 report --json 출력을 저장하라(inputs에 입력 digest가 있다).',
       '판정의 크기는 원자료 표준화 차이, 불확실성은 보정 구간이다. 문항 독립을 가정한 근사이고 같은 실행·같은 차트 안의 상관은 다루지 않았다(탐색적 개인 관측).',

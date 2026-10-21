@@ -200,7 +200,8 @@ test('a file replaced while it is read is retried, and keeps failing after three
 
 test('a recent-view file that is not an array or has any malformed row gives no week of coverage, on enrollment and on a first chart view', async () => {
   const good = { at: new Date(Date.now() - 86_400_000).toISOString(), sourceIdentity: { ...V3_REFERENCE_SOURCE }, spotKey: '6max-100bb-co-rfi-v3' };
-  for (const content of [{}, [null], [good, { ...good, at: 'yesterday' }]]) {
+  for (const content of [{}, [null], [good, { ...good, at: 'yesterday' }],
+    [good, { ...good, sourceIdentity: { id: good.sourceIdentity.id, version: good.sourceIdentity.version } }]]) {
     const enrolled = createOwnedTempDir('eval-seed-shape');
     fs.mkdirSync(training(enrolled), { recursive: true });
     fs.writeFileSync(path.join(training(enrolled), 'grid-exposures.json'), JSON.stringify(content));

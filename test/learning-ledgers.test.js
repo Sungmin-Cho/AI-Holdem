@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import { readSpotChart, startDrill, nextQuestion, answerQuestion } from '../tools/drill-cli.js';
-import { appendLedgerRow, ledgerCovers, LEDGERS, readLedger, SEED_WINDOW_MS } from '../tools/learning-ledgers.js';
+import { appendLedgerRow, ledgerCovers, LEDGERS, readLedger, readRecentViewSeed as seedOf, SEED_WINDOW_MS } from '../tools/learning-ledgers.js';
 import { V3_REFERENCE_SOURCE } from '../shared/reference.js';
 
 const source = { id: V3_REFERENCE_SOURCE.id, version: V3_REFERENCE_SOURCE.version, contentSha256: V3_REFERENCE_SOURCE.contentSha256 };
@@ -39,8 +39,8 @@ test('a chart view appends to the exposure ledger first; the first ledger is see
   const read = readLedger(training(storeDir), 'exposure');
   assert.equal(read.status, 'ok');
   const { ledger } = read;
-  assert.deepEqual(ledger.rows.map((row) => row.spotKey), ['6max-100bb-co-rfi-v3', '6max-100bb-btn-rfi-v3', '6max-100bb-btn-rfi-v3'],
-    'the seed keeps only rows inside the seven-day window, then every view is appended');
+  assert.deepEqual(ledger.rows.map((row) => row.spotKey), ['6max-100bb-hj-rfi-v3', '6max-100bb-co-rfi-v3', '6max-100bb-btn-rfi-v3', '6max-100bb-btn-rfi-v3'],
+    'the seed keeps every readable view as a known exposure (even older than the window), then every view is appended');
   assert.equal(Date.parse(ledger.createdAt) - Date.parse(ledger.coverageFrom), SEED_WINDOW_MS);
   assert.equal(ledgerCovers(read, ledger.coverageFrom), true);
   assert.equal(ledgerCovers(read, new Date(Date.parse(ledger.coverageFrom) - 1).toISOString()), false);
@@ -243,4 +243,24 @@ test('older-source practice keeps its records byte for byte while chart views ar
   const [view] = readLedger(training(storeDir), 'exposure').ledger.rows;
   assert.equal(view.sourceIdentity.version, '1.0.0');
   assert.equal(readLedger(training(storeDir), 'run').status, 'absent');
+});
+
+test('a seed row without a full source identity makes the seed incomplete; complete rows are still kept', () => {
+  const root = createOwnedTempDir('ledger-seed-source');
+  const at = '2026-10-21T00:00:00.000Z';
+  const good = { at: '2026-10-19T00:00:00.000Z', sourceIdentity: source, spotKey: '6max-100bb-co-rfi-v3' };
+  for (const bad of [
+    { ...good, sourceIdentity: { id: source.id, version: source.version } },
+    { ...good, sourceIdentity: { ...source, id: '' } },
+    { ...good, sourceIdentity: { ...source, contentSha256: 123 } },
+  ]) {
+    fs.rmSync(path.join(root, LEDGERS.exposure.file), { force: true });
+    fs.writeFileSync(path.join(root, 'grid-exposures.json'), JSON.stringify([good, bad]));
+    appendLedgerRow(root, 'exposure', null, { at, seedRows: () => seedOf(root) });
+    const { ledger } = readLedger(root, 'exposure');
+    assert.equal(ledger.seed, 'unavailable', JSON.stringify(bad.sourceIdentity));
+    assert.equal(ledger.coverageFrom, at);
+    assert.deepEqual(ledger.rows.map((row) => row.spotKey), ['6max-100bb-co-rfi-v3']);
+  }
+  assert.throws(() => appendLedgerRow(root, 'exposure', { ...good, sourceIdentity: { id: source.id, version: source.version } }, { at }), { code: 'BAD_LEDGER_ROW' });
 });

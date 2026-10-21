@@ -386,12 +386,16 @@ test('retest slots keep every planned item in the denominator, and the post-wind
   partial.row.total = 10;
   for (const event of partial.events) event.studyRun.total = 10;
   const retests = [placeRun(b1, { mode: 'retest', startMs: 9 * DAY, assessmentId: baseline[0].runId }), partial];
+  // 첫 retest 뒤 24시간이 지난 두 번째 retest(확인된 실행)는 슬롯이 아니라 extra다.
+  const second = placeRun(b1, { mode: 'retest', startMs: 10 * DAY + 3 * H, assessmentId: baseline[0].runId });
   const extraRows = [
+    second.row,
     { type: 'start', startId: randomUUID(), runId: randomUUID(), mode: 'retest', total: 10, startedAt: at(10 * DAY), assessmentId: baseline[0].runId, sourceIdentity: source },
     { type: 'start', startId: randomUUID(), runId: null, mode: 'retest', total: 0, startedAt: at(10 * DAY + H), sourceIdentity: source },
     { type: 'start', startId: randomUUID(), runId: randomUUID(), mode: 'retest', total: 10, startedAt: at(10 * DAY + 2 * H), assessmentId: baseline[0].runId, sourceIdentity: { ...V2_REFERENCE_SOURCE } },
   ];
-  const report = evaluateLearningEffect(scenario({ baseline, retests, extraRows }).input);
+  const report = evaluateLearningEffect(scenario({ baseline, retests, extraRows, extraEvents: second.events }).input);
+  assert.equal(report.runs.retention.extra, 1, 'the confirmed second retest of the same baseline');
   // 문항이 덜 찬 retest는 기준과 문항 집합이 달라 제품 이력이 INCONSISTENT_RUN으로 판정한다(그 사유를 그대로 쓴다).
   assert.deepEqual(report.runs.retention.byStatus, { complete: 1, INCONSISTENT_RUN: 1 });
   assert.equal(report.runs.retention.unconfirmedStarts, 1);
@@ -425,4 +429,35 @@ test('descriptive activity keeps practice, games and the post window apart', asy
   assert.equal(report.descriptive.intervention.practice.answers, 1);
   assert.equal(report.descriptive.intervention.game.answers, 0);
   assert.equal(report.descriptive.postWindowActivity.practice.answers, 1);
+});
+
+test('a retest with two events for one index counts items by index; the extra event is a diagnostic, not an item', () => {
+  const [b1, b2] = pool.runs;
+  const baseline = [placeRun(b1, { startMs: 1 * H }), placeRun(b2, { startMs: 2 * H })];
+  const doubled = placeRun(b2, { mode: 'retest', startMs: 9 * DAY + H, assessmentId: baseline[1].runId });
+  const copy = relabel(b2[0], { runId: doubled.runId, mode: 'retest', total: 10, index: 0, startedAt: doubled.row.startedAt,
+    assessmentId: baseline[1].runId, appliedAt: at(9 * DAY + H + 30 * M) });
+  doubled.events.push(copy);
+  const retests = [placeRun(b1, { mode: 'retest', startMs: 9 * DAY, assessmentId: baseline[0].runId }), doubled];
+  const report = evaluateLearningEffect(scenario({ baseline, retests }).input);
+  assert.equal(report.runs.retention.byStatus.complete, 1);
+  assert.equal(report.m2.planned, 20);
+  assert.equal(report.m2.excluded.INCOMPLETE_RUN, 10);
+  assert.equal(report.m2.excluded.UNANSWERED ?? 0, 0);
+  assert.equal(report.diagnostics.duplicateEvents, 1);
+  assert.equal(report.m2.n + Object.values(report.m2.excluded).reduce((sum, n) => sum + n, 0), 20);
+});
+
+test('a game answer and a practice answer in the intervention land in their own descriptive rows', async () => {
+  const { parts } = scenario();
+  const item = parts.baseline[0].events[1];
+  const store = createOwnedTempDir('effect-game');
+  const started = await startDrill(store, { mode: 'free', source, seed: 'game', spotKey: item.mixObservation.spotKey, handClass: item.mixObservation.handClass });
+  await answerRun(store, started, 'top');
+  const [practice] = await eventsOf(store);
+  const game = { ...relabel(practice, { appliedAt: at(4 * DAY) }), origin: 'game' };
+  const report = evaluateLearningEffect(scenario({ extraEvents: [relabel(practice, { appliedAt: at(3 * DAY) }), game] }).input);
+  assert.equal(report.descriptive.intervention.practice.answers, 1);
+  assert.equal(report.descriptive.intervention.game.answers, 1);
+  assert.equal(report.descriptive.intervention.game.allowedRate, 1);
 });

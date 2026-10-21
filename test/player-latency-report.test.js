@@ -257,6 +257,13 @@ test('a game dir with a single loop.log is accepted; an empty path is refused; s
   fs.renameSync(sessionDir, `${sessionDir}.moved`);
   fs.symlinkSync(`${sessionDir}.moved`, sessionDir);
   assert.throws(() => readLoopRecords(found.file, undefined, found.parents), { code: 'UNSAFE_PATH' });
+  // 상위의 sessions 디렉터리가 바뀌어도 거부한다.
+  const parentSwap = store({ s: [call(1, 'decision', 1000)] });
+  const [entry] = findLoopLogs(parentSwap);
+  const sessionsDir = path.join(parentSwap, '.session-store', 'sessions');
+  fs.renameSync(sessionsDir, `${sessionsDir}.moved`);
+  fs.symlinkSync(`${sessionsDir}.moved`, sessionsDir);
+  assert.throws(() => readLoopRecords(entry.file, undefined, entry.parents), { code: 'UNSAFE_PATH' });
 });
 
 test('the report never writes to the store', () => {

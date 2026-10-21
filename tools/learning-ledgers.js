@@ -35,8 +35,11 @@ function ledgerError(code, message) {
 
 const validIso = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 const plain = (value) => Boolean(value && typeof value === 'object' && !Array.isArray(value));
-const sourceOk = (value) => plain(value) && typeof value.id === 'string' && typeof value.version === 'string'
-  && (value.contentSha256 === undefined || /^[0-9a-f]{64}$/.test(value.contentSha256));
+// 원장의 출처는 온전한 식별값이어야 한다(비어 있지 않은 id·version과 64자리 해시). 평가기는 해시까지 비교하므로,
+// 해시가 빠진 행을 받아들이면 그 노출을 어느 출처에도 대응시키지 못해 미노출처럼 사라진다.
+const sourceOk = (value) => plain(value) && typeof value.id === 'string' && value.id.length > 0 && value.id.length <= 128
+  && typeof value.version === 'string' && value.version.length > 0 && value.version.length <= 64
+  && typeof value.contentSha256 === 'string' && /^[0-9a-f]{64}$/.test(value.contentSha256);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function rowOk(kind, row) {
@@ -112,9 +115,9 @@ export function parseLedger(kind, bytes) {
  */
 function freshLedger(kind, at, seed) {
   const seededOk = LEDGERS[kind].seeded && seed?.ok === true;
-  // 읽을 수 있는 양성 노출은 씨앗이 불완전해도 남긴다(알려진 노출). coverage만 씨앗이 온전할 때 7일 앞으로 간다.
-  const rows = LEDGERS[kind].seeded ? (seed?.rows ?? []).filter((row) => rowOk(kind, row) && Date.parse(row.at) <= Date.parse(at)
-    && Date.parse(at) - Date.parse(row.at) <= SEED_WINDOW_MS)
+  // 읽을 수 있는 양성 노출은 씨앗이 불완전해도, 7일보다 오래됐어도 남긴다(알려진 노출은 시각 제한 없이 제외한다).
+  // coverage만 씨앗이 온전할 때 7일 앞으로 간다.
+  const rows = LEDGERS[kind].seeded ? (seed?.rows ?? []).filter((row) => rowOk(kind, row) && Date.parse(row.at) <= Date.parse(at))
     .sort((a, b) => a.at.localeCompare(b.at)) : [];
   return {
     schemaVersion: 1, kind, createdAt: at,
