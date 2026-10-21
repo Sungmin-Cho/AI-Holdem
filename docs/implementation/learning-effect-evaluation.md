@@ -22,18 +22,18 @@
 node tools/learning-eval.js enroll --store /absolute/store --consent [--baseline-runs 3] [--intervention-days 7] [--post-days 7]
 node tools/learning-eval.js status --store /absolute/store
 node tools/learning-eval.js report --store /absolute/store --json > report.json
-node tools/learning-eval.js withdraw --store /absolute/store
+node tools/learning-eval.js withdraw --store /absolute/store [--id <등록 id>]
 ```
 
 `npm run learning-eval -- <명령> ...`도 같습니다.
 
-1. **등록(동의)**: 참여자가 `--consent`로 등록합니다. 기록은 로컬 store에만 남고, 언제든 `withdraw`로 철회할 수 있습니다.
+1. **등록(동의)**: 참여자가 `--consent`로 등록합니다. 기록은 로컬 store에만 남습니다. 관측 기간이 끝난 뒤에도 `withdraw`로 철회할 수 있습니다(여러 등록이면 `--id`).
    - 등록할 때 일정이 봉인됩니다: 기준 assessment K회(기본 3), 개입 D일(기본 7), 사후 W일(기본 7).
    - 사후 구간은 참여자가 고르지 않습니다. 봉인된 시각(`postOpensAt`)에 열리고 `postClosesAt`에 닫힙니다.
 2. **기준**: 사후 구간이 열리기 전에 새 문제 평가 K회를 시작하고 끝냅니다. 시작 순서로 처음 K회가 기준이고, 시작했다가 끝내지 않은 실행도 슬롯을 차지합니다. 그래서 잘 안 된 실행만 골라 버릴 수 없습니다.
 3. **개입**: 평소처럼 게임·코칭·연습·차트를 씁니다.
 4. **사후**: 사후 구간에서 새 문제 평가 K회와, 기준 평가마다 지연 재평가 1회를 합니다.
-5. **보고**: `postClosesAt` 뒤에 최종 보고서가 나옵니다. 그 전에는 진행 상황(`INTERIM`)만 나옵니다.
+5. **보고**: `postClosesAt` 뒤에 최종 보고서가 나옵니다. 그 전에는 진행 상황(`INTERIM`)만 나옵니다. 기준 실행은 사후 구간이 열리기 전에, 사후 실행과 재평가는 사후 구간이 닫히기 전(`postClosesAt` 미만)에 끝낸 응답만 셉니다. 늦게 끝낸 기준 평가의 재평가는 유지 측정에 쓰지 않습니다.
 
 ## 판정 규칙(사전 고정, 코드 상수 `LEARNING_EFFECT_PROTOCOL_V1`와 SHA-256으로 봉인)
 
@@ -72,8 +72,8 @@ node tools/learning-eval.js withdraw --store /absolute/store
   - 다른 기준표
   - 교체
   - 관측 없는 게임 결정
-- `items`는 문항별 포함·제외 사유입니다. 이탈·미적격·오염은 0점이나 개선으로 접지 않고 사유별로 셉니다.
-- `m1`·`m2`에는 원자료 차이(`raw`), 보정 구간(`ci`), 셀별 표와 판정이 있습니다. `descriptive`에는 난이도 층·맥락·좌석·스택 분포와 개입 기간 활동이 있습니다.
+- `items`는 문항별 포함·제외 사유입니다. 이탈·미적격·오염은 0점이나 개선으로 접지 않고 사유별로 셉니다. 끝내지 않은 슬롯의 응답과 미응답 문항도 `INCOMPLETE_RUN`·`UNANSWERED`로 셉니다.
+- `m1`·`m2`에는 원자료 차이(`raw`), 보정 구간(`ci`), 셀별 표와 판정이 있습니다. `descriptive`에는 난이도 층·맥락·좌석·스택 분포와, 등록 기준표의 개입 기간·사후 구간 비측정 활동(연습·게임 일치율, 차트 열람)이 있습니다.
 - 보고서는 **지금 보존된 자료로 다시 계산한 값**입니다. 원장 상한·손상 뒤에는 달라질 수 있습니다. 최종 결과를 남기려면 `report --json` 출력을 저장하세요. `inputs`에 입력 파일 digest가 있습니다.
 - `status`·`report`는 학습 기록을 바꾸지 않습니다(락·쓰기 없음). 학습 중에 읽어 기록이 계속 바뀌면 `SNAPSHOT_UNSTABLE`로 끝납니다. 학습을 멈춘 뒤 다시 실행하세요.
 
@@ -81,12 +81,12 @@ node tools/learning-eval.js withdraw --store /absolute/store
 
 - **노출 원장** `.training/grid-exposure-log.json`
   - 차트를 열 때마다 한 행을 덧붙입니다.
-  - 처음 만들 때 기존 최근 열람 파일로 씨앗을 넣어, 만든 시각 7일 전부터의 열람 여부를 정확히 답합니다.
+  - 처음 만들 때 기존 최근 열람 파일로 씨앗을 넣어, 만든 시각 7일 전부터의 열람 여부를 정확히 답합니다. 그 파일을 읽을 수 없으면 만든 시각부터만 기록을 보장합니다.
 - **실행 원장** `.training/study-run-log.json`
   - 새 문제 평가·지연 재평가를 시작할 때 시작 의도를 남깁니다.
   - 미완료 측정 실행이 다른 시작으로 교체되면 교체 행을 남깁니다.
   - 응답 0건 실행·빈 큐·교체가 분모에서 사라지지 않게 하려는 것입니다.
-- 두 원장은 상한(4,000행·2MiB)을 넘으면 오래된 행부터 버리고 보장 구간을 앞으로 옮깁니다. 손상 원본은 다른 이름으로 보존합니다.
+- 두 원장은 상한(4,000행·2MiB)을 넘으면 오래된 행부터 버리고 보장 구간을 버린 행 뒤로 옮깁니다. 손상 원본은 다른 이름으로 먼저 보존하고, 보존하지 못하면 원본을 두고 그 기록(차트 열람·측정 시작)을 실패시킵니다.
 - 기존 학습 기록·문항 생성·학습실 화면은 바뀌지 않습니다.
 
 ## 한계

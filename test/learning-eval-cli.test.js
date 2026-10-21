@@ -114,6 +114,65 @@ test('a snapshot that keeps changing while it is read is refused; one quiet re-r
   assert.equal(writes, 3);
   const once = readSnapshot(storeDir, { afterRead: (attempt) => { if (attempt === 1) churn(); } });
   assert.equal(once.attempts, 2);
+  // 원장도 같은 읽기의 바이트로 판독한다: 첫 읽기 뒤 시작 행이 생기면 다시 읽은 snapshot에 그 행이 있다.
+  const runLog = path.join(training(storeDir), 'study-run-log.json');
+  const consistent = readSnapshot(storeDir, { afterRead: (attempt) => {
+    if (attempt !== 1) return;
+    const ledger = JSON.parse(fs.readFileSync(runLog, 'utf8'));
+    ledger.rows.push({ type: 'start', startId: '33333333-3333-4333-8333-333333333333', runId: null, mode: 'assessment', total: 0,
+      startedAt: '2026-10-01T01:00:00.000Z', sourceIdentity: V3_REFERENCE_SOURCE });
+    fs.writeFileSync(runLog, JSON.stringify(ledger));
+    fs.utimesSync(runLog, new Date(), new Date(Date.now() + 5000));
+  } });
+  assert.equal(consistent.attempts, 2);
+  assert.equal(consistent.runLog.ledger.rows.length, 1);
+  assert.equal(consistent.inputs['study-run-log.json'].length, 64);
   assert.equal(once.enrollments.length, 1);
   assert.equal(fs.existsSync(path.join(training(storeDir), ENROLLMENT_FILE)), true);
+});
+
+test('withdrawal is possible after the observation window closes, and by id among several enrollments', async () => {
+  const storeDir = createOwnedTempDir('eval-withdraw-late');
+  const first = await enroll(storeDir, { consent: true, now: clock('2026-09-01T00:00:00.000Z') });
+  const second = await enroll(storeDir, { consent: true, now: clock('2026-10-01T00:00:00.000Z') });
+  // 첫 등록의 관측 기간(2026-09-15 마감)이 끝난 뒤에도 id로 철회한다.
+  const late = await withdraw(storeDir, { id: first.id, now: clock('2026-10-02T00:00:00.000Z') });
+  assert.equal(late.id, first.id);
+  await assert.rejects(withdraw(storeDir, { id: first.id, now: clock('2026-10-03T00:00:00.000Z') }), { code: 'NOT_ENROLLED' });
+  assert.equal(buildReport(storeDir, { id: first.id, now: '2026-10-03T00:00:00.000Z' }).status, 'WITHDRAWN');
+  const result = await run(['withdraw', '--store', storeDir, '--id', second.id], clock('2026-12-01T00:00:00.000Z'));
+  assert.equal(result.code, 0, result.err);
+  assert.ok(readEnrollments(training(storeDir)).enrollments.every((row) => row.withdrawnAt));
+});
+
+test('the snapshot is evaluated from the bytes it checked, not from a re-read', async () => {
+  const storeDir = createOwnedTempDir('eval-snapshot-bytes');
+  await enroll(storeDir, { consent: true, now: clock('2026-10-01T00:00:00.000Z') });
+  const file = path.join(training(storeDir), 'learning-evaluation.json');
+  const original = fs.readFileSync(file);
+  // 복원이 정확하도록 mtime을 정수 초로 맞춰 둔다.
+  const whole = new Date(Math.floor(Date.now() / 1000) * 1000);
+  fs.utimesSync(file, whole, whole);
+  const stat = { atime: whole, mtime: whole };
+  // 읽은 뒤 같은 크기·같은 mtime으로 내용만 바꾼다(교체 검사로는 보이지 않는 경우).
+  const snapshot = readSnapshot(storeDir, { afterRead: (attempt) => {
+    if (attempt !== 1) return;
+    const changed = Buffer.from(original.toString('utf8').replace('"withdrawnAt":null', '"withdrawnAt":nul0'));
+    fs.writeFileSync(file, changed);
+    fs.utimesSync(file, stat.atime, stat.mtime);
+  } });
+  assert.equal(snapshot.attempts, 1);
+  assert.equal(snapshot.enrollments[0].withdrawnAt, null, 'parsed from the checked bytes');
+  const { createHash } = await import('node:crypto');
+  assert.equal(snapshot.inputs['learning-evaluation.json'], createHash('sha256').update(original).digest('hex'));
+});
+
+test('an unreadable recent-view file at enrollment does not let the exposure ledger claim the previous week', async () => {
+  const storeDir = createOwnedTempDir('eval-seed-corrupt');
+  fs.mkdirSync(training(storeDir), { recursive: true });
+  fs.writeFileSync(path.join(training(storeDir), 'grid-exposures.json'), '{ not json');
+  await enroll(storeDir, { consent: true, now: clock('2026-10-01T00:00:00.000Z') });
+  const { ledger } = readLedger(training(storeDir), 'exposure');
+  assert.equal(ledger.seed, 'unavailable');
+  assert.equal(ledger.coverageFrom, '2026-10-01T00:00:00.000Z');
 });

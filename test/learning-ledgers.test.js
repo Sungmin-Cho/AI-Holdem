@@ -164,3 +164,83 @@ test('the exposure and run ledgers do not change drill events or the answered se
   assert.deepEqual(fs.readFileSync(path.join(training(storeDir), 'drill-session.json')), session);
   assert.deepEqual(readLedger(training(storeDir), 'run').ledger.rows.map((row) => row.type), ['start']);
 });
+
+test('an oversize corrupt ledger is preserved before it is replaced; if it cannot be preserved, the original stays and the write fails', () => {
+  const root = createOwnedTempDir('ledger-oversize');
+  const big = `{"broken":"${'x'.repeat(3 * 1024 * 1024)}`;
+  fs.writeFileSync(path.join(root, LEDGERS.run.file), big);
+  const at = '2026-10-21T04:00:00.000Z';
+  const row = { type: 'start', startId: START, runId: RUN, mode: 'assessment', total: 10, startedAt: at, sourceIdentity: source };
+  appendLedgerRow(root, 'run', row, { at });
+  const { ledger } = readLedger(root, 'run');
+  assert.equal(fs.readFileSync(path.join(root, ledger.resets[0].preservedAs), 'utf8'), big);
+  // 보존할 이름이 이미 있으면(보존 실패) 원본을 그대로 두고 거부한다.
+  fs.writeFileSync(path.join(root, LEDGERS.run.file), big);
+  const later = '2026-10-21T05:00:00.000Z';
+  fs.writeFileSync(path.join(root, `study-run-log.corrupt-${later.replace(/[:.]/g, '-')}.json`), 'occupied');
+  assert.throws(() => appendLedgerRow(root, 'run', { ...row, startedAt: later }, { at: later }), { code: 'LEDGER_PRESERVE_FAILED' });
+  assert.equal(fs.readFileSync(path.join(root, LEDGERS.run.file), 'utf8'), big);
+});
+
+test('the byte cap also trims from the oldest rows and moves coverage past them', () => {
+  const root = createOwnedTempDir('ledger-bytes');
+  const base = Date.parse('2026-10-01T00:00:00.000Z');
+  const iso = (minutes) => new Date(base + minutes * 60_000).toISOString();
+  const limits = { rows: 1000, bytes: 700 };
+  for (const minutes of [0, 1, 2, 3, 4, 5]) {
+    appendLedgerRow(root, 'exposure', { at: iso(minutes), sourceIdentity: source, spotKey: 'x-v3' }, { at: iso(minutes), limits });
+  }
+  const { ledger } = readLedger(root, 'exposure');
+  assert.ok(Buffer.byteLength(`${JSON.stringify(ledger)}\n`) <= 700);
+  assert.ok(ledger.dropped > 0);
+  assert.equal(ledger.rows[0].at, iso(ledger.dropped));
+  assert.equal(ledger.coverageFrom, new Date(Date.parse(ledger.droppedThrough) + 1).toISOString());
+});
+
+test('a real empty assessment start (every spot recently charted) is recorded with no run id', { timeout: 120_000 }, async () => {
+  const { LEGACY_REFERENCE_SOURCE } = await import('../shared/reference.js');
+  const storeDir = createOwnedTempDir('ledger-empty-real');
+  const v1 = { ...LEGACY_REFERENCE_SOURCE };
+  for (const spotKey of ['6max-100bb-utg-rfi-unopened', '6max-100bb-hj-rfi-unopened', '6max-100bb-co-rfi-unopened',
+    '6max-100bb-btn-rfi-unopened', '6max-100bb-sb-rfi-unopened', '6max-100bb-bb-vs-single-raise',
+    '6max-100bb-sb-vs-single-raise', '6max-100bb-btn-vs-single-raise']) {
+    await readSpotChart(storeDir, { spotKey, source: v1 });
+  }
+  const started = await startDrill(storeDir, { mode: 'assessment', source: v1, seed: 'empty' });
+  assert.equal(started.queue.length, 0);
+  assert.equal(started.studyRun, null);
+  const rows = readLedger(training(storeDir), 'run').ledger.rows;
+  assert.deepEqual(rows.map((row) => [row.type, row.runId, row.total]), [['start', null, 0]]);
+  assert.equal(readLedger(training(storeDir), 'exposure').ledger.rows.length, 8);
+});
+
+test('a start intent whose session never landed (crash between the ledger and the session write) takes no slot', { timeout: 120_000 }, async () => {
+  const { enroll, buildReport } = await import('../tools/learning-eval.js');
+  const storeDir = createOwnedTempDir('ledger-intent');
+  await enroll(storeDir, { consent: true, now: () => new Date(Date.now() - 60_000).toISOString() });
+  const started = await startDrill(storeDir, { mode: 'assessment', source, seed: 'intent' });
+  // 원장 행은 세션보다 먼저 쓰인다. 그 사이 중단된 상태 = 원장에 시작 행, 세션 없음, 응답 없음, 교체 행 없음.
+  fs.rmSync(path.join(training(storeDir), 'drill-session.json'));
+  assert.deepEqual(readLedger(training(storeDir), 'run').ledger.rows.map((row) => [row.type, row.runId]), [['start', started.studyRun.id]]);
+  const report = buildReport(storeDir);
+  assert.equal(report.status, 'INTERIM');
+  assert.equal(report.runs.baseline.unconfirmedStarts, 1);
+  assert.equal(report.runs.baseline.started, 0, 'the unconfirmed intent takes no slot');
+});
+
+test('older-source practice keeps its records byte for byte while chart views are appended', { timeout: 120_000 }, async () => {
+  const { LEGACY_REFERENCE_SOURCE } = await import('../shared/reference.js');
+  const storeDir = createOwnedTempDir('ledger-v1');
+  const v1 = { ...LEGACY_REFERENCE_SOURCE };
+  const started = await startDrill(storeDir, { mode: 'free', source: v1, seed: 'v1' });
+  const next = await nextQuestion(storeDir);
+  await answerQuestion(storeDir, { sessionId: started.sessionId, questionId: next.question.questionId, attemptNo: next.index, action: 'fold' });
+  const events = fs.readFileSync(path.join(training(storeDir), 'profile-events.jsonl'));
+  const session = fs.readFileSync(path.join(training(storeDir), 'drill-session.json'));
+  await readSpotChart(storeDir, { spotKey: '6max-100bb-btn-rfi-unopened', source: v1 });
+  assert.deepEqual(fs.readFileSync(path.join(training(storeDir), 'profile-events.jsonl')), events);
+  assert.deepEqual(fs.readFileSync(path.join(training(storeDir), 'drill-session.json')), session);
+  const [view] = readLedger(training(storeDir), 'exposure').ledger.rows;
+  assert.equal(view.sourceIdentity.version, '1.0.0');
+  assert.equal(readLedger(training(storeDir), 'run').status, 'absent');
+});

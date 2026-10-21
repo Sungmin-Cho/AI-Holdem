@@ -314,3 +314,67 @@ test('republished events count once, conflicting ones stop the report, and a fin
   assert.deepEqual(later.m2, once.m2);
   assert.deepEqual(later.runs.post, once.runs.post);
 });
+
+test('the post window is exclusive at its close: a run finished 1 ms before counts, one finished exactly at the close does not', () => {
+  const [, , p1, p2] = pool.runs;
+  // 응답은 시작 1분 뒤부터 1분 간격이다. 10문항의 마지막 응답은 시작 + 10분이다.
+  const close = 14 * DAY;
+  const before = evaluateLearningEffect(scenario({ post: [placeRun(p1, { startMs: 8 * DAY }), placeRun(p2, { startMs: close - 10 * M - 1 })] }).input);
+  assert.deepEqual(before.runs.post.byStatus, { complete: 2 });
+  const exact = evaluateLearningEffect(scenario({ post: [placeRun(p1, { startMs: 8 * DAY }), placeRun(p2, { startMs: close - 10 * M })] }).input);
+  assert.equal(exact.runs.post.byStatus.complete, 1);
+  assert.equal(exact.m1.reason, 'INCOMPLETE_SLOTS');
+});
+
+test('a baseline finished after the post window opened cannot anchor retention; a missing baseline slot keeps its retest slot', () => {
+  const [b1, b2] = pool.runs;
+  const late = placeRun(b2, { startMs: 7 * DAY - 5 * M });
+  const baseline = [placeRun(b1, { startMs: 1 * H }), late];
+  const retests = [
+    placeRun(b1, { mode: 'retest', startMs: 9 * DAY, assessmentId: baseline[0].runId }),
+    placeRun(b2, { mode: 'retest', startMs: 9 * DAY + H, assessmentId: late.runId }),
+  ];
+  const report = evaluateLearningEffect(scenario({ baseline, retests }).input);
+  assert.deepEqual(report.runs.retention.byStatus, { complete: 1, BASELINE_INCOMPLETE: 1 });
+  assert.equal(report.m2.verdict, 'INSUFFICIENT');
+  assert.equal(report.m2.reason, 'INCOMPLETE_SLOTS');
+  const one = evaluateLearningEffect(scenario({ baseline: [baseline[0]], retests: [retests[0]] }).input);
+  assert.deepEqual(one.runs.retention.byStatus, { complete: 1, NO_BASELINE: 1 }, 'retention always has K slots');
+  assert.equal(one.runs.baseline.notStarted, 1);
+});
+
+test('an incomplete slot keeps its answered and unanswered items in the denominator without scoring them', () => {
+  const [, , p1, p2] = pool.runs;
+  const partial = placeRun(p2.slice(0, 4), { startMs: 8 * DAY + H });
+  partial.row.total = 10;
+  for (const event of partial.events) event.studyRun.total = 10;
+  const report = evaluateLearningEffect(scenario({ post: [placeRun(p1, { startMs: 8 * DAY }), partial] }).input);
+  assert.equal(report.items.post.planned, 20);
+  assert.equal(report.items.post.excluded.INCOMPLETE_RUN, 4);
+  assert.equal(report.items.post.excluded.UNANSWERED, 6);
+  assert.equal(report.items.post.clean + Object.values(report.items.post.excluded).reduce((sum, n) => sum + n, 0), 20);
+  assert.equal(report.m1.reason, 'INCOMPLETE_SLOTS');
+});
+
+test('a second item of the same class in one run is a duplicate, and a chart view long before tracking started still excludes', async () => {
+  const [, , p1, p2] = pool.runs;
+  const target = [...p1, ...p2].find((event) => sharedChartPartner(event));
+  const store = createOwnedTempDir('effect-duplicate');
+  const partnerSpot = sharedChartPartner(target);
+  const started = await startDrill(store, { mode: 'free', source, seed: 'dup', spotKey: partnerSpot, handClass: target.mixObservation.handClass });
+  await answerRun(store, started, 'top');
+  const [partner] = await eventsOf(store);
+  // 사후 실행 하나의 마지막 문항을 같은 동치군(다른 spot)의 문항으로 바꾼다.
+  const withTarget = p1.includes(target) ? p1 : p2;
+  const other = withTarget === p1 ? p2 : p1;
+  const edited = [...withTarget.filter((event) => event !== target).slice(0, 8), target, partner];
+  assert.equal(edited.length, 10);
+  const report = evaluateLearningEffect(scenario({ post: [placeRun(edited, { startMs: 8 * DAY }), placeRun(other, { startMs: 8 * DAY + H })] }).input);
+  assert.equal(report.items.post.excluded.DUPLICATE_CLASS, 1);
+  // 추적 시작(등록 7일 전)보다 이른 열람도, 원장에 남아 있으면 알려진 노출이다.
+  const old = evaluateLearningEffect(scenario({
+    exposureLog: ledger('exposure', [{ at: at(-10 * DAY), sourceIdentity: source, spotKey: partnerSpot }], at(-20 * DAY)),
+  }).input);
+  assert.ok(old.items.post.excluded.KNOWN_EXPOSURE_CHART >= 1);
+  assert.equal(old.exposure.covered, true);
+});

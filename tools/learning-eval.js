@@ -2,7 +2,7 @@
 // 학습 효과 평가(#298)의 등록·철회·진행·보고 CLI. 프로토콜과 판정은 `training/learning-effect.js`가 정한다.
 //
 //   enroll   --store <절대 경로> --consent [--baseline-runs K] [--intervention-days D] [--post-days W]
-//   withdraw --store <절대 경로>
+//   withdraw --store <절대 경로> [--id <등록 id>]
 //   status   --store <절대 경로> [--json]
 //   report   --store <절대 경로> [--json] [--id <등록 id>]
 //
@@ -19,7 +19,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { withDrillLock } from './drill-cli.js';
-import { appendLedgerRows, readLedger } from './learning-ledgers.js';
+import { LEDGERS, appendLedgerRows, parseLedger } from './learning-ledgers.js';
 import { loadReferenceDataset } from './preflop-dataset.js';
 import { openContained, writeContained } from './training-store.js';
 import { strataForSpot } from '../training/drill-strata.js';
@@ -68,7 +68,10 @@ function validEnrollment(row) {
 
 /** 등록 기록(읽기 전용). 없으면 빈 목록, 형식이 틀리면 ENROLLMENT_INVALID. */
 export function readEnrollments(trainingRoot) {
-  const bytes = readFile(trainingRoot, ENROLLMENT_FILE, LIMITS.small);
+  return parseEnrollments(readFile(trainingRoot, ENROLLMENT_FILE, LIMITS.small));
+}
+
+function parseEnrollments(bytes) {
   if (bytes === null) return { schemaVersion: 1, enrollments: [] };
   let parsed;
   try { parsed = JSON.parse(bytes.toString('utf8')); } catch { throw evalError('ENROLLMENT_INVALID', '등록 기록을 읽을 수 없습니다.'); }
@@ -80,15 +83,19 @@ export function readEnrollments(trainingRoot) {
 
 const isOpen = (row, now) => !row.withdrawnAt && Date.parse(now) < Date.parse(row.postClosesAt);
 
+// 노출 원장의 씨앗: 최근 열람 파일이 없으면 빈 씨앗(정상), 읽을 수 없거나 형식이 틀리면 실패(그 7일을 주장하지 않는다).
 function seedRowsFor(trainingRoot) {
   return () => {
-    let rows = [];
+    let rows;
     try {
       const bytes = readFile(trainingRoot, 'grid-exposures.json', 1024 * 1024);
       rows = bytes ? JSON.parse(bytes.toString('utf8')) : [];
-    } catch { rows = []; }
-    return Array.isArray(rows) ? rows.filter((row) => row && validIso(row.at) && typeof row.spotKey === 'string' && row.sourceIdentity)
-      .map((row) => ({ at: row.at, sourceIdentity: row.sourceIdentity, spotKey: row.spotKey })) : [];
+    } catch {
+      return { ok: false, rows: [] };
+    }
+    if (!Array.isArray(rows)) return { ok: false, rows: [] };
+    return { ok: true, rows: rows.filter((row) => row && validIso(row.at) && typeof row.spotKey === 'string' && row.sourceIdentity)
+      .map((row) => ({ at: row.at, sourceIdentity: row.sourceIdentity, spotKey: row.spotKey })) };
   };
 }
 
@@ -117,13 +124,15 @@ export async function enroll(storeDir, { consent = false, plan = {}, now = () =>
   });
 }
 
-export async function withdraw(storeDir, { now = () => new Date().toISOString() } = {}) {
+/** 철회는 관측 기간이 끝난 뒤에도 된다. `id`가 없으면 철회하지 않은 마지막 등록이다. */
+export async function withdraw(storeDir, { id = null, now = () => new Date().toISOString() } = {}) {
   const root = trainingRootOf(storeDir);
   return withDrillLock(storeDir, async () => {
     const at = now();
     const current = readEnrollments(root);
-    const index = current.enrollments.findLastIndex((row) => isOpen(row, at));
-    if (index < 0) throw evalError('NOT_ENROLLED', '철회할 진행 중인 등록이 없습니다.');
+    const index = id ? current.enrollments.findIndex((row) => row.id === id && !row.withdrawnAt)
+      : current.enrollments.findLastIndex((row) => !row.withdrawnAt);
+    if (index < 0) throw evalError('NOT_ENROLLED', id ? '그 id의 철회하지 않은 등록이 없습니다.' : '철회할 등록이 없습니다.');
     const next = current.enrollments.map((row, i) => (i === index ? { ...row, withdrawnAt: at } : row));
     writeContained(root, [ENROLLMENT_FILE], `${JSON.stringify({ schemaVersion: 1, enrollments: next })}\n`, { mode: 'replace' });
     return next[index];
@@ -154,21 +163,29 @@ const digest = (bytes) => (bytes === null ? null : createHash('sha256').update(b
 /** 다섯 입력을 한 번에 읽는다. 읽는 동안 하나라도 바뀌면 다시 읽고, 3회 모두 바뀌면 SNAPSHOT_UNSTABLE. */
 export function readSnapshot(storeDir, { afterRead = null } = {}) {
   const root = trainingRootOf(storeDir);
-  const names = [EVENTS_FILE, 'grid-exposure-log.json', 'study-run-log.json', ENROLLMENT_FILE, SESSION_FILE];
+  const names = [EVENTS_FILE, LEDGERS.exposure.file, LEDGERS.run.file, ENROLLMENT_FILE, SESSION_FILE];
   for (let attempt = 1; attempt <= LIMITS.snapshotAttempts; attempt += 1) {
     const beforeStats = names.map((name) => statOf(path.join(root, name)));
-    const bytes = Object.fromEntries(names.map((name) => [name, readFile(root, name, name === EVENTS_FILE ? LIMITS.events : LIMITS.small)]));
+    let bytes;
+    try {
+      bytes = Object.fromEntries(names.map((name) => [name, readFile(root, name, name === EVENTS_FILE ? LIMITS.events : LIMITS.small)]));
+    } catch (error) {
+      // 읽는 중 원자 교체가 일어나면 openContained가 UNSAFE_PATH로 거부한다 — 같은 재시도 규칙으로 다룬다.
+      if (error.code === 'UNSAFE_PATH') continue;
+      throw error;
+    }
     // 테스트 이음새: 읽은 뒤·재확인 전에 동시 쓰기를 흉내 낸다.
     afterRead?.(attempt);
     const afterStats = names.map((name) => statOf(path.join(root, name)));
     if (beforeStats.some((stat, i) => stat !== afterStats[i])) continue;
     let session = null;
     try { session = bytes[SESSION_FILE] ? JSON.parse(bytes[SESSION_FILE].toString('utf8')) : null; } catch { session = null; }
+    // 판독은 모두 위에서 읽은 같은 바이트로 한다(다시 디스크를 읽지 않는다).
     return {
       events: parseJsonl(bytes[EVENTS_FILE]),
-      exposureLog: readLedger(root, 'exposure'),
-      runLog: readLedger(root, 'run'),
-      enrollments: readEnrollments(root).enrollments,
+      exposureLog: parseLedger('exposure', bytes[LEDGERS.exposure.file]),
+      runLog: parseLedger('run', bytes[LEDGERS.run.file]),
+      enrollments: parseEnrollments(bytes[ENROLLMENT_FILE]).enrollments,
       currentRunId: typeof session?.studyRun?.id === 'string' ? session.studyRun.id : null,
       inputs: Object.fromEntries(names.map((name) => [name, digest(bytes[name])])),
       attempts: attempt,
@@ -245,6 +262,7 @@ export function formatReport(report) {
 
 const USAGE = `사용법: node tools/learning-eval.js <enroll|withdraw|status|report> --store <절대 경로> [옵션]
   enroll   --consent [--baseline-runs K(2-5, 기본 3)] [--intervention-days D(1-28, 기본 7)] [--post-days W(3-14, 기본 7)]
+  withdraw [--id <등록 id>]           (관측 기간이 끝난 뒤에도 철회할 수 있다)
   report   [--json] [--id <등록 id>]   (읽기 전용, 현재 자료로 다시 계산)
   status   [--json]                    (읽기 전용)
   종료 코드: 0 = 성공 · 2 = 인자 오류 · 1 = 실행 오류`;
@@ -259,7 +277,7 @@ export function parseArgs(argv) {
     if (arg === '--store') { parsed.store = rest[i + 1] ?? null; i += 1; }
     else if (arg === '--consent' && command === 'enroll') parsed.consent = true;
     else if (arg === '--json' && ['status', 'report'].includes(command)) parsed.json = true;
-    else if (arg === '--id' && command === 'report') { parsed.id = rest[i + 1] ?? null; i += 1; }
+    else if (arg === '--id' && ['report', 'withdraw'].includes(command)) { parsed.id = rest[i + 1] ?? null; i += 1; }
     else if (Object.hasOwn(numeric, arg) && command === 'enroll') {
       const text = rest[i + 1];
       if (typeof text !== 'string' || !/^\d{1,3}$/.test(text)) throw evalError('BAD_ARGS', `BAD_ARGS: ${arg}에는 정수가 필요합니다.`);
@@ -282,7 +300,7 @@ export async function main(argv, { stdout = process.stdout, stderr = process.std
       return 0;
     }
     if (parsed.command === 'withdraw') {
-      const row = await withdraw(parsed.store, now ? { now } : {});
+      const row = await withdraw(parsed.store, { id: parsed.id, ...(now ? { now } : {}) });
       stdout.write(`등록 ${row.id}를 철회했습니다(${row.withdrawnAt}).\n`);
       return 0;
     }

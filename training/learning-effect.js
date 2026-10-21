@@ -318,9 +318,9 @@ export function evaluateLearningEffect({ events, exposureLog, runLog, enrollment
   const schedule = { consentedAt, postOpensAt, postClosesAt };
   const valid = validateLearningEvents(events);
   const final = !before(now, postClosesAt);
-  // 기준 실행은 사후 창이 열리기 전에 완료돼야 한다. 사후·retest는 창이 닫힐 때까지의 응답만 본다.
+  // 기준 실행은 사후 창이 열리기 전에 완료돼야 한다. 사후·retest는 창이 닫히기 전(appliedAt < postClosesAt)의 응답만 본다.
   const baseAsOf = minusMs(postOpensAt, 1);
-  const postAsOf = final ? postClosesAt : now;
+  const postAsOf = final ? minusMs(postClosesAt, 1) : now;
   const historyBase = studyHistory(valid, before(now, baseAsOf) ? now : baseAsOf);
   const historyPost = studyHistory(valid, postAsOf);
   const runRows = [...runLog.ledger.rows].sort((a, b) => Date.parse(timeOfRow(a)) - Date.parse(timeOfRow(b)));
@@ -331,17 +331,29 @@ export function evaluateLearningEffect({ events, exposureLog, runLog, enrollment
   const baseline = slotsOf({ starts, from: consentedAt, to: postOpensAt, k, source, history: historyBase, confirmed, mode: 'assessment' });
   const post = slotsOf({ starts, from: postOpensAt, to: postClosesAt, k, source, history: historyPost, confirmed, mode: 'assessment' });
   const retestStarts = starts.filter((row) => row.mode === 'retest');
-  const retention = baseline.selected.map((entry) => {
+  // retest 슬롯은 항상 K개다. 기준 슬롯이 없거나 기준이 사후 창 전에 끝나지 않았으면 그 retest는 유지 측정이 아니다.
+  const retention = Array.from({ length: k }, (_, i) => {
+    const entry = baseline.selected[i];
+    if (!entry) return { assessmentId: null, runId: null, startedAt: null, status: 'NO_BASELINE' };
     const slot = slotsOf({ starts: retestStarts, from: postOpensAt, to: postClosesAt, k: 1, source, history: historyPost, confirmed,
       mode: 'retest', extraFilter: (row) => row.assessmentId === entry.runId });
-    return { assessmentId: entry.runId, ...(slot.selected[0] ?? { runId: null, startedAt: null, status: 'NOT_STARTED' }) };
+    const picked = slot.selected[0] ?? { runId: null, startedAt: null, status: 'NOT_STARTED' };
+    return { assessmentId: entry.runId, ...picked,
+      status: entry.status !== 'complete' && picked.status === 'complete' ? 'BASELINE_INCOMPLETE' : picked.status };
   });
-  const untrackedDecisions = valid.filter((event) => sameSource(event.sourceIdentity, source) && !observationOf(event)
+  // 사후 창 retest 시작 전체의 분모(첫 retest 말고 나머지·미확인·빈 큐·다른 source·기준 아닌 평가의 retest).
+  const retestWindow = slotsOf({ starts: retestStarts, from: postOpensAt, to: postClosesAt, k: 0, source, history: historyPost, confirmed, mode: 'retest' });
+  const selectedRetests = new Set(retention.map((entry) => entry.runId).filter(Boolean));
+  // 기준표 답이 있는(supported) 결정인데 관측이 없어(coverage 투영·보조 사용) 동치군을 알 수 없는 것만 센다.
+  const untrackedDecisions = valid.filter((event) => event.status === 'supported' && sameSource(event.sourceIdentity, source) && !observationOf(event)
     && validIso(event.appliedAt) && !before(event.appliedAt, minusMs(consentedAt, P.exposure.trackBackDays * DAY_MS))
     && before(event.appliedAt, postClosesAt)).length;
   const runs = {
     baseline: baseline.denominators, post: post.denominators,
-    retention: { planned: k, byStatus: countBy(retention, (entry) => entry.status) },
+    retention: { planned: k, byStatus: countBy(retention, (entry) => entry.status),
+      started: retestWindow.denominators.started, extra: retestWindow.denominators.started - selectedRetests.size,
+      unconfirmedStarts: retestWindow.denominators.unconfirmedStarts, emptyQueueStarts: retestWindow.denominators.emptyQueueStarts,
+      sourceMismatch: retestWindow.denominators.sourceMismatch },
     interventionRetests: starts.filter((row) => row.mode === 'retest' && before(row.startedAt, postOpensAt)).length,
     replacements: runRows.filter((row) => row.type === 'replace' && !before(row.at, consentedAt) && !before(postAsOf, row.at)).length,
     untrackedDecisions,
@@ -384,8 +396,16 @@ export function evaluateLearningEffect({ events, exposureLog, runLog, enrollment
     const clean = [];
     const excluded = {};
     const exclude = (reason, n = 1) => { if (n) excluded[reason] = (excluded[reason] ?? 0) + n; };
-    for (const entry of selection.selected.filter((candidate) => candidate.status === 'complete')) {
+    let planned = 0;
+    for (const entry of selection.selected) {
+      planned += entry.total;
       const { items, ineligible } = itemsOfRun(entry.runId, asOfIso);
+      if (entry.status !== 'complete') {
+        // 미완료 슬롯의 응답은 점수에 쓰지 않는다. 응답한 문항·답하지 않은 문항을 사유별로 센다(0점으로 접지 않는다).
+        exclude('INCOMPLETE_RUN', items.length + ineligible);
+        exclude('UNANSWERED', Math.max(0, entry.total - items.length - ineligible));
+        continue;
+      }
       exclude('INELIGIBLE_EVENT', ineligible);
       for (const item of items) {
         const at = Date.parse(item.at);
@@ -397,11 +417,11 @@ export function evaluateLearningEffect({ events, exposureLog, runLog, enrollment
         else clean.push(item);
       }
     }
-    return { clean, excluded };
+    return { clean, excluded, planned };
   };
   const baseAsOfFinal = baseAsOf;
   const baselineItems = classify(baseline, baseAsOfFinal);
-  const postItems = classify(post, postClosesAt);
+  const postItems = classify(post, postAsOf);
   const slotsComplete = (selection) => selection.selected.length === k && selection.selected.every((entry) => entry.status === 'complete');
 
   // ── M1 ─────────────────────────────────────────────────────────────────────
@@ -417,7 +437,7 @@ export function evaluateLearningEffect({ events, exposureLog, runLog, enrollment
     const tally = (into, b, r) => { into[`n${b ? 1 : 0}${r ? 1 : 0}`] += 1; };
     for (const entry of retention.filter((candidate) => candidate.status === 'complete')) {
       const baselineByPair = new Map(itemsOfRun(entry.assessmentId, baseAsOfFinal).items.map((item) => [`${item.spotKey}:${item.handClass}`, item]));
-      const retest = itemsOfRun(entry.runId, postClosesAt);
+      const retest = itemsOfRun(entry.runId, postAsOf);
       exclude('INELIGIBLE_EVENT', retest.ineligible);
       for (const r of retest.items) {
         const b = baselineByPair.get(`${r.spotKey}:${r.handClass}`);
@@ -451,18 +471,25 @@ export function evaluateLearningEffect({ events, exposureLog, runLog, enrollment
   const db = describeItems(baselineItems.clean);
   const dp = describeItems(postItems.clean);
   const selectedIds = new Set([...baseline.selected, ...post.selected, ...retention].map((entry) => entry.runId).filter(Boolean));
-  const interventionEvents = valid.filter((event) => !before(event.appliedAt, consentedAt) && before(event.appliedAt, postOpensAt)
-    && !selectedIds.has(event.studyRun?.id));
-  const interventionItems = interventionEvents.map((event) => itemOf(event, chartOf)).filter(Boolean);
+  // 기술값은 등록 source의 적격 문항만, 연습과 게임을 나눠 싣는다. 사후 창의 비측정 활동도 따로 싣는다.
+  const activityIn = (fromIso, toIso) => {
+    const rows = valid.filter((event) => !before(event.appliedAt, fromIso) && before(event.appliedAt, toIso) && !selectedIds.has(event.studyRun?.id))
+      .map((event) => ({ event, item: itemOf(event, chartOf) }))
+      .filter(({ item }) => item && item.classKey !== null && item.legalCount !== null && sameSource(item.sourceIdentity, source));
+    const part = (origin) => {
+      const items = rows.filter(({ event }) => (['practice', 'drill', 'retest'].includes(event.origin) ? 'practice' : 'game') === origin).map(({ item }) => item);
+      return { answers: items.length, allowedRate: rate(items, (item) => item.allowed) };
+    };
+    return {
+      practice: part('practice'), game: part('game'),
+      chartViews: views.filter((view) => view.at >= Date.parse(fromIso) && view.at < Date.parse(toIso)).length,
+    };
+  };
   const descriptive = {
     baseline: db, post: dp,
     tvd: { strata: tvd(db.strata, dp.strata), contexts: tvd(db.contexts, dp.contexts), seated: tvd(db.seated, dp.seated), stackBb: tvd(db.stackBb, dp.stackBb) },
-    intervention: {
-      answers: interventionItems.length,
-      allowedRate: rate(interventionItems, (item) => item.allowed),
-      byOrigin: countBy(interventionEvents, (event) => (['practice', 'drill', 'retest'].includes(event.origin) ? 'practice' : 'game')),
-      chartViews: views.filter((view) => view.at >= Date.parse(consentedAt) && view.at < Date.parse(postOpensAt)).length,
-    },
+    intervention: activityIn(consentedAt, postOpensAt),
+    postWindowActivity: activityIn(postOpensAt, postClosesAt),
     unknownPreTrackingExposure: historyPost.unknownPreTrackingExposure,
   };
   return {
@@ -471,8 +498,8 @@ export function evaluateLearningEffect({ events, exposureLog, runLog, enrollment
     reasons: [],
     schedule: { ...schedule, asOf: postClosesAt },
     runs,
-    items: { baseline: { clean: baselineItems.clean.length, excluded: baselineItems.excluded },
-      post: { clean: postItems.clean.length, excluded: postItems.excluded } },
+    items: { baseline: { planned: baselineItems.planned, clean: baselineItems.clean.length, excluded: baselineItems.excluded },
+      post: { planned: postItems.planned, clean: postItems.clean.length, excluded: postItems.excluded } },
     exposure: { ledgerStatus: exposureLog?.status ?? 'absent', covered: exposureCovered, trackStart },
     m1, m2, pattern, descriptive,
     caveats: [

@@ -23,6 +23,8 @@ export const LEDGERS = Object.freeze({
   run: Object.freeze({ file: 'study-run-log.json', seeded: false }),
 });
 export const LEDGER_LIMITS = Object.freeze({ rows: 4_000, bytes: 2 * 1024 * 1024 });
+// 손상 원본을 보존할 때 읽을 수 있는 크기 상한. 이보다 크면 보존할 수 없으므로 원본을 두고 쓰기를 거부한다.
+const PRESERVE_MAX_BYTES = 64 * 1024 * 1024;
 export const SEED_WINDOW_MS = 7 * 86_400_000;
 const MEASUREMENT_MODES = new Set(['assessment', 'retest']);
 const STUDY_MODES = new Set(['free', 'leak', 'daily', 'mistake-review', 'assessment', 'retest', 'transfer']);
@@ -62,7 +64,8 @@ export function validateLedger(kind, value) {
   if (!plain(value) || value.schemaVersion !== 1 || value.kind !== kind || !validIso(value.createdAt)
     || !validIso(value.coverageFrom) || !Array.isArray(value.rows) || !Number.isSafeInteger(value.dropped) || value.dropped < 0
     || (value.droppedThrough !== null && !validIso(value.droppedThrough)) || !Array.isArray(value.resets)
-    || value.resets.some((reset) => !plain(reset) || !validIso(reset.at) || typeof reset.preservedAs !== 'string')) return null;
+    || value.resets.some((reset) => !plain(reset) || !validIso(reset.at) || typeof reset.preservedAs !== 'string')
+    || (value.seed !== undefined && !['recent-view-file', 'unavailable'].includes(value.seed))) return null;
   if (!value.rows.every((row) => rowOk(kind, row))) return null;
   return value;
 }
@@ -90,6 +93,12 @@ export function readLedger(trainingRoot, kind) {
     if (['TOO_LARGE', 'UNSAFE_PATH'].includes(error.code)) return { status: 'invalid', code: error.code };
     throw error;
   }
+  return parseLedger(kind, bytes);
+}
+
+/** 이미 읽은 바이트(없으면 null)를 판독한다 — 여러 파일을 한 번에 읽은 snapshot이 같은 바이트를 쓰게 한다. */
+export function parseLedger(kind, bytes) {
+  if (!LEDGERS[kind]) throw ledgerError('BAD_LEDGER', `unknown ledger: ${kind}`);
   if (bytes === null) return { status: 'absent' };
   let parsed;
   try { parsed = JSON.parse(bytes.toString('utf8')); } catch { return { status: 'invalid', code: 'UNPARSABLE' }; }
@@ -97,17 +106,31 @@ export function readLedger(trainingRoot, kind) {
   return ledger ? { status: 'ok', ledger } : { status: 'invalid', code: 'SHAPE' };
 }
 
-function freshLedger(kind, at, seedRows) {
-  const seeded = LEDGERS[kind].seeded;
-  const seed = seeded ? (seedRows ?? []).filter((row) => rowOk(kind, row) && Date.parse(row.at) <= Date.parse(at)
+/**
+ * 새 원장. 노출 원장의 씨앗 `seed = { ok, rows }`: ok는 최근 열람 파일이 없거나 정상으로 읽혔다는 뜻이다. 읽지 못했으면
+ * (손상·권한·상한) 그 7일을 안다고 주장하지 않는다 — coverage는 지금부터다.
+ */
+function freshLedger(kind, at, seed) {
+  const seededOk = LEDGERS[kind].seeded && seed?.ok === true;
+  const rows = seededOk ? (seed.rows ?? []).filter((row) => rowOk(kind, row) && Date.parse(row.at) <= Date.parse(at)
     && Date.parse(at) - Date.parse(row.at) <= SEED_WINDOW_MS)
     .sort((a, b) => a.at.localeCompare(b.at)) : [];
   return {
     schemaVersion: 1, kind, createdAt: at,
-    coverageFrom: seeded ? new Date(Date.parse(at) - SEED_WINDOW_MS).toISOString() : at,
-    rows: seed, dropped: 0, droppedThrough: null, resets: [],
+    coverageFrom: seededOk ? new Date(Date.parse(at) - SEED_WINDOW_MS).toISOString() : at,
+    rows, dropped: 0, droppedThrough: null, resets: [],
+    ...(LEDGERS[kind].seeded ? { seed: seededOk ? 'recent-view-file' : 'unavailable' } : {}),
   };
 }
+
+const callSeed = (seedRows) => {
+  try {
+    const seed = seedRows();
+    return Array.isArray(seed) ? { ok: true, rows: seed } : { ok: seed?.ok === true, rows: seed?.rows ?? [] };
+  } catch {
+    return { ok: false, rows: [] };
+  }
+};
 
 function serialize(ledger) {
   return `${JSON.stringify(ledger)}\n`;
@@ -144,14 +167,19 @@ export function appendLedgerRows(trainingRoot, kind, rows, { at, seedRows = () =
   const current = readLedger(trainingRoot, kind);
   let ledger;
   if (current.status === 'ok') ledger = current.ledger;
-  else if (current.status === 'absent') ledger = freshLedger(kind, at, spec.seeded ? seedRows() : []);
+  else if (current.status === 'absent') ledger = freshLedger(kind, at, spec.seeded ? callSeed(seedRows) : null);
   else {
-    // 손상 원본은 지우지 않는다 — 다른 이름으로 보존하고, 그 이전 구간은 알 수 없다고 기록한다.
+    // 손상 원본은 지우지 않는다 — 다른 이름으로 먼저 보존하고, 그 이전 구간은 알 수 없다고 기록한다. 보존하지 못하면
+    // 원본을 그대로 두고 쓰기를 거부한다(차트 열람·측정 시작이 실패로 드러난다).
     const preservedAs = `${spec.file.replace(/\.json$/, '')}.corrupt-${at.replace(/[:.]/g, '-')}.json`;
-    let bytes = null;
-    try { bytes = readBytes(trainingRoot, spec.file); } catch { bytes = null; }
-    if (bytes !== null) writeContained(trainingRoot, [preservedAs], bytes, { mode: 'create' });
-    ledger = freshLedger(kind, at, spec.seeded ? seedRows() : []);
+    let bytes;
+    try {
+      bytes = openContained(trainingRoot, [spec.file], { maxBytes: PRESERVE_MAX_BYTES });
+      writeContained(trainingRoot, [preservedAs], bytes, { mode: 'create' });
+    } catch (error) {
+      throw Object.assign(ledgerError('LEDGER_PRESERVE_FAILED', `${kind} ledger is invalid and could not be preserved`), { cause: error });
+    }
+    ledger = freshLedger(kind, at, spec.seeded ? callSeed(seedRows) : null);
     ledger.resets = [{ at, preservedAs, code: current.code ?? 'INVALID' }];
   }
   // 시계가 되돌아가도 기록은 막지 않는다. 행은 시각 순으로 유지한다(같은 시각은 들어온 순서). 상한은 가장 오래된 행부터 버린다.
