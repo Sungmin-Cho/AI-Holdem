@@ -122,6 +122,7 @@ import {
   toRunnerHandle,
   trainingAggregate,
   EXPLAIN_HELD,
+  EXPLAIN_NONE,
 } from './training-pipeline.js';
 import { readRecordedAttempt } from './rejection-audit.js';
 import {
@@ -3513,8 +3514,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       };
       return bindTrainingAttempt(`${evaluation.evaluationId}:explain`, waiting);
     }
+    // #303: no model to call is no attempt; the item stays unsealed for the cutoff.
     if (!upperAdapter || typeof upperAdapter.oneshotStart !== 'function') {
-      return { promise: Promise.resolve(null), terminate: async () => ({ confirmed: true }) };
+      return { promise: Promise.resolve(EXPLAIN_NONE), terminate: async () => ({ confirmed: true }) };
     }
     // 20초 예산이라 모델 기본 추론 강도로 부른다(`explanationCall`).
     const handle = upperAdapter.oneshotStart(explanationCall(evaluation));
@@ -3591,6 +3593,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       startSolve: startSolveTask,
       admit: () => trainingMayRun(handNo),
       admitExplain: () => trainingMayExplain(handNo),
+      // #303: only a stop or the cutoff ends an explainer (a pause lets it finish), so an
+      // attempt that comes back without text outside those is a finished, final failure.
+      failureFinal: () => !stopRequested && !finalizationCutoff,
       publish: async (kind) => {
         if (kind === 'machine') await flushTrainingPublish();
         if (kind === 'annotation') await flushAnnotationPublish();
@@ -3682,10 +3687,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // same way. A pipeline it refuses (queued at the explain lock, or between items)
   // never reports, and a running explainer it ends leaves its item unsealed; the
   // next start must register those hands again. Hands are recorded, not items: like
-  // a hand a pause held back, a recorded hand re-runs every item it has not sealed,
-  // an earlier simple failure in it included. Returned as a patch for requestStop's
-  // own ownership-checked stopping write, since writeDeferredRecord writes nothing
-  // once a stop is requested.
+  // a hand a pause held back, a recorded hand re-runs every item it has not sealed.
+  // An attempt that came back is sealed either way (#303: a failure as explain-failed),
+  // so those are exactly the items no attempt finished for. Returned as a patch for
+  // requestStop's own ownership-checked stopping write, since writeDeferredRecord
+  // writes nothing once a stop is requested.
   const deferredRecordAtStop = () => {
     const running = [...trainingInFlightHands, ...solveHandOf.values()].filter(Number.isInteger);
     if (!running.length) return {};
@@ -3867,7 +3873,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (Number.isInteger(lastHandNo) && lastHandNo >= 1) pendingHands.add(lastHandNo);
       if (stopRequested) return;
       // R1 (b): hands a pause held back (recorded, so a restart still has them;
-      // an explanation that simply failed is not retried here).
+      // an explanation that simply failed was sealed explain-failed and is not retried, #303).
       for (const handNo of readLoopState()?.trainingDeferredHands ?? []) {
         if (Number.isInteger(handNo)) pendingHands.add(handNo);
       }
