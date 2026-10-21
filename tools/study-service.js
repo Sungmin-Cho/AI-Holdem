@@ -7,7 +7,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, ownedProcessStartTime, parseOwnedLockIdentity } from '../engine/state.js';
+import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, ownedProcessStartTime, parseOwnedLockIdentity, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
 import { startDrillServer } from './drill-server.js';
 
 const SELF = fileURLToPath(import.meta.url);
@@ -231,6 +231,10 @@ function needsRefresh(batch, ctx) {
 }
 function openBatchProof(batch, ctx, proveFn) {
   const candidates = aclCandidates(ctx);
+  // A proof that fails leaves no proved set behind (#306). A caller that reads again in the same
+  // scope — a pending lock read, the stop poll — would otherwise meet the listing recorded below
+  // with the set proved for the one before it, and take a path it never proved for private.
+  batch.files = null;
   batch.candidates = candidates;
   batch.listing = presentListing(candidates);
   batch.identityMemo = new Map();
@@ -628,10 +632,32 @@ function optionsForChild(options) {
   return publishDelayMs === 0 ? { idleTimeoutMs, checkpointMs } : { idleTimeoutMs, checkpointMs, publishDelayMs };
 }
 
+// #306: on Windows a lock name deleted while another process reads it stays pending — before libuv
+// 1.49 for as long as that reader holds it, after it for the instant before the remover closes its
+// own handle — and every read of it answers EPERM: the lock read itself, and the ACL transaction's
+// listing and proof of the same path. That is the lock's release or reclaim in progress, not a
+// verdict. A read failing only that way is read again, for at most PENDING_READ_WAIT_MS of
+// consecutive failures (the remover's own wait for that reader is DELETE_PENDING_WAIT_MS) and never
+// past the call's deadline; one still failing then is thrown as it always was. Nothing is decided
+// from a failed read, so no pending lock is ever taken for alive, dead or absent.
+const PENDING_READ_WAIT_MS = 2 * DELETE_PENDING_WAIT_MS;
+export function isPendingReadFailure(error, platform = process.platform) {
+  return platform === 'win32' && error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && error.fsCode === 'EPERM';
+}
+async function readSettled(read, deadline) {
+  const bound = Math.min(deadline, platformNow() + PENDING_READ_WAIT_MS);
+  for (;;) {
+    try { return read(); }
+    catch (error) {
+      if (!isPendingReadFailure(error) || platformNow() >= bound) throw error;
+    }
+    await sleep(Math.max(1, Math.min(25, bound - platformNow())));
+  }
+}
+
 async function ensureOwned(ctx, options, deadline, coldDeadline) {
   const config = optionsForChild(options);
-  let owner = readLock(ctx);
-  let descriptor = readDescriptor(ctx);
+  let { owner, descriptor } = await readSettled(() => ({ owner: readLock(ctx), descriptor: readDescriptor(ctx) }), deadline);
   const staleEvidence = descriptor.state === 'valid' ? lockEvidenceFor(descriptor.value, owner) : null;
   const staleDescriptor = descriptor.state === 'valid' && descriptor.value.storeIdentity === ctx.storeIdentity
     && identityStatus(descriptor.value.pid, descriptor.value.startTime, staleEvidence) === 'dead' ? descriptor.value : undefined;
@@ -669,8 +695,8 @@ async function ensureOwned(ctx, options, deadline, coldDeadline) {
     if (spawnError) fail();
   }
   while (platformNow() < deadline) {
-    assertContext(ctx);
-    owner = readLock(ctx);
+    // The child this ensure started may be reclaiming a dead owner's lock right now (#306).
+    owner = await readSettled(() => { assertContext(ctx); return readLock(ctx); }, deadline);
     if (owner?.status === 'alive') {
       deadline = Math.min(deadline, platformNow() + platformTimeout(WAIT_MS));
       extendPlatformDeadline(deadline);
@@ -772,7 +798,7 @@ function readContextOwnership(storeDir) {
 }
 async function inspectStudyServiceWithinBudget(storeDir) {
   const deadline = platformNow() + platformTimeout(WAIT_MS);
-  const { ctx, descriptor, owner } = readContextOwnership(storeDir);
+  const { ctx, descriptor, owner } = await readSettled(() => readContextOwnership(storeDir), deadline);
   // A service runs only while its lock proves it alive. No descriptor and no owner, or one proved
   // dead (a service that died before releasing its lock, #265 A), is a stopped service; the next
   // ensure reclaims that lock. An owner that cannot be identified still fails closed.
@@ -786,7 +812,7 @@ async function inspectStudyServiceWithinBudget(storeDir) {
 async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {}) {
   const deadline = platformNow() + platformTimeout(WAIT_MS);
   if (!UUID.test(expectedInstanceId)) fail('STUDY_IDENTITY_MISMATCH');
-  const { ctx, descriptor, owner } = readContextOwnership(storeDir);
+  const { ctx, descriptor, owner } = await readSettled(() => readContextOwnership(storeDir), deadline);
   if ((!owner || owner.status === 'dead') && descriptor.state === 'missing') return { stopped: true, alreadyStopped: true };
   if (descriptor.state === 'valid' && descriptor.value.instanceId === expectedInstanceId
     && descriptor.value.storeIdentity === ctx.storeIdentity && owner?.status === 'dead'
