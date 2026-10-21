@@ -378,3 +378,51 @@ test('a second item of the same class in one run is a duplicate, and a chart vie
   assert.ok(old.items.post.excluded.KNOWN_EXPOSURE_CHART >= 1);
   assert.equal(old.exposure.covered, true);
 });
+
+test('retest slots keep every planned item in the denominator, and the post-window retest starts are counted', () => {
+  const [b1, b2] = pool.runs;
+  const baseline = [placeRun(b1, { startMs: 1 * H }), placeRun(b2, { startMs: 2 * H })];
+  const partial = placeRun(b2.slice(0, 4), { mode: 'retest', startMs: 9 * DAY + H, assessmentId: baseline[1].runId });
+  partial.row.total = 10;
+  for (const event of partial.events) event.studyRun.total = 10;
+  const retests = [placeRun(b1, { mode: 'retest', startMs: 9 * DAY, assessmentId: baseline[0].runId }), partial];
+  const extraRows = [
+    { type: 'start', startId: randomUUID(), runId: randomUUID(), mode: 'retest', total: 10, startedAt: at(10 * DAY), assessmentId: baseline[0].runId, sourceIdentity: source },
+    { type: 'start', startId: randomUUID(), runId: null, mode: 'retest', total: 0, startedAt: at(10 * DAY + H), sourceIdentity: source },
+    { type: 'start', startId: randomUUID(), runId: randomUUID(), mode: 'retest', total: 10, startedAt: at(10 * DAY + 2 * H), assessmentId: baseline[0].runId, sourceIdentity: { ...V2_REFERENCE_SOURCE } },
+  ];
+  const report = evaluateLearningEffect(scenario({ baseline, retests, extraRows }).input);
+  // 문항이 덜 찬 retest는 기준과 문항 집합이 달라 제품 이력이 INCONSISTENT_RUN으로 판정한다(그 사유를 그대로 쓴다).
+  assert.deepEqual(report.runs.retention.byStatus, { complete: 1, INCONSISTENT_RUN: 1 });
+  assert.equal(report.runs.retention.unconfirmedStarts, 1);
+  assert.equal(report.runs.retention.emptyQueueStarts, 1);
+  assert.equal(report.runs.retention.sourceMismatch, 1);
+  assert.equal(report.m2.planned, 20);
+  assert.equal(report.m2.excluded.INCOMPLETE_RUN, 4);
+  assert.equal(report.m2.excluded.UNANSWERED, 6);
+  const accounted = report.m2.n + Object.values(report.m2.excluded).reduce((sum, n) => sum + n, 0);
+  assert.equal(accounted, 20);
+  assert.equal(report.m2.reason, 'INCOMPLETE_SLOTS');
+  // 기준 미완료의 retest 문항은 그 사유로 남는다.
+  const late = placeRun(b2, { startMs: 7 * DAY - 5 * M });
+  const lateReport = evaluateLearningEffect(scenario({ baseline: [baseline[0], late],
+    retests: [retests[0], placeRun(b2, { mode: 'retest', startMs: 9 * DAY + H, assessmentId: late.runId })] }).input);
+  assert.equal(lateReport.m2.excluded.BASELINE_INCOMPLETE, 10);
+  assert.equal(lateReport.m2.planned, 20);
+});
+
+test('descriptive activity keeps practice, games and the post window apart', async () => {
+  const { parts } = scenario();
+  const item = parts.baseline[0].events[0];
+  const store = createOwnedTempDir('effect-activity');
+  const started = await startDrill(store, { mode: 'free', source, seed: 'act', spotKey: item.mixObservation.spotKey, handClass: item.mixObservation.handClass });
+  await answerRun(store, started, 'top');
+  const [practice] = await eventsOf(store);
+  const report = evaluateLearningEffect(scenario({ extraEvents: [
+    relabel(practice, { appliedAt: at(3 * DAY) }),
+    relabel(practice, { appliedAt: at(10 * DAY) }),
+  ] }).input);
+  assert.equal(report.descriptive.intervention.practice.answers, 1);
+  assert.equal(report.descriptive.intervention.game.answers, 0);
+  assert.equal(report.descriptive.postWindowActivity.practice.answers, 1);
+});

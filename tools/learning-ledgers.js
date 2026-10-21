@@ -112,7 +112,8 @@ export function parseLedger(kind, bytes) {
  */
 function freshLedger(kind, at, seed) {
   const seededOk = LEDGERS[kind].seeded && seed?.ok === true;
-  const rows = seededOk ? (seed.rows ?? []).filter((row) => rowOk(kind, row) && Date.parse(row.at) <= Date.parse(at)
+  // 읽을 수 있는 양성 노출은 씨앗이 불완전해도 남긴다(알려진 노출). coverage만 씨앗이 온전할 때 7일 앞으로 간다.
+  const rows = LEDGERS[kind].seeded ? (seed?.rows ?? []).filter((row) => rowOk(kind, row) && Date.parse(row.at) <= Date.parse(at)
     && Date.parse(at) - Date.parse(row.at) <= SEED_WINDOW_MS)
     .sort((a, b) => a.at.localeCompare(b.at)) : [];
   return {
@@ -126,11 +127,31 @@ function freshLedger(kind, at, seed) {
 const callSeed = (seedRows) => {
   try {
     const seed = seedRows();
-    return Array.isArray(seed) ? { ok: true, rows: seed } : { ok: seed?.ok === true, rows: seed?.rows ?? [] };
+    return { ok: seed?.ok === true, rows: Array.isArray(seed?.rows) ? seed.rows : [] };
   } catch {
     return { ok: false, rows: [] };
   }
 };
+
+/**
+ * 최근 열람 파일(`grid-exposures.json`)을 씨앗으로 엄격하게 읽는다. 파일이 없으면 온전한 빈 씨앗이다. 읽을 수 없거나,
+ * 배열이 아니거나, 행 하나라도 형식이 틀리면 온전하지 않다(`ok: false`) — 그 7일을 안다고 주장하지 않는다. 형식이 맞는
+ * 행은 알려진 노출로 함께 돌려준다. 등록과 차트 열람이 같은 판독기를 쓴다.
+ */
+export function readRecentViewSeed(trainingRoot) {
+  let parsed;
+  try {
+    const bytes = readBytes(trainingRoot, 'grid-exposures.json');
+    if (bytes === null) return { ok: true, rows: [] };
+    parsed = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    return { ok: false, rows: [] };
+  }
+  if (!Array.isArray(parsed)) return { ok: false, rows: [] };
+  const rows = parsed.filter((row) => plain(row)).map((row) => ({ at: row.at, sourceIdentity: row.sourceIdentity, spotKey: row.spotKey }));
+  const valid = rows.filter((row) => rowOk('exposure', row));
+  return { ok: valid.length === parsed.length, rows: valid };
+}
 
 function serialize(ledger) {
   return `${JSON.stringify(ledger)}\n`;

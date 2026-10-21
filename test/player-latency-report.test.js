@@ -243,6 +243,20 @@ test('a game dir with a single loop.log is accepted; an empty path is refused; s
   // 세션 디렉터리 자체가 store 밖을 가리키는 링크여도 따라가지 않는다.
   fs.symlinkSync(gameDir, path.join(sessions, 'outside'));
   assert.deepEqual(findLoopLogs(linked), []);
+  // 입력 루트가 링크인 game dir·store도 거부한다.
+  const linkRoot = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-latency-link-')), 'game');
+  fs.symlinkSync(gameDir, linkRoot);
+  assert.throws(() => findLoopLogs(linkRoot), { code: 'UNSAFE_PATH' });
+  const linkStore = path.join(path.dirname(linkRoot), 'store');
+  fs.symlinkSync(linked, linkStore);
+  assert.throws(() => findLoopLogs(linkStore), { code: 'UNSAFE_PATH' });
+  // 발견 뒤 세션 디렉터리가 링크로 바뀌면 읽기가 거부된다.
+  const swapped = store({ s: [call(1, 'decision', 1000)] });
+  const [found] = findLoopLogs(swapped);
+  const sessionDir = path.dirname(found.file);
+  fs.renameSync(sessionDir, `${sessionDir}.moved`);
+  fs.symlinkSync(`${sessionDir}.moved`, sessionDir);
+  assert.throws(() => readLoopRecords(found.file, undefined, found.parents), { code: 'UNSAFE_PATH' });
 });
 
 test('the report never writes to the store', () => {

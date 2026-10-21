@@ -19,7 +19,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { withDrillLock } from './drill-cli.js';
-import { LEDGERS, appendLedgerRows, parseLedger } from './learning-ledgers.js';
+import { LEDGERS, appendLedgerRows, parseLedger, readRecentViewSeed } from './learning-ledgers.js';
 import { loadReferenceDataset } from './preflop-dataset.js';
 import { openContained, writeContained } from './training-store.js';
 import { strataForSpot } from '../training/drill-strata.js';
@@ -83,22 +83,6 @@ function parseEnrollments(bytes) {
 
 const isOpen = (row, now) => !row.withdrawnAt && Date.parse(now) < Date.parse(row.postClosesAt);
 
-// 노출 원장의 씨앗: 최근 열람 파일이 없으면 빈 씨앗(정상), 읽을 수 없거나 형식이 틀리면 실패(그 7일을 주장하지 않는다).
-function seedRowsFor(trainingRoot) {
-  return () => {
-    let rows;
-    try {
-      const bytes = readFile(trainingRoot, 'grid-exposures.json', 1024 * 1024);
-      rows = bytes ? JSON.parse(bytes.toString('utf8')) : [];
-    } catch {
-      return { ok: false, rows: [] };
-    }
-    if (!Array.isArray(rows)) return { ok: false, rows: [] };
-    return { ok: true, rows: rows.filter((row) => row && validIso(row.at) && typeof row.spotKey === 'string' && row.sourceIdentity)
-      .map((row) => ({ at: row.at, sourceIdentity: row.sourceIdentity, spotKey: row.spotKey })) };
-  };
-}
-
 export async function enroll(storeDir, { consent = false, plan = {}, now = () => new Date().toISOString() } = {}) {
   if (consent !== true) throw evalError('CONSENT_REQUIRED', '등록에는 --consent가 필요합니다.');
   const source = { ...CANONICAL_REFERENCE_SOURCE };
@@ -112,7 +96,7 @@ export async function enroll(storeDir, { consent = false, plan = {}, now = () =>
     const current = readEnrollments(root);
     if (current.enrollments.some((row) => isOpen(row, at))) throw evalError('ENROLLMENT_OPEN', '진행 중인 등록이 있습니다. 끝나거나 철회한 뒤 등록하세요.');
     const sealed = sealPlan(plan, at);
-    appendLedgerRows(root, 'exposure', [], { at, seedRows: seedRowsFor(root) });
+    appendLedgerRows(root, 'exposure', [], { at, seedRows: () => readRecentViewSeed(root) });
     appendLedgerRows(root, 'run', [], { at });
     const enrollment = {
       id: randomUUID(), protocolId: LEARNING_EFFECT_PROTOCOL_V1.id, protocolSha256: PROTOCOL_SHA256, source,
@@ -161,14 +145,14 @@ function parseJsonl(bytes) {
 const digest = (bytes) => (bytes === null ? null : createHash('sha256').update(bytes).digest('hex'));
 
 /** 다섯 입력을 한 번에 읽는다. 읽는 동안 하나라도 바뀌면 다시 읽고, 3회 모두 바뀌면 SNAPSHOT_UNSTABLE. */
-export function readSnapshot(storeDir, { afterRead = null } = {}) {
+export function readSnapshot(storeDir, { afterRead = null, reader = readFile } = {}) {
   const root = trainingRootOf(storeDir);
   const names = [EVENTS_FILE, LEDGERS.exposure.file, LEDGERS.run.file, ENROLLMENT_FILE, SESSION_FILE];
   for (let attempt = 1; attempt <= LIMITS.snapshotAttempts; attempt += 1) {
     const beforeStats = names.map((name) => statOf(path.join(root, name)));
     let bytes;
     try {
-      bytes = Object.fromEntries(names.map((name) => [name, readFile(root, name, name === EVENTS_FILE ? LIMITS.events : LIMITS.small)]));
+      bytes = Object.fromEntries(names.map((name) => [name, reader(root, name, name === EVENTS_FILE ? LIMITS.events : LIMITS.small)]));
     } catch (error) {
       // 읽는 중 원자 교체가 일어나면 openContained가 UNSAFE_PATH로 거부한다 — 같은 재시도 규칙으로 다룬다.
       if (error.code === 'UNSAFE_PATH') continue;
@@ -277,7 +261,12 @@ export function parseArgs(argv) {
     if (arg === '--store') { parsed.store = rest[i + 1] ?? null; i += 1; }
     else if (arg === '--consent' && command === 'enroll') parsed.consent = true;
     else if (arg === '--json' && ['status', 'report'].includes(command)) parsed.json = true;
-    else if (arg === '--id' && ['report', 'withdraw'].includes(command)) { parsed.id = rest[i + 1] ?? null; i += 1; }
+    else if (arg === '--id' && ['report', 'withdraw'].includes(command)) {
+      // 값이 빠진 --id를 "지정 없음"으로 읽으면 다른 등록을 철회할 수 있다 — 인자 오류다.
+      if (typeof rest[i + 1] !== 'string' || !UUID_RE.test(rest[i + 1])) throw evalError('BAD_ARGS', 'BAD_ARGS: --id에는 등록 id가 필요합니다.');
+      parsed.id = rest[i + 1];
+      i += 1;
+    }
     else if (Object.hasOwn(numeric, arg) && command === 'enroll') {
       const text = rest[i + 1];
       if (typeof text !== 'string' || !/^\d{1,3}$/.test(text)) throw evalError('BAD_ARGS', `BAD_ARGS: ${arg}에는 정수가 필요합니다.`);

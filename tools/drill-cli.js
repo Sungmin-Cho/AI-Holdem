@@ -27,7 +27,7 @@ import { ensureDir, openContained, writeContained } from './training-store.js';
 import { evaluationIdOf, coded } from '../training/contracts.js';
 import { withNamedLock } from '../engine/state.js';
 import { studyHistory, retestEligibility } from '../training/study-history.js';
-import { appendLedgerRow, appendLedgerRows, MEASUREMENT_MODES } from './learning-ledgers.js';
+import { appendLedgerRow, appendLedgerRows, MEASUREMENT_MODES, readRecentViewSeed } from './learning-ledgers.js';
 
 const DRILL_LOCK = 'drill.lock.d';
 const SESSION_SEGMENTS = ['drill-session.json'];
@@ -689,7 +689,7 @@ export async function readSpotChart(storeDir, { spotKey, source: requested } = {
     // #298: 덧붙이기 전용 노출 원장을 먼저 쓴다. 실패하면 차트를 돌려주지 않는다(노출 없음). 원장만 쓰고 아래 쓰기가
     // 실패하면 원장이 열람을 과대 기록한다 — 평가 쪽에는 보수적인 방향이다.
     appendLedgerRow(trainingRoot(storeDir), 'exposure', { at, sourceIdentity: { ...source }, spotKey }, {
-      at, seedRows: () => loadExposures(storeDir).map((row) => ({ at: row.at, sourceIdentity: row.sourceIdentity, spotKey: row.spotKey })),
+      at, seedRows: () => readRecentViewSeed(trainingRoot(storeDir)),
     });
     writeContained(trainingRoot(storeDir), EXPOSURE_SEGMENTS, JSON.stringify(rows), { mode: 'replace' });
     return { ok: true, source, spotKey, cells };

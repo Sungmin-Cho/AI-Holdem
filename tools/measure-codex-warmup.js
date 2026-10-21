@@ -301,6 +301,14 @@ export async function runWarmupConcurrency(rawOptions = {}, deps = {}) {
 
 // ── 요약·판정 ────────────────────────────────────────────────────────────────
 
+// C3 판정용 중앙값: 짝수 표본은 가운데 두 값의 평균을 반올림하지 않는다(공용 median은 표시용으로 반올림한다).
+function exactMedian(values) {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
 function stats(values) {
   return { observations: values, median: median(values), min: values.length ? Math.min(...values) : null, max: values.length ? Math.max(...values) : null };
 }
@@ -326,8 +334,8 @@ export function summarizeVariant(variantId, batches, options) {
       maxInFlight: Math.max(0, ...mine.map((batch) => batch.maxInFlight)),
     };
   }
-  const p = out.parallel.warmupMs.median;
-  const s = out.sequential.warmupMs.median;
+  const p = exactMedian(out.parallel.warmupMs.observations);
+  const s = exactMedian(out.sequential.warmupMs.observations);
   // ratio는 표시용(소수 둘째 자리)이다. C3 판정은 원 중앙값으로 한다.
   out.parallelVsSequential = {
     parallelMedianMs: p, sequentialMedianMs: s,

@@ -435,9 +435,21 @@ export function evaluateLearningEffect({ events, exposureLog, runLog, enrollment
     const delays = [];
     const exclude = (reason, n = 1) => { if (n) excluded[reason] = (excluded[reason] ?? 0) + n; };
     const tally = (into, b, r) => { into[`n${b ? 1 : 0}${r ? 1 : 0}`] += 1; };
-    for (const entry of retention.filter((candidate) => candidate.status === 'complete')) {
-      const baselineByPair = new Map(itemsOfRun(entry.assessmentId, baseAsOfFinal).items.map((item) => [`${item.spotKey}:${item.handClass}`, item]));
+    let planned = 0;
+    for (const entry of retention.filter((candidate) => candidate.runId !== null)) {
+      planned += entry.total;
       const retest = itemsOfRun(entry.runId, postAsOf);
+      if (entry.status !== 'complete') {
+        // 점수에 쓰지 않는 retest의 문항도 분모에 남긴다: 기준 미완료면 그 사유로, 미완료 retest면 응답·미응답으로.
+        const answered = retest.items.length + retest.ineligible;
+        if (entry.status === 'BASELINE_INCOMPLETE') exclude('BASELINE_INCOMPLETE', entry.total);
+        else {
+          exclude('INCOMPLETE_RUN', answered);
+          exclude('UNANSWERED', Math.max(0, entry.total - answered));
+        }
+        continue;
+      }
+      const baselineByPair = new Map(itemsOfRun(entry.assessmentId, baseAsOfFinal).items.map((item) => [`${item.spotKey}:${item.handClass}`, item]));
       exclude('INELIGIBLE_EVENT', retest.ineligible);
       for (const r of retest.items) {
         const b = baselineByPair.get(`${r.spotKey}:${r.handClass}`);
@@ -455,8 +467,8 @@ export function evaluateLearningEffect({ events, exposureLog, runLog, enrollment
         delays.push((rAt - bAt) / HOUR_MS);
       }
     }
-    return m2Of({ table, rehearsed, excluded, delays },
-      { slotsComplete: retention.length === k && retention.every((entry) => entry.status === 'complete') });
+    return { ...m2Of({ table, rehearsed, excluded, delays },
+      { slotsComplete: retention.length === k && retention.every((entry) => entry.status === 'complete') }), planned };
   })();
 
   const pattern = patternOf(m1, m2);

@@ -47,32 +47,59 @@ function lstatKind(file) {
   }
 }
 
+const identity = (dir) => {
+  const stat = fs.lstatSync(dir);
+  return { path: dir, dev: stat.dev, ino: stat.ino };
+};
+
 /**
- * store(`.session-store/sessions/<세션>/loop.log`) 또는 game dir(`loop.log`)의 기록 파일 목록. 경로의 디렉터리와 파일은
- * 모두 심볼릭 링크가 아니어야 한다 — 링크를 거쳐 store 밖의 기록을 읽지 않는다.
+ * store(`.session-store/sessions/<세션>/loop.log`) 또는 game dir(`loop.log`)의 기록 파일 목록. 입력 루트와 그 아래
+ * 디렉터리·파일은 모두 심볼릭 링크가 아니어야 한다 — 링크를 거쳐 store 밖의 기록을 읽지 않는다. 루트까지 이르는 상위
+ * 경로(예: macOS의 /tmp)는 검사하지 않는다. 디렉터리 동일성은 발견 때 기록하고 파일을 연 뒤 다시 확인한다.
  */
 export function findLoopLogs(root) {
   const resolved = path.resolve(root);
+  const rootKind = lstatKind(resolved);
+  if (rootKind === 'link') throw reportError('UNSAFE_PATH', `UNSAFE_PATH: ${resolved}는 심볼릭 링크입니다.`);
+  if (rootKind !== 'dir') throw reportError('NO_LOOP_LOGS', `NO_LOOP_LOGS: ${resolved}에 loop.log가 없습니다.`);
+  const rootId = identity(resolved);
   const store = path.join(resolved, '.session-store');
   const sessions = path.join(store, 'sessions');
   if (lstatKind(store) === 'dir' && lstatKind(sessions) === 'dir') {
+    const parents = [rootId, identity(store), identity(sessions)];
     return fs.readdirSync(sessions).sort()
       .filter((name) => lstatKind(path.join(sessions, name)) === 'dir')
-      .map((name) => ({ key: name, file: path.join(sessions, name, 'loop.log'), state: path.join(sessions, name, 'loop-state.json') }))
+      .map((name) => {
+        const dir = path.join(sessions, name);
+        return { key: name, file: path.join(dir, 'loop.log'), state: path.join(dir, 'loop-state.json'), parents: [...parents, identity(dir)] };
+      })
       .filter(({ file }) => lstatKind(file) === 'file');
   }
   const single = path.join(resolved, 'loop.log');
-  if (lstatKind(single) === 'file') return [{ key: path.basename(resolved), file: single, state: path.join(resolved, 'loop-state.json') }];
+  if (lstatKind(single) === 'file') return [{ key: path.basename(resolved), file: single, state: path.join(resolved, 'loop-state.json'), parents: [rootId] }];
   throw reportError('NO_LOOP_LOGS', `NO_LOOP_LOGS: ${resolved}에 loop.log가 없습니다.`);
 }
 
-// 링크를 따르지 않고 읽기 전용으로 연다. 연 파일이 일반 파일이고 lstat과 같은 inode여야 한다.
-function readNoFollow(file, maxBytes) {
+// 발견 때 기록한 디렉터리가 아직 같은 실제 디렉터리인가(링크로 바뀌지 않았는가).
+function assertParents(parents, file) {
+  for (const parent of parents ?? []) {
+    const stat = fs.lstatSync(parent.path);
+    if (stat.isSymbolicLink() || !stat.isDirectory() || stat.dev !== parent.dev || stat.ino !== parent.ino) {
+      throw reportError('UNSAFE_PATH', `UNSAFE_PATH: ${file}의 상위 디렉터리가 바뀌었습니다.`);
+    }
+  }
+}
+
+// 링크를 따르지 않고 읽기 전용으로 연다. 연 파일이 일반 파일이고 lstat과 같은 inode여야 하며, 연 뒤에도 상위 디렉터리가
+// 발견 때와 같아야 한다(남는 경쟁: 열기 직전 바꿨다가 직후 되돌리는 교체는 막지 못한다).
+function readNoFollow(file, maxBytes, parents = null) {
+  assertParents(parents, file);
   const before = fs.lstatSync(file);
   const fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW);
   try {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.ino !== before.ino || stat.dev !== before.dev) throw reportError('UNSAFE_PATH', `UNSAFE_PATH: ${file}`);
+    assertParents(parents, file);
     if (stat.size > maxBytes) return null;
     const raw = Buffer.alloc(stat.size);
     let offset = 0;
@@ -88,10 +115,10 @@ function readNoFollow(file, maxBytes) {
 }
 
 /** 세션의 상대 런타임(`loop-state.json`의 opponentRuntime 한 필드만). 없거나 읽을 수 없으면 null. */
-export function readOpponentRuntime(stateFile) {
+export function readOpponentRuntime(stateFile, parents = null) {
   try {
     if (lstatKind(stateFile) !== 'file') return null;
-    const bytes = readNoFollow(stateFile, 4 * 1024 * 1024);
+    const bytes = readNoFollow(stateFile, 4 * 1024 * 1024, parents);
     const value = bytes ? JSON.parse(bytes.toString('utf8'))?.opponentRuntime : null;
     return typeof value === 'string' && value.length <= 32 ? value : null;
   } catch {
@@ -132,9 +159,9 @@ function project(raw) {
 }
 
 /** 한 기록 파일을 읽기 전용으로 읽어 허용한 이벤트만 돌려준다. */
-export function readLoopRecords(file, limits = REPORT_LIMITS) {
+export function readLoopRecords(file, limits = REPORT_LIMITS, parents = null) {
   const skipped = { oversizeFile: 0, oversizeLines: 0, unparsableLines: 0 };
-  const raw = readNoFollow(file, limits.fileBytes);
+  const raw = readNoFollow(file, limits.fileBytes, parents);
   if (raw === null) {
     skipped.oversizeFile = 1;
     return { records: [], skipped };
@@ -330,7 +357,9 @@ export function aggregateLatency(sessions, { since = null } = {}) {
 }
 
 export function buildLatencyReport(root, options = {}) {
-  const sessions = findLoopLogs(root).map(({ key, file, state }) => ({ key, ...readLoopRecords(file), opponentRuntime: readOpponentRuntime(state) }));
+  const sessions = findLoopLogs(root).map(({ key, file, state, parents }) => ({
+    key, ...readLoopRecords(file, REPORT_LIMITS, parents), opponentRuntime: readOpponentRuntime(state, parents),
+  }));
   return aggregateLatency(sessions, options);
 }
 

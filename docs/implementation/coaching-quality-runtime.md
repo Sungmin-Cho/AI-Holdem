@@ -517,7 +517,12 @@ Fixture evidence (`test/player-runtime.test.js`, `test/codex-player-comparison.t
 
 `node tools/player-latency-report.js <store or game dir> [--since ISO] [--json]`
 
-- **Input:** opens `loop.log` files read-only. It never follows symlinks, neither for session directories nor for files: each file is opened with `O_NOFOLLOW` and must be the same regular file that was checked.
+- **Input:** opens `loop.log` files read-only and never follows symlinks.
+  - A root that is itself a symlink is refused, and so are symlinked session directories and files.
+  - Each file is opened with `O_NOFOLLOW` and must be the same regular file that was checked.
+  - The directories recorded at discovery are checked again before and after the open.
+  - Path components above the given root (such as macOS `/tmp`) are not checked.
+  - A swap made just before the open and undone right after it is not detected.
 - **Grouping:** calls are grouped by runtime, model, kind and warmup batch size.
 - **Decision deduplication:** decisions are deduplicated per call inside each session
   file. Rows with a `callNo` match by number first: a `player-call` with `purpose: decision`

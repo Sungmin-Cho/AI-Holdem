@@ -176,3 +176,47 @@ test('an unreadable recent-view file at enrollment does not let the exposure led
   assert.equal(ledger.seed, 'unavailable');
   assert.equal(ledger.coverageFrom, '2026-10-01T00:00:00.000Z');
 });
+
+test('a --id without a value is an argument error and changes nothing', async () => {
+  const storeDir = createOwnedTempDir('eval-id-missing');
+  await enroll(storeDir, { consent: true, now: clock('2026-10-01T00:00:00.000Z') });
+  const before = fs.readFileSync(path.join(training(storeDir), ENROLLMENT_FILE));
+  assert.equal((await run(['withdraw', '--store', storeDir, '--id'])).code, 2);
+  assert.equal((await run(['report', '--store', storeDir, '--id'])).code, 2);
+  assert.deepEqual(fs.readFileSync(path.join(training(storeDir), ENROLLMENT_FILE)), before);
+});
+
+test('a file replaced while it is read is retried, and keeps failing after three attempts', async () => {
+  const storeDir = createOwnedTempDir('eval-snapshot-replaced');
+  await enroll(storeDir, { consent: true, now: clock('2026-10-01T00:00:00.000Z') });
+  const replaced = () => Object.assign(new Error('replaced'), { code: 'UNSAFE_PATH' });
+  const { openContained } = await import('../tools/training-store.js');
+  const real = (root, name, maxBytes) => { try { return openContained(root, [name], { maxBytes }); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } };
+  let calls = 0;
+  const once = readSnapshot(storeDir, { reader: (root, name, maxBytes) => { calls += 1; if (calls === 1) throw replaced(); return real(root, name, maxBytes); } });
+  assert.equal(once.attempts, 2);
+  assert.throws(() => readSnapshot(storeDir, { reader: () => { throw replaced(); } }), { code: 'SNAPSHOT_UNSTABLE' });
+});
+
+test('a recent-view file that is not an array or has any malformed row gives no week of coverage, on enrollment and on a first chart view', async () => {
+  const good = { at: new Date(Date.now() - 86_400_000).toISOString(), sourceIdentity: { ...V3_REFERENCE_SOURCE }, spotKey: '6max-100bb-co-rfi-v3' };
+  for (const content of [{}, [null], [good, { ...good, at: 'yesterday' }]]) {
+    const enrolled = createOwnedTempDir('eval-seed-shape');
+    fs.mkdirSync(training(enrolled), { recursive: true });
+    fs.writeFileSync(path.join(training(enrolled), 'grid-exposures.json'), JSON.stringify(content));
+    await enroll(enrolled, { consent: true });
+    const ledger = readLedger(training(enrolled), 'exposure').ledger;
+    assert.equal(ledger.seed, 'unavailable', JSON.stringify(content));
+    assert.equal(ledger.coverageFrom, ledger.createdAt);
+    // 읽을 수 있는 양성 노출은 남긴다.
+    assert.equal(ledger.rows.length, Array.isArray(content) && content[0] === good ? 1 : 0);
+  }
+  const { readSpotChart } = await import('../tools/drill-cli.js');
+  const viewed = createOwnedTempDir('eval-seed-chart');
+  fs.mkdirSync(training(viewed), { recursive: true });
+  fs.writeFileSync(path.join(training(viewed), 'grid-exposures.json'), '{}');
+  await readSpotChart(viewed, { spotKey: '6max-100bb-btn-rfi-v3', source: V3_REFERENCE_SOURCE });
+  const chartLedger = readLedger(training(viewed), 'exposure').ledger;
+  assert.equal(chartLedger.seed, 'unavailable');
+  assert.equal(chartLedger.coverageFrom, chartLedger.createdAt);
+});

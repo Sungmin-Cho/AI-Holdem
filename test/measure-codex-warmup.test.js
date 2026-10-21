@@ -213,7 +213,6 @@ function batchOf(variant, mode, ms) {
 }
 
 test('C3 follows the pre-fixed rule: ratio ≥ 1.5 and difference ≥ 2 s, only for an ok run', () => {
-  const options = validateWarmupOptions({ batchSize: 3, rounds: 1 });
   const cases = [
     { par: [9000, 9500, 10000], seq: [4000, 4500, 5000], observed: true },
     // ratio 2.0 but a 1.1 s difference: below the 2 s floor.
@@ -222,9 +221,13 @@ test('C3 follows the pre-fixed rule: ratio ≥ 1.5 and difference ≥ 2 s, only 
     { par: [14999, 14999, 14999], seq: [10000, 10000, 10000], observed: false },
     // exactly 1.5 and a 5 s difference.
     { par: [15000, 15000, 15000], seq: [10000, 10000, 10000], observed: true },
+    // even samples: the parallel median is 14,999.5 — below 1.5 × 10,000 without rounding.
+    { par: [14999, 15000], seq: [10000, 10000], observed: false },
+    { par: [5999, 6000], seq: [4000, 4000], observed: false },
     { par: [6000, 6500, 7000], seq: [5000, 5200, 5400], observed: false },
   ];
   for (const { par, seq, observed } of cases) {
+    const options = validateWarmupOptions({ batchSize: par.length, rounds: 1 });
     const batches = COMPARISON_VARIANTS.flatMap(({ id }) => [batchOf(id, 'parallel', par), batchOf(id, 'sequential', seq)]);
     const variants = COMPARISON_VARIANTS.map(({ id }) => ({ id, probe: { attempted: true, observedCalls: 1, verified: true, mismatch: null },
       summary: summarizeVariant(id, batches, options) }));
@@ -232,6 +235,7 @@ test('C3 follows the pre-fixed rule: ratio ≥ 1.5 and difference ≥ 2 s, only 
     assert.equal(verdict.ok, true, JSON.stringify(verdict.failures));
     assert.ok(verdict.findings.c3ParallelEffect.every((row) => row.observed === observed), JSON.stringify(verdict.findings.c3ParallelEffect));
   }
+  const options = validateWarmupOptions({ batchSize: 3, rounds: 1 });
   const slow = COMPARISON_VARIANTS.flatMap(({ id }) => [batchOf(id, 'parallel', [61_000, 5000, 5000]), batchOf(id, 'sequential', [5000, 5000, 5000])]);
   const variants = COMPARISON_VARIANTS.map(({ id }) => ({ id, probe: { attempted: true, observedCalls: 1, verified: true, mismatch: null },
     summary: summarizeVariant(id, slow, options) }));
