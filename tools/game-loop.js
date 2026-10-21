@@ -45,6 +45,7 @@ import {
   extractJsonLine,
   isArgvSafeSessionId,
   RUNTIME_TABLE,
+  WARMUP_TIMEOUT_MS,
 } from './player-runtime.js';
 import {
   assertHostText,
@@ -60,6 +61,7 @@ import {
   recheckRejectionTupleOf,
   rejectionTupleOf,
   sanitizeRejectionFields,
+  coachNoteClaimAllowed,
   isBoundCoachNote,
   isCoachOnlyAttempt,
   participantSessionOf,
@@ -122,6 +124,7 @@ import {
   toRunnerHandle,
   trainingAggregate,
   EXPLAIN_HELD,
+  EXPLAIN_NONE,
 } from './training-pipeline.js';
 import { readRecordedAttempt } from './rejection-audit.js';
 import {
@@ -1641,6 +1644,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // attempt of the withheld note is then stale, and the publisher removes exactly that record
   // unsent; a queued envelope is replaced by its successor. Returns null when the body goes
   // out as it is.
+  // #310: the claim rule a fresh note is held to (validateCoachNote) can change between versions
+  // too. The relay applies it to decision strings only (refusing the body), never to the text, so
+  // this gate is the one place that holds the text to it. A fresh note loses only its refused
+  // sentences; a queued one is a stored, proof-bound body that is never rewritten, so a refused
+  // one is withheld whole for the hand's unavailable note. The participant-card rule decides
+  // first; a note both refuse is withheld as FORBIDDEN_LITERAL.
   const withheldCoachPublication = async (args, { replaying, record, envelope }) => {
     const body = replaying ? record?.body : envelope;
     const notes = Array.isArray(body?.coach) ? body.coach : [];
@@ -1649,22 +1658,30 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (verdicts.includes('FORBIDDEN_LITERAL_UNAVAILABLE')) {
       throw codedError('FORBIDDEN_LITERAL_UNAVAILABLE', '코치 노트의 참가자 카드 판정 자료를 읽지 못해 게시하지 않았습니다.');
     }
-    if (!verdicts.includes('FORBIDDEN_LITERAL')) return null;
+    let reason = null;
+    if (verdicts.includes('FORBIDDEN_LITERAL')) reason = 'FORBIDDEN_LITERAL';
+    else if (notes.some((note) => !coachNoteClaimAllowed(note))) reason = 'REFERENCE_AUTHORITY_CLAIM';
+    if (!reason) return null;
     const authority = replaying ? record?.coachAuthority : envelope?.coachAuthority;
     const handNo = notes[0]?.handNo;
     // The note judged must be the queue item's own, and the body carry nothing else: exactly
     // the proof-bearing form of that item (isBoundCoachNote), so every string judged is one its
-    // digest covers. Anything else withholds nothing and is not sent.
+    // digest covers. Anything else withholds nothing and is not sent: a claim the gate below
+    // refuses as before (REFERENCE_AUTHORITY_CLAIM).
     const coachOnly = replaying
       ? isCoachOnlyAttempt(record)
       : Object.keys(envelope ?? {}).every((key) => key === 'coach' || key === 'coachAuthority');
     if (!coachOnly || notes.length !== 1 || typeof authority?.exactEnvelopePath !== 'string'
       || !isBoundCoachNote(notes[0], authority)) {
+      if (reason === 'REFERENCE_AUTHORITY_CLAIM') return null;
       throw codedError('COACH_WITHHOLD_UNBOUND', '다른 참가자의 카드를 인용한 코치 노트가 큐 항목에 묶여 있지 않아 게시하지 않았습니다.');
     }
     // Only the queue item the body was made for. A body the queue has already moved past is
     // the publisher's to discard as stale — unless it was a withholding that moved it, which
-    // a stop may have interrupted before the attempt was removed.
+    // a stop may have interrupted before the attempt was removed. A claim the gate below refuses
+    // stays refused, stale or not: within a game an item leaves the queue only sealed or withheld
+    // (coachAttemptSettled), and a body handed on unchecked could be another one by the time the
+    // publisher reads its record.
     const auth = readCoachAuthority();
     const current = auth?.publishQueue?.[String(handNo)]?.queueId === authority.queueId;
     const withheld = (auth?.withheldPublications ?? []).some((row) => row.queueId === authority.queueId);
@@ -1675,11 +1692,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       '--queue-id', authority.queueId,
       '--payload-sha256', String(authority.payloadSha256),
       '--envelope-path', authority.exactEnvelopePath,
-      '--reason', 'FORBIDDEN_LITERAL',
+      '--reason', reason,
       '--snapshot-file', coachSnapshotPath,
       ...(replaying ? ['--attempt-body-sha256', sha256Text(JSON.stringify(record?.body ?? null))] : []),
     ]);
-    log('coach-publish-withheld', { handNo, outcome: out?.outcome ?? 'UNKNOWN', reason: 'FORBIDDEN_LITERAL', retry: replaying });
+    log('coach-publish-withheld', { handNo, outcome: out?.outcome ?? 'UNKNOWN', reason, retry: replaying });
     // The recorded attempt now names a queue item that is no longer queued.
     if (replaying) return { result: { ...(await discardSettledAttempt(args, record)), withheld: true } };
     const next = readCoachAuthority()?.publishQueue?.[String(handNo)];
@@ -1742,8 +1759,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       args = withheld.args;
       envelope = withheld.envelope;
     }
-    const feedback = [...(Array.isArray(envelope?.coach) ? envelope.coach.map((note) => note.text) : []), envelope?.review];
-    if (feedback.some((text) => !coachingClaimAllowed(text))) {
+    // #310: a coach note is judged on its text and its decision strings (the relay refuses the
+    // latter itself, after the body is recorded); a review on its text.
+    const notes = Array.isArray(envelope?.coach) ? envelope.coach : [];
+    if (notes.some((note) => !coachNoteClaimAllowed(note)) || !coachingClaimAllowed(envelope?.review)) {
       throw codedError('REFERENCE_AUTHORITY_CLAIM', '게시할 피드백에 근거 범위를 벗어난 표현이 있습니다.');
     }
     return spawnPublish(args);
@@ -2399,29 +2418,34 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     throw codedError('NO_PLAYER_RUNTIME', '적격 플레이어 런타임이 없습니다.');
   };
 
+  // #312: 모든 warmup이 호출별 기록을 남긴다. 시작·재개 warmup(deadline 없음)은 어댑터 기본 상한을 명시해 넘기고,
+  // 같이 띄운 묶음을 `batch`로 싣는다. `timing`은 어댑터가 관측한 구간 시각(이벤트 이름·exit·close의 ms)뿐이다.
   const createPlayerSession = async (persona, createdAt, {
     deadlineAt = null,
     purpose = 'repair-warmup',
     onWarmupClosed = null,
     signal,
+    batch = null,
   } = {}) => {
     const prompt = buildPlayerPrompt({ persona });
-    const timeoutMs = deadlineAt === null ? null : Math.ceil(deadlineAt - monotonicNow());
-    if (timeoutMs !== null && timeoutMs <= 0) {
+    const timeoutMs = deadlineAt === null ? WARMUP_TIMEOUT_MS : Math.ceil(deadlineAt - monotonicNow());
+    if (deadlineAt !== null && timeoutMs <= 0) {
       throw codedError('TIMEOUT', `플레이어 ${persona.playerId} 세션 복구 예산이 만료됐습니다.`);
     }
-    let result, code='RESPONSE_RECEIVED';
+    let result, code='RESPONSE_RECEIVED', timing=null;
     const started=monotonicNow();
     try { result = await playerAdapter.warmup({
-      playerId: persona.playerId, prompt, signal, ...(timeoutMs === null ? {} : { timeoutMs }),
-    }); } catch(error) {code=error.code??'CLI_FAILED';throw error;}
+      playerId: persona.playerId, prompt, signal, timeoutMs,
+    }); timing=result?.timing??null; } catch(error) {code=error.code??'CLI_FAILED';timing=error?.timing??null;throw error;}
     finally {
-      if(deadlineAt!==null) log('player-call',{purpose,
-        decisionId:readLoopState()?.pendingDecision?.decisionId??null,
-        generation:readLoopState()?.pendingDecision?.generation??null,
+      const pending = deadlineAt === null ? null : readLoopState()?.pendingDecision;
+      log('player-call',{purpose,
+        decisionId:pending?.decisionId??null,
+        generation:pending?.generation??null,
         runtime:playerAdapter.kind,model:adapterModel(playerAdapter),
         timeoutMs,elapsedMs:Math.max(0,monotonicNow()-started),code,
-        category:code==='RESPONSE_RECEIVED'?'response':playerFailureCategory(code),censored:code==='TIMEOUT'});
+        category:code==='RESPONSE_RECEIVED'?'response':playerFailureCategory(code),censored:code==='TIMEOUT',
+        ...(batch ? { batch } : {}), timing});
     }
     if (!result || typeof result.sessionId !== 'string' || result.sessionId === '') {
       throw codedError('NO_SESSION', `플레이어 ${persona.playerId} 세션이 없습니다.`);
@@ -2457,19 +2481,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
     }
     restoredPlayerSessions.clear();
+    const reusable = (prior) => reuseExisting
+      && prior
+      && typeof prior === 'object'
+      && !Array.isArray(prior)
+      && prior.runtime === playerAdapter.kind
+      && isArgvSafeSessionId(prior.sessionId)
+      && typeof prior.createdAt === 'string'
+      && prior.createdAt !== ''
+      && (prior.runtimeHomeId ?? null) === (playerAdapter.runtimeHomeId ?? null);
+    // #312: 이번에 실제로 같이 띄우는 warmup만 한 묶음이다(재사용한 좌석은 빠진다).
+    const purpose = reuseExisting ? 'restore-warmup' : 'start-warmup';
+    const fresh = aiPlayers.filter((persona) => !reusable(existing[persona.playerId]));
+    const batchId = randomUUID();
+    const batchStarted = monotonicNow();
     const settled = await Promise.allSettled(aiPlayers.map(async (persona) => {
       const prior = existing[persona.playerId];
-      if (
-        reuseExisting
-        && prior
-        && typeof prior === 'object'
-        && !Array.isArray(prior)
-        && prior.runtime === playerAdapter.kind
-        && isArgvSafeSessionId(prior.sessionId)
-        && typeof prior.createdAt === 'string'
-        && prior.createdAt !== ''
-        && (prior.runtimeHomeId ?? null) === (playerAdapter.runtimeHomeId ?? null)
-      ) {
+      if (reusable(prior)) {
         restoredPlayerSessions.add(persona.playerId);
         return [persona.playerId, {
           runtime: prior.runtime,
@@ -2479,8 +2507,24 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }];
       }
       restoredPlayerSessions.delete(persona.playerId);
-      return [persona.playerId, await createPlayerSession(persona, createdAt)];
+      return [persona.playerId, await createPlayerSession(persona, createdAt, {
+        purpose, batch: { id: batchId, size: fresh.length, index: fresh.indexOf(persona) },
+      })];
     }));
+    if (fresh.length > 0) {
+      const codes = {};
+      let answered = 0;
+      for (const [index, result] of settled.entries()) {
+        if (!fresh.includes(aiPlayers[index])) continue;
+        if (result.status === 'fulfilled') answered += 1;
+        else {
+          const failure = typeof result.reason?.code === 'string' ? result.reason.code : 'CLI_FAILED';
+          codes[failure] = (codes[failure] ?? 0) + 1;
+        }
+      }
+      log('player-warmup-batch', { purpose, batchId, size: fresh.length, answered, failed: fresh.length - answered, codes,
+        wallMs: Math.max(0, monotonicNow() - batchStarted) });
+    }
     const failed = settled.find((result) => result.status === 'rejected');
     if (failed) throw failed.reason;
     const rows = settled.map((result) => result.value);
@@ -2697,14 +2741,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const decideOnce = async (input, timeoutMs, { callNo }) => {
     const started = monotonicNow();
     let code = 'RESPONSE_RECEIVED';
+    let timing = null;
     try {
       // Task 4 adapter owns the child timeout contract: it kills and rejects before
       // this promise settles. Starting a second request before that settlement would
       // let two resume calls race on one persistent player session.
       const result = await playerAdapter.decide({ ...input, timeoutMs });
+      timing = result?.timing ?? null;
       return { ok: true, raw: result?.raw, modelMs: Math.max(0, monotonicNow() - started) };
     } catch (error) {
       code = error.code ?? 'CLI_FAILED';
+      timing = error?.timing ?? null;
       return { ok: false, error, modelMs: Math.max(0, monotonicNow() - started) };
     } finally {
       log('player-call', { purpose:'decision', decisionId: readLoopState()?.pendingDecision?.decisionId ?? null,
@@ -2712,7 +2759,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         runtime: playerAdapter.kind, model: adapterModel(playerAdapter),
         callNo, timeoutMs, elapsedMs: Math.max(0, monotonicNow() - started), code,
         category: code === 'RESPONSE_RECEIVED' ? 'response' : playerFailureCategory(code),
-        censored: code === 'TIMEOUT' });
+        censored: code === 'TIMEOUT', timing });
     }
   };
 
@@ -3504,7 +3551,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           // A pause (or the finalization priority) that closed while this
           // waited: start nothing and let the pipeline re-register the hand.
           if (!trainingMayExplain(evaluation.handNo)) return EXPLAIN_HELD;
-          started = explainForPipeline(evaluation);
+          // #303: an explainer that cannot start now (a closed or unverified runtime) makes no
+          // attempt, as when a direct call throws; only a started call's failure is final.
+          try {
+            started = explainForPipeline(evaluation);
+          } catch {
+            return EXPLAIN_NONE;
+          }
           return started.promise;
         }),
         terminate: async () => {
@@ -3514,8 +3567,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       };
       return bindTrainingAttempt(`${evaluation.evaluationId}:explain`, waiting);
     }
+    // #303: no model to call is no attempt; the item stays unsealed for the cutoff.
     if (!upperAdapter || typeof upperAdapter.oneshotStart !== 'function') {
-      return { promise: Promise.resolve(null), terminate: async () => ({ confirmed: true }) };
+      return { promise: Promise.resolve(EXPLAIN_NONE), terminate: async () => ({ confirmed: true }) };
     }
     // 20초 예산이라 모델 기본 추론 강도로 부른다(`explanationCall`).
     const handle = upperAdapter.oneshotStart(explanationCall(evaluation));
@@ -3592,6 +3646,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       startSolve: startSolveTask,
       admit: () => trainingMayRun(handNo),
       admitExplain: () => trainingMayExplain(handNo),
+      // #303: only a stop or the cutoff ends an explainer (a pause lets it finish), so an
+      // attempt that comes back without text outside those is a finished, final failure.
+      failureFinal: () => !stopRequested && !finalizationCutoff,
       publish: async (kind) => {
         if (kind === 'machine') await flushTrainingPublish();
         if (kind === 'annotation') await flushAnnotationPublish();
@@ -3683,10 +3740,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // same way. A pipeline it refuses (queued at the explain lock, or between items)
   // never reports, and a running explainer it ends leaves its item unsealed; the
   // next start must register those hands again. Hands are recorded, not items: like
-  // a hand a pause held back, a recorded hand re-runs every item it has not sealed,
-  // an earlier simple failure in it included. Returned as a patch for requestStop's
-  // own ownership-checked stopping write, since writeDeferredRecord writes nothing
-  // once a stop is requested.
+  // a hand a pause held back, a recorded hand re-runs every item it has not sealed.
+  // An attempt that came back is sealed either way (#303: a failure as explain-failed),
+  // so those are exactly the items no attempt finished for. Returned as a patch for
+  // requestStop's own ownership-checked stopping write, since writeDeferredRecord
+  // writes nothing once a stop is requested.
   const deferredRecordAtStop = () => {
     const running = [...trainingInFlightHands, ...solveHandOf.values()].filter(Number.isInteger);
     if (!running.length) return {};
@@ -3868,7 +3926,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (Number.isInteger(lastHandNo) && lastHandNo >= 1) pendingHands.add(lastHandNo);
       if (stopRequested) return;
       // R1 (b): hands a pause held back (recorded, so a restart still has them;
-      // an explanation that simply failed is not retried here).
+      // an explanation that simply failed was sealed explain-failed and is not retried, #303).
       for (const handNo of readLoopState()?.trainingDeferredHands ?? []) {
         if (Number.isInteger(handNo)) pendingHands.add(handNo);
       }

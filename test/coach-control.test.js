@@ -10,7 +10,7 @@ import {
   publicProofId,
   publishBodyByteLength,
 } from '../publish-contract.js';
-import { createCoachControl, UNAVAILABLE_TEXT, DEFAULT_ATTEMPT_MS, failureEnvelope, CoachError } from '../tools/coach-control.js';
+import { createCoachControl, runCoachControlCli, UNAVAILABLE_TEXT, DEFAULT_ATTEMPT_MS, failureEnvelope, CoachError } from '../tools/coach-control.js';
 
 class FakeClock {
   constructor(start = 0n) {
@@ -625,6 +625,31 @@ test('watch-accept는 파일이 없이 deadline이 지나면 ATTEMPT_TIMEOUT이�
   });
   assert.equal(out.ok, false);
   assert.equal(out.code, 'ATTEMPT_TIMEOUT');
+});
+
+// #310: publishing a coach note is the loop's alone (its gate withholds a refused note). The
+// operator path that handed the queued envelope to the publisher directly is refused before
+// anything is accepted.
+test('#310 watch-accept --publish는 아무것도 accept하지 않고 USAGE로 거부된다', async () => {
+  const { dir, owner, cc, snapshotFile, statsFile } = setup();
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0.2 } } }));
+  const started = await cc.beginOwner({ gameDir: dir, owner, completed: 1, statsFile, snapshotFile });
+  const { generation, exactResultPath } = started.descriptors[0];
+  writeResult(exactResultPath, { handNo: 1, text: '이 콜은 EV 손실이 1.5bb입니다.' });
+  const authPath = path.join(dir, '.coach-authority.json');
+  const before = fs.readFileSync(authPath, 'utf8');
+  await assert.rejects(
+    cc.watchAccept({ gameDir: dir, owner, handNo: 1, generation, publish: true }),
+    (error) => error instanceof CoachError && error.code === 'USAGE',
+  );
+  // The CLI refuses before it reads anything, a forbidden file that does not exist included.
+  await assert.rejects(runCoachControlCli([
+    'watch-accept', '--game-dir', dir, '--owner', owner, '--hand', '1', '--generation', String(generation),
+    '--forbidden-file', path.join(dir, 'no-such-forbidden.json'), '--publish',
+  ]), { code: 'USAGE' });
+  assert.equal(fs.readFileSync(authPath, 'utf8'), before);
+  assert.equal(cc.loadAuthority(dir).publishQueue['1'], undefined);
+  assert.equal(fs.existsSync(path.join(dir, '.publish-attempt.json')), false);
 });
 
 test('accept occupied reject는 matching active를 persist하고 stale caller는 손을 대지 않는다', async () => {

@@ -117,6 +117,8 @@ The study room suggests one explicit next step from your verified summary: due r
 
 New sessions use preflop reference v3: opens, facing an open and facing a 3-bet at 80–150BB for 2–9 players, plus push/fold and calling a shove at 15BB or less (earlier sessions keep reference v1/v2). Unsupported spots are not treated as solved. Scores and frequency comparisons do not establish profitability or poker skill. See the [training data notes](training/data/README.md) for coverage and provenance.
 
+To observe a learner's change under rules fixed in advance, use the consented, sealed-schedule evaluation (`npm run learning-eval -- enroll --store /absolute/store --consent`). Its result is a personal observation of agreement with the heuristic reference, not evidence of a coaching effect, skill or profit. See [learning effect evaluation](docs/implementation/learning-effect-evaluation.md) (Korean).
+
 ## How it works
 
 ```text
@@ -142,6 +144,7 @@ Some technical guides are currently in Korean.
 | [Operations and recovery](docs/operations.ko.md) | Legacy CLI, diagnostics, shutdown, resume, and recovery |
 | [Start-game skill](.agents/skills/start-game/SKILL.md) | Agent-assisted launch workflow |
 | [Training data](training/data/README.md) | Heuristic reference coverage and provenance |
+| [Learning effect evaluation](docs/implementation/learning-effect-evaluation.md) | What the metrics mean, their limits, and the pre-fixed evaluation procedure (Korean) |
 | [JEV design](docs/implementation/jev-player-design.md) | Provider contract and failure handling |
 | [JEV validation](docs/implementation/jev-player-validation.md) | Automated and real-provider verification |
 

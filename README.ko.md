@@ -117,6 +117,8 @@ npm run study:stop -- /absolute/store
 
 새 세션의 프리플랍 기준표 v3는 2~9인 80~150BB의 오픈·오픈 대응·3벳 대응과 15BB 이하 푸시/폴드·쇼브 대응을 비교합니다(기존 세션은 기록된 v1·v2 기준표를 유지). 미지원 스팟을 정답이 있는 것처럼 평가하지 않습니다. 점수·빈도 비교는 수익성이나 실제 포커 실력의 증명이 아닙니다. 범위와 출처는 [학습 데이터 문서](training/data/README.md)를 참고하세요.
 
+학습 변화를 미리 정한 규칙으로 관측하려면 동의 후 일정을 봉인하는 평가 절차(`npm run learning-eval -- enroll --store /absolute/store --consent`)를 씁니다. 결과는 휴리스틱 기준표 일치도의 개인 관측이고 코칭 효과·실력·수익의 증거가 아닙니다. 자세한 내용은 [학습 효과 평가](docs/implementation/learning-effect-evaluation.md)를 참고하세요.
+
 ## 동작 구조
 
 ```text
@@ -140,6 +142,7 @@ npm run study:stop -- /absolute/store
 | [운영 및 복구](docs/operations.ko.md) | legacy CLI, 진단, 종료, 재개, 복구 |
 | [start-game 스킬](.agents/skills/start-game/SKILL.md) | 에이전트를 통한 기동 절차 |
 | [학습 데이터](training/data/README.md) | 휴리스틱 기준표 범위와 출처 |
+| [학습 효과 평가](docs/implementation/learning-effect-evaluation.md) | 지표의 의미·한계와 사전 고정 평가 절차 |
 | [JEV 설계](docs/implementation/jev-player-design.md) | 서비스 연동 계약과 실패 처리 |
 | [JEV 검증](docs/implementation/jev-player-validation.md) | 자동화·실제 provider 검증 근거 |
 

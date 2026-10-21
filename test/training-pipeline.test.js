@@ -592,3 +592,120 @@ test('in-flight explain remains ready when only the process-local cutoff exists'
   assert.equal(auth.items[evaluation.evaluationId].annotations?.explanation?.status, 'ready');
   assert.equal(auth.items[evaluation.evaluationId].annotations?.explanation?.sealReason, undefined);
 });
+
+// #303: an explanation attempt that came back is final. A hand run again (a pause
+// re-registration, the run after an accepted solve, a restart of a recorded hand) explains
+// only what no attempt finished for.
+async function twoItemHand(dir) {
+  const gameEpoch = gameEpochOf('tok');
+  writeLastHand(dir, { decisionIds: ['d-1-preflop-0', 'd-1-preflop-1'] });
+  const evaluations = ['d-1-preflop-0', 'd-1-preflop-1'].map((id) => cannedEvaluation(id, gameEpoch));
+  await createTrainingControl().acceptEvaluations(dir, { gameEpoch, owner: 'owner-1', handNo: 1, evaluations });
+  return { gameEpoch, evaluations };
+}
+
+const runTwoItemHand = (dir, gameEpoch, opts) => pipeline.runHandPipeline({
+  sessionDir: dir,
+  handNo: 1,
+  gameEpoch,
+  owner: 'owner-1',
+  evaluate: () => { throw new Error('already-itemized decisions must not be re-evaluated'); },
+  admit: () => true,
+  ...opts,
+});
+
+test('#303 an explanation that failed before a pause held the next item is sealed explain-failed and not called again', async () => {
+  const dir = tmp();
+  const { gameEpoch, evaluations: [a, b] } = await twoItemHand(dir);
+  const calls = [];
+  const first = await runTwoItemHand(dir, gameEpoch, {
+    explain: (evaluation) => { calls.push(evaluation.evaluationId); return handleOf(''); },
+    // The pause closes once A's attempt is in: B is held back.
+    admitExplain: () => calls.length === 0,
+  });
+  assert.equal(first.deferred, true);
+  assert.deepEqual(calls, [a.evaluationId]);
+  let auth = createTrainingControl().loadAuthority(dir);
+  assert.equal(auth.items[a.evaluationId].annotations?.explanation?.status, 'unavailable');
+  assert.equal(auth.items[a.evaluationId].annotations.explanation.sealReason, 'explain-failed');
+  assert.equal(auth.items[b.evaluationId].annotations?.explanation, undefined);
+  const second = await runTwoItemHand(dir, gameEpoch, {
+    explain: (evaluation) => { calls.push(evaluation.evaluationId); return handleOf(VALID_EXPLAIN); },
+    admitExplain: () => true,
+  });
+  assert.equal(second.deferred, undefined);
+  assert.deepEqual(calls, [a.evaluationId, b.evaluationId], 'the run after the pause explains B only');
+  auth = createTrainingControl().loadAuthority(dir);
+  assert.equal(auth.items[b.evaluationId].annotations.explanation.status, 'ready');
+  assert.equal(auth.items[a.evaluationId].annotations.explanation.sealReason, 'explain-failed');
+});
+
+for (const [name, outcome] of [
+  ['blank text', () => handleOf('   ')],
+  ['a non-text result', () => handleOf({ ok: false, code: 'TIMEOUT' })],
+  ['text the sanitizer empties', () => handleOf('EV loss 17')],
+  ['text validation refuses', () => handleOf('BTN에서 AJo는 0.55 빈도로 2.5bb 오픈이 주력입니다.')],
+  ['a rejected attempt', () => ({ promise: Promise.reject(new Error('child failed')), terminate: async () => ({ confirmed: true }) })],
+]) {
+  test(`#303 ${name} is a finished attempt: sealed explain-failed once`, async () => {
+    const dir = tmp();
+    const { gameEpoch, evaluations: [a] } = await twoItemHand(dir);
+    const calls = [];
+    const explain = (evaluation) => {
+      calls.push(evaluation.evaluationId);
+      return evaluation.evaluationId === a.evaluationId ? outcome() : handleOf(VALID_EXPLAIN);
+    };
+    await runTwoItemHand(dir, gameEpoch, { explain, admitExplain: () => true });
+    await runTwoItemHand(dir, gameEpoch, { explain, admitExplain: () => true });
+    assert.equal(calls.filter((id) => id === a.evaluationId).length, 1, 'the failed item is not attempted again');
+    const annotation = createTrainingControl().loadAuthority(dir).items[a.evaluationId].annotations.explanation;
+    assert.deepEqual([annotation.status, annotation.sealReason], ['unavailable', 'explain-failed']);
+  });
+}
+
+test('#303 an explainer that throws before it starts makes no attempt: the item stays unsealed and the next item is explained', async () => {
+  const dir = tmp();
+  const { gameEpoch, evaluations: [a, b] } = await twoItemHand(dir);
+  const calls = [];
+  const explain = (evaluation) => {
+    calls.push(evaluation.evaluationId);
+    if (evaluation.evaluationId === a.evaluationId) throw Object.assign(new Error('closed'), { code: 'RUNTIME_CLOSED' });
+    return handleOf(VALID_EXPLAIN);
+  };
+  const result = await runTwoItemHand(dir, gameEpoch, { explain, admitExplain: () => true });
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [a.evaluationId, b.evaluationId], 'the hand goes on to its next item');
+  const auth = createTrainingControl().loadAuthority(dir);
+  assert.equal(auth.items[a.evaluationId].annotations?.explanation, undefined, 'no call was made: nothing is final');
+  assert.equal(auth.items[b.evaluationId].annotations.explanation.status, 'ready');
+});
+
+test('#303 an attempt the caller ended (failureFinal false) stays unsealed', async () => {
+  const dir = tmp();
+  const { gameEpoch, evaluations: [a] } = await twoItemHand(dir);
+  // A stop ended A's explainer, which came back empty.
+  const result = await runTwoItemHand(dir, gameEpoch, {
+    explain: () => handleOf(null),
+    admitExplain: () => true,
+    failureFinal: () => false,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.deferred, undefined);
+  const auth = createTrainingControl().loadAuthority(dir);
+  assert.equal(auth.items[a.evaluationId].annotations?.explanation, undefined, 'a stop recorded the hand; the item waits for it');
+});
+
+test('#303 an explainer with no model to call makes no attempt even when failures are final', async () => {
+  const dir = tmp();
+  const { gameEpoch, evaluations: [a, b] } = await twoItemHand(dir);
+  const result = await runTwoItemHand(dir, gameEpoch, {
+    explain: (evaluation) => handleOf(evaluation.evaluationId === a.evaluationId ? pipeline.EXPLAIN_NONE : VALID_EXPLAIN),
+    admitExplain: () => true,
+    failureFinal: () => true,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.deferred, undefined, 'no model is not a deferral: the hand is not registered again');
+  const auth = createTrainingControl().loadAuthority(dir);
+  assert.equal(auth.items[a.evaluationId].annotations?.explanation, undefined, 'the cutoff seals it');
+  assert.equal(auth.items[b.evaluationId].annotations.explanation.status, 'ready');
+});

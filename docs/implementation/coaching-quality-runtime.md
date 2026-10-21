@@ -481,3 +481,85 @@ Fixture evidence (`test/player-runtime.test.js`, `test/codex-player-comparison.t
 - The same tests pass with the change. The residual boundaries are pinned with an explicit
   holder release instead of timing.
 
+
+## #312: warmup observation in production logs
+
+### Game-loop records
+
+- **Per-call records:** every player warmup now writes one `player-call` record, start and
+  restore included. Purposes are `start-warmup`, `restore-warmup`, `repair-warmup` and
+  `fresh-warmup`. Start and restore warmups that run together carry `batch: { id, size, index }`;
+  `size` counts only the warmups that were actually launched, not reused sessions.
+- **Applied cap:** a warmup without a decision deadline passes `WARMUP_TIMEOUT_MS`
+  (120 s, unchanged) explicitly. `timeoutMs` in the record is therefore the applied cap.
+- **Batch record:** `player-warmup-batch` records the outcome of each batch: `{ purpose,
+  batchId, size, answered, failed, codes, wallMs }`.
+- **`timing` field:** warmup and decision `player-call` records carry the adapter's phase
+  timing, or `null` if the adapter reports none.
+
+### Adapter phase timing (`tools/cli-phase-timing.js`)
+
+- **Source:** `runOnce` reads only JSONL event **names** from the child's stdout through
+  `spawnCli`'s observer. Lines over 64 KiB are not parsed. Prompt and output text and
+  session ids are never kept.
+- **Values:** `bootMs` (first `thread.started`), `turnStartMs`, `turnEndMs` (first
+  `turn.completed`/`turn.failed`), `signalMs`, `exitMs` and `closeMs`, all in ms from spawn.
+  Derived values are `turnMs`, `censored` and `exitToCloseMs`.
+- **Signal time:** observers see no kill, so `signalMs` is the moment `runOnce` decides to
+  kill on a timeout or interrupt.
+- **Runtimes:** only codex emits the stream events. claude and grok fill exit and close.
+- **Where it appears:** timing is attached to results and errors (`error.timing`),
+  including `NOT_READY` and `CLI_FAILED`.
+- **Comparison tool:** its exec wrapper calls its own recorder and the adapter observer in
+  turn, each isolated. Report schema `/4` is unchanged.
+
+### Read-only aggregation (`tools/player-latency-report.js`)
+
+`node tools/player-latency-report.js <store or game dir> [--since ISO] [--json]`
+
+- **Input:** opens `loop.log` files read-only and never follows symlinks.
+  - A root that is itself a symlink is refused, and so are symlinked session directories and files.
+  - Each file is opened with `O_NOFOLLOW` and must be the same regular file that was checked.
+  - The directories recorded at discovery are checked again before and after the open.
+  - Path components above the given root (such as macOS `/tmp`) are not checked.
+  - A swap made just before the open and undone right after it is not detected.
+- **Grouping:** calls are grouped by runtime, model, kind and warmup batch size.
+- **Decision deduplication:** decisions are deduplicated per call inside each session
+  file. Rows with a `callNo` match by number first: a `player-call` with `purpose: decision`
+  wins for each (decisionId, generation, callNo), and `player-attempt` fills only the calls
+  it lacks. Only the remaining rows without `callNo` match each other by order.
+- **Output:** denominators and outcome counts, and nearest-rank percentiles of answered
+  calls. Over-threshold counts are warmup > 60 s and decision > 25 s / > 300 s.
+  Timeouts are censored and counted apart. Timing distributions are included, plus up to
+  20 outliers with their timing.
+- **Legacy proxy:** LLM sessions without start-warmup records report
+  `server-spawn` → `bootstrap-playing` as an upper-bound proxy that includes relay
+  start-up. Starts that never reached playing are counted, not ranked.
+  - A session counts as LLM if it has player calls or if its `loop-state.json` says
+    `opponentRuntime: llm`; only that one field is read. Policy games also log
+    `runtime-models`, so that event alone does not identify an LLM game.
+
+### Warmup concurrency measurement (`tools/measure-codex-warmup.js`)
+
+`node tools/measure-codex-warmup.js [--live] [--batch-size N] [--rounds R] [--timeout-ms N] [--warmup-timeout-ms N] [--budget-ms N] [--json]`
+
+- **What it does:** for each benchmark-pinned variant (Luna/model-default and Sol/low),
+  it runs the verified no-tool probe. Then each round launches one **parallel** batch of N
+  warmups and one **sequential** batch of N warmups. As in production, the batches use one
+  shared adapter and distinct operating personas.
+- **Order:** the variant order alternates by round. The mode order alternates by round
+  plus variant index, so with four rounds each variant starts with each mode twice.
+- **Child attribution:** each child is tied to its warmup by a tag set at spawn time,
+  because warmups spawn synchronously before their first await. An untagged warmup child
+  fails `executionOk`.
+- **Shared rules with the comparison tool:** argv observation per call, timelines,
+  confirmed-close timeouts, an immediate stop on an unconfirmed termination, disposal and
+  no raw text. Schema is `codex-warmup-concurrency/1`.
+- **`ok`:** `executionOk ∧ complete` (every planned warmup answered).
+- **Findings:**
+  - C1 lists timeouts regardless of completeness.
+  - C2 lists answers over 60 s with their phases.
+  - C3 calls a parallel effect only for an `ok` run, when the parallel median is at
+    least 1.5 × the sequential median **and** at least 2 s above it. This is checked on
+    the raw medians; the rounded ratio in the summary is for display only.
+- **Limits:** these are observations from small samples, not distribution guarantees.
