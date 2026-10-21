@@ -78,7 +78,8 @@ function closeServer(server, timeoutMs = 2_000) {
 function directoryState(entry) {
   let stat;
   try {
-    stat = fs.lstatSync(entry.dir);
+    // #308: exact, as recorded — a Number-valued ino past 2^53 (Windows) can match a replacement.
+    stat = fs.lstatSync(entry.dir, { bigint: true });
   } catch (error) {
     if (error.code === 'ENOENT') return { state: 'absent' };
     throw error;
@@ -98,7 +99,7 @@ export function createOwnedTempDir(prefix = 'ai-holdem-test-') {
     : fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-`));
   if (process.platform === 'win32') createPrivateDirectory(dir);
   const real = fs.realpathSync(dir);
-  const stat = fs.lstatSync(dir);
+  const stat = fs.lstatSync(dir, { bigint: true });
   if (path.dirname(real) !== fs.realpathSync(os.tmpdir()) || !stat.isDirectory()) {
     throw new Error('owned fixture was not created directly under the temp root');
   }

@@ -23,7 +23,8 @@ async function main({ coldStart = false } = {}) {
   if (process.platform !== 'win32') throw new Error('Windows privacy probe requires Windows');
   const deadline = performance.now() + COLD_TOTAL_MS;
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-windows-privacy-'));
-  const identity = fs.lstatSync(root);
+  // Exact (#308): a Number-valued ino past 2^53 can match a replacement.
+  const identity = fs.lstatSync(root, { bigint: true });
   const original = cp.spawnSync;
   let invocation = 0;
   cp.spawnSync = (...args) => {
@@ -88,7 +89,7 @@ async function main({ coldStart = false } = {}) {
   } finally {
     cp.spawnSync = original;
     syncBuiltinESMExports();
-    const now = fs.lstatSync(root);
+    const now = fs.lstatSync(root, { bigint: true });
     if (now.dev !== identity.dev || now.ino !== identity.ino || now.isSymbolicLink()) throw new Error('PRIVACY_PROBE_ROOT_REPLACED');
     fs.rmSync(root, { recursive: true });
     console.log(JSON.stringify({ ownedProbeRootRemoved: !fs.existsSync(root) }));

@@ -31,8 +31,15 @@ test('browser CLI is inert under NODE_TEST_CONTEXT without spawning a browser or
 test('owned browser workspace refuses replacement inode cleanup', () => {
   const workspace = createBrowserWorkspace(); const original = `${workspace.root}-original`;
   fs.renameSync(workspace.root, original); fs.mkdirSync(workspace.root);
-  try { assert.throws(() => workspace.close(), /replacement workspace/); }
-  finally { fs.rmdirSync(workspace.root); fs.renameSync(original, workspace.root); workspace.close(); }
+  let refusal = null;
+  try { workspace.close(); } catch (error) { refusal = error; }
+  // #308: restore before judging, and judge what close() did first. A replacement it removed made
+  // the old cleanup fail with ENOENT, which hid the missing refusal.
+  let removal = null;
+  try { fs.rmdirSync(workspace.root); } catch (error) { removal = error; }
+  fs.renameSync(original, workspace.root); workspace.close();
+  assert.equal(removal?.code, undefined, `the replacement was not left for this test to remove (close: ${refusal?.message ?? 'no refusal'})`);
+  assert.match(String(refusal?.message), /replacement workspace/);
 });
 test('response proxy forwards mutation once before dropping only its response', async () => {
   let mutations = 0; let body = '';
