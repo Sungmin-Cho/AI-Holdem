@@ -14,7 +14,7 @@ import {
   writeJsonAtomic,
   acquireOwnedLock,
 } from '../engine/state.js';
-import { skipOnWin32 } from './helpers/platform.js';
+import { skipOnWin32, isRunning, waitExited } from './helpers/platform.js';
 import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import {
   createGameLoop,
@@ -719,8 +719,9 @@ child.on('exit', (code) => process.exit(code ?? 1));`;
   assert.equal((await loop.run()).phase, 'done');
   assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts
     .find((row) => row.generation === 1)?.cleanupState, 'released');
-  // Released on the launcher's death: the grandchild must not have outlived it.
-  await waitUntilDead(grandPid, 2_000);
+  // Released on the launcher's death: the grandchild must not have outlived it. (Run state, not
+  // kill(0): an ended orphan can stay a zombie for a while on Linux.)
+  assert.equal(await waitExited(grandPid, 2_000), true, `grandchild ${grandPid} is still running`);
   await cli.closed;
 });
 
@@ -851,7 +852,7 @@ setInterval(() => {}, 1000);`;
   assert.equal((await loop.run()).phase, 'done');
   assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts
     .find((row) => row.generation === 1)?.cleanupState, 'released');
-  assert.doesNotThrow(() => process.kill(grandPid, 0), 'the grandchild outlives a leader that did not wait for it');
+  assert.equal(isRunning(grandPid), true, 'the grandchild outlives a leader that did not wait for it');
 });
 
 // #311: the leader check itself. A detached (setsid) child leads its session and group; a plain
