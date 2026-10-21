@@ -733,21 +733,24 @@ async function releaseHolder(f, release) {
   if (orphanPid) assert.equal(await waitExited(orphanPid), true, '해제한 보유자가 끝나지 않았다');
 }
 
+// #311: Windows에서도 돈다 — detached 보유자는 직계(Node)의 kill-on-close Job 밖이라 직계가 끝나도 남고, stdio를 쥔 동안
+// 종료는 미확인으로 남는다(Job 안의 후손만 직계와 함께 끝난다는 배제 판정의 음성 대조군). 그룹 신호는 POSIX에만 있다.
 test('#297 decide 타임아웃 잔여 경계 A: 그룹을 벗어난 보유자가 stdio를 쥐면 CHILD_CLOSE_UNCONFIRMED, 보유자가 끝난 뒤 dispose가 다시 신호하지 않고 확인', { timeout: 15_000 }, async (t) => {
-  if (skipOnWin32(t, 'POSIX sessions and process groups')) return;
   const release = path.join(tmpDir('release'), 'release');
   const sent = spyProcessKill(t);
   const f = fakeRuntime('codex', { default: { reply: 'late', delayMs: 30_000, orphanUntil: release } }, { terminateKillWaitMs: 300 });
   try {
-    await assert.rejects(f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 1000 }), { code: 'CHILD_CLOSE_UNCONFIRMED' });
+    await assert.rejects(f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: process.platform === 'win32' ? 3000 : 1000 }), { code: 'CHILD_CLOSE_UNCONFIRMED' });
     const call = f.calls().find((entry) => Array.isArray(entry.argv));
     assertSignalledAfterReady(f, call);
-    assert.equal(await waitExited(call.pid), true, '직계는 그룹 신호로 끝났다');
+    assert.equal(await waitExited(call.pid), true, '직계는 신호로 끝났다');
+    const orphanPid = f.calls().find((entry) => Number.isInteger(entry.orphanPid)).orphanPid;
+    assert.equal(isRunning(orphanPid), true, '보유자는 직계와 함께 끝나지 않았다');
     await assert.rejects(f.rt.dispose(), { code: 'CHILD_CLOSE_UNCONFIRMED' }, '보유자가 남아 있는 동안 dispose는 종료를 확인하지 못한다');
     await releaseHolder(f, release);
     await f.rt.dispose();
     assert.deepEqual(f.kills, ['SIGKILL'], '재관측은 신호를 다시 보내지 않는다');
-    assert.deepEqual(sent.filter(([pid]) => pid < 0), [[-call.pid, 'SIGKILL']], 'OS 그룹 신호는 한 번뿐이다');
+    assert.deepEqual(sent.filter(([pid]) => pid < 0), process.platform === 'win32' ? [] : [[-call.pid, 'SIGKILL']], 'OS 그룹 신호는 POSIX에서 한 번뿐이다');
   } finally {
     await releaseHolder(f, release);
     f.cleanup();
