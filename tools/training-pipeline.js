@@ -453,11 +453,12 @@ async function runHandPipelineUnlocked({
     if (typeof publish === 'function') await publish('annotation');
   };
   // #303: an explanation attempt that came back is final. One that left no text to seal
-  // (nothing, nothing after sanitizing, refused by validation, a throw) is sealed unavailable
-  // at once, so no later run of the hand — a pause re-registration, the run after an accepted
-  // solve, a restart of a recorded hand — calls the explainer for it again. `failureFinal()`
-  // false means the caller ended the attempt itself (a stop); the item then stays unsealed for
-  // whatever recorded it (or for the cutoff).
+  // (nothing, nothing after sanitizing, refused by validation, a rejected promise) is sealed
+  // unavailable at once, so no later run of the hand — a pause re-registration, the run after
+  // an accepted solve, a restart of a recorded hand — calls the explainer for it again.
+  // `failureFinal()` false means the caller ended the attempt itself (a stop, the cutoff); the
+  // item then stays unsealed for whatever recorded it (or for the cutoff). What is final is the
+  // result, not the child's close.
   const sealFailedExplanation = async (item) => {
     if (typeof failureFinal === 'function' && failureFinal() !== true) return;
     await sealExplanation(item, 'unavailable', { sealReason: 'explain-failed' });
@@ -508,11 +509,19 @@ async function runHandPipelineUnlocked({
     if (!explainAdmitted()) { explainDeferred = true; continue; }
     let text = null;
     let held = false;
-    let none = false;
+    let notStarted = false;
     await withExplainLock(sessionDir, async () => {
       if (hasCutoffMarker(sessionDir)) return;
       if (!explainAdmitted()) { held = true; return; }
-      const explainHandle = toRunnerHandle(explain(evaluation));
+      let explainHandle;
+      try {
+        explainHandle = toRunnerHandle(explain(evaluation));
+      } catch {
+        // The explainer could not start (a closed or unverified runtime): no call was made, so
+        // nothing is final, and the hand's other items still get theirs.
+        notStarted = true;
+        return;
+      }
       try {
         text = await explainHandle.promise;
       } catch { text = null; }
@@ -520,14 +529,14 @@ async function runHandPipelineUnlocked({
       // gate closed started nothing: the item stays unsealed and is re-registered.
       if (text === EXPLAIN_HELD) { held = true; text = null; }
       // No model to call: nothing was attempted, so nothing is final (the cutoff seals it).
-      if (text === EXPLAIN_NONE) { none = true; text = null; }
+      if (text === EXPLAIN_NONE) { notStarted = true; text = null; }
     });
     if (hasCutoffMarker(sessionDir)) {
       await sealExplanation(item, 'unavailable', { sealReason: 'cutoff' });
       continue;
     }
     if (held) { explainDeferred = true; continue; }
-    if (none) continue;
+    if (notStarted) continue;
     if (typeof text !== 'string' || !text.trim()) { await sealFailedExplanation(item); continue; }
     // New model output only: drop out-of-bounds sentences before validation and
     // sealing; a stored explanation is never rewritten.

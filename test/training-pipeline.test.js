@@ -663,6 +663,23 @@ for (const [name, outcome] of [
   });
 }
 
+test('#303 an explainer that throws before it starts makes no attempt: the item stays unsealed and the next item is explained', async () => {
+  const dir = tmp();
+  const { gameEpoch, evaluations: [a, b] } = await twoItemHand(dir);
+  const calls = [];
+  const explain = (evaluation) => {
+    calls.push(evaluation.evaluationId);
+    if (evaluation.evaluationId === a.evaluationId) throw Object.assign(new Error('closed'), { code: 'RUNTIME_CLOSED' });
+    return handleOf(VALID_EXPLAIN);
+  };
+  const result = await runTwoItemHand(dir, gameEpoch, { explain, admitExplain: () => true });
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [a.evaluationId, b.evaluationId], 'the hand goes on to its next item');
+  const auth = createTrainingControl().loadAuthority(dir);
+  assert.equal(auth.items[a.evaluationId].annotations?.explanation, undefined, 'no call was made: nothing is final');
+  assert.equal(auth.items[b.evaluationId].annotations.explanation.status, 'ready');
+});
+
 test('#303 an attempt the caller ended (failureFinal false) and an explainer with no model stay unsealed', async () => {
   const dir = tmp();
   const { gameEpoch, evaluations: [a, b] } = await twoItemHand(dir);

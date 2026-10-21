@@ -1136,6 +1136,7 @@ test('R1: a restart registers the hands a pause held back, and nothing else', { 
   const held = items.filter((item) => item.handNo === heldHand);
   const other = items.filter((item) => item.handNo === otherHand);
   assert.ok(lastHandNo() > otherHand, JSON.stringify({ heldHand, otherHand, last: lastHandNo() }));
+  assert.ok(held.length > 0 && other.length > 0, JSON.stringify({ held: held.length, other: other.length }));
   assert.ok([...held, ...other].every((item) => explanationOf(gameDir, item) === null), 'nothing was sealed before the restart');
   const loopPath = path.join(gameDir, 'loop-state.json');
   fs.writeFileSync(loopPath, JSON.stringify({ ...readJson(loopPath), trainingDeferredHands: [heldHand] }));
@@ -1179,6 +1180,7 @@ test('R1: a paused recovery keeps what it finds queued until play resumes', { ti
   await first.requestStop();
   const hands = [...new Set(authorityItems(gameDir).map((item) => item.handNo))].sort((a, b) => a - b);
   const held = authorityItems(gameDir).filter((item) => item.handNo === hands[0]);
+  assert.ok(held.length > 0 && held.every((item) => explanationOf(gameDir, item) === null), 'the held-back items are there and unsealed');
   const loopPath = path.join(gameDir, 'loop-state.json');
   fs.writeFileSync(loopPath, JSON.stringify({ ...readJson(loopPath), trainingDeferredHands: [hands[0]] }));
   const explained = [];
