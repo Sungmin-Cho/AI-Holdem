@@ -1013,3 +1013,145 @@ test('#306: a batch proof that fails leaves no proved set for the next transacti
     assert.ok(proofs > before, 'the transaction ran on the set proved for an older listing');
   }, { platform: 'win32', prove });
 });
+
+// #306 r1: every read-only step of a client call is read again the same way, within one bound. Here
+// the descriptor name, not the lock, is pending — a stopped service's descriptor behind a reader —
+// when the ensure takes its first look at the store (its context, before any lock read). The ensure
+// is called directly: the launch helper would retry a failed one and hide that.
+test('#306: an ensure whose first look at the store meets a descriptor name pending deletion waits it out', {
+  skip: WIN32 ? false : 'only Windows keeps a deleted name behind its holder', timeout: STOP_BUDGET,
+}, async (t) => {
+  const first = await launch(t);
+  const api = await service();
+  await api.stopStudyService(first.storeDir, { expectedInstanceId: first.handle.instanceId });
+  const descriptor = descriptorPath(first.storeDir);
+  fs.writeFileSync(descriptor, '{}', { mode: 0o600 });
+  const holder = holdOpen(descriptor, { pendingLingerMs: 1500 });
+  await holder.held;
+  fs.unlinkSync(descriptor);
+  if (failureCode(() => fs.lstatSync(descriptor)) !== 'EPERM') {
+    await holder.closed;
+    assert.equal(DELETE_PENDING, false, 'libuv 1.46 must keep the deleted name');
+    t.skip('this file system deletes names at once');
+    return;
+  }
+  const handle = await api.ensureStudyService(first.storeDir, {
+    onChild(child) { child.ref(); registerOwnedProcess(child, 'study service'); },
+  });
+  t.after(() => api.stopStudyService(first.storeDir, { expectedInstanceId: handle.instanceId }).catch(() => {}));
+  const closed = await holder.closed;
+  t.diagnostic(`holder ${closed.out.trim().replace(/\n/g, ' | ')}`);
+  assert.equal(closed.code, 0, closed.err);
+  assert.notEqual(handle.instanceId, first.handle.instanceId);
+});
+
+// #306 r1: the bound itself, on every platform through `platform`. Another failure, or one off
+// Windows, is thrown at once. A pending read that clears is returned. One that never clears is thrown
+// by the earliest of the call's deadline, the platform budget in force and PENDING_READ_WAIT_MS from
+// its first failure; no read starts past that, and each read again runs inside it.
+test('#306: a pending read is read again only within its bound, and never started past it', { timeout: 30_000 }, async () => {
+  const { readSettled } = await service();
+  const pending = () => Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT'), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EPERM' });
+  const win32 = { platform: 'win32' };
+  let reads = 0;
+  await assert.rejects(readSettled(() => {
+    reads += 1;
+    throw Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT'), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EACCES' });
+  }, platformNow() + 10_000, win32), { fsCode: 'EACCES' });
+  assert.equal(reads, 1);
+  reads = 0;
+  await assert.rejects(readSettled(() => { reads += 1; throw pending(); }, platformNow() + 10_000, { platform: 'linux' }), { fsCode: 'EPERM' });
+  assert.equal(reads, 1);
+  reads = 0;
+  assert.equal(await readSettled(() => { reads += 1; if (reads < 3) throw pending(); return 'read'; }, platformNow() + 10_000, win32), 'read');
+  assert.equal(reads, 3);
+
+  // The call's deadline.
+  const starts = [];
+  const budgets = [];
+  const deadline = platformNow() + 300;
+  await assert.rejects(readSettled(() => {
+    starts.push(platformNow());
+    if (starts.length > 1) budgets.push(platformTimeout(15_000));
+    throw pending();
+  }, deadline, win32), { fsCode: 'EPERM' });
+  assert.ok(starts.length > 2, `read ${starts.length} times`);
+  assert.ok(starts.every((at) => at < deadline), 'a read started past the deadline');
+  assert.ok(budgets.every((ms) => ms <= 300), `a read again ran with ${Math.max(...budgets)} ms`);
+
+  // A read again that runs out of the bound keeps the pending EPERM; any other failure is its own.
+  reads = 0;
+  await assert.rejects(readSettled(() => {
+    reads += 1;
+    if (reads === 1) throw pending();
+    platformTimeout(1);
+    throw Object.assign(new Error('STUDY_IDENTITY_MISMATCH'), { code: 'STUDY_IDENTITY_MISMATCH' });
+  }, platformNow() + 10_000, win32), { code: 'STUDY_IDENTITY_MISMATCH' });
+  let spent = 0;
+  await assert.rejects(readSettled(() => {
+    spent += 1;
+    if (spent === 1) throw pending();
+    const until = platformNow() + 400;
+    while (platformNow() < until) { /* the bound runs out during this read */ }
+    platformTimeout(1);
+    return 'late';
+  }, platformNow() + 200, win32), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EPERM' });
+
+  // The platform budget in force.
+  let started = platformNow();
+  await assert.rejects(withPlatformDeadline(platformNow() + 300, () => readSettled(() => { throw pending(); }, platformNow() + 60_000, win32)),
+    { fsCode: 'EPERM' });
+  assert.ok(platformNow() - started < 1500, `waited ${Math.round(platformNow() - started)} ms past a 300 ms budget`);
+
+  // PENDING_READ_WAIT_MS from the first failure.
+  let first = null;
+  started = platformNow();
+  await assert.rejects(readSettled(() => {
+    if (first === null) { first = platformNow(); while (platformNow() - first < 200) { /* a slow first read */ } }
+    throw pending();
+  }, platformNow() + 60_000, win32), { fsCode: 'EPERM' });
+  const waited = platformNow() - first;
+  assert.ok(waited >= 2 * DELETE_PENDING_WAIT_MS && waited < 2 * DELETE_PENDING_WAIT_MS + 1500, `waited ${Math.round(waited)} ms`);
+});
+
+// #306 r1: the trailing ACL proof of a client call lists its names once more. For a call that
+// succeeded a pending name there is read again in the same bound; a call that failed keeps its own
+// error and is proved once.
+test('#306: the trailing proof of a call that succeeded is read again past a pending name', { timeout: 30_000 }, async () => {
+  const { withClientAclScope, aclTransaction } = await service();
+  const root = createOwnedTempDir('holdem-306-trailing-proof');
+  const training = path.join(root, '.training');
+  fs.mkdirSync(training);
+  const ctx = { root, training };
+  const scope = (body, failures) => {
+    let trailing = false;
+    let after = 0;
+    const prove = (entries, { onUnproven }) => {
+      if (!trailing) return true;
+      after += 1;
+      if (after > failures) return true;
+      onUnproven('error:EPERM');
+      return false;
+    };
+    const run = () => withClientAclScope(async () => {
+      assert.equal(aclTransaction(ctx, () => 'body', { platform: 'win32' }), 'body');
+      trailing = true;
+      return body();
+    }, { platform: 'win32', prove });
+    return { run, proofs: () => after };
+  };
+  const cleared = scope(() => 'done', 2);
+  assert.equal(await cleared.run(), 'done');
+  assert.equal(cleared.proofs(), 3);
+
+  // Within the platform budget the call runs in.
+  const held = scope(() => 'done', Infinity);
+  const started = platformNow();
+  await assert.rejects(withPlatformDeadline(platformNow() + 300, held.run), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EPERM' });
+  assert.ok(platformNow() - started < 1500, `waited ${Math.round(platformNow() - started)} ms past a 300 ms budget`);
+  assert.ok(held.proofs() > 1);
+
+  const failed = scope(() => { throw Object.assign(new Error('mine'), { code: 'STUDY_IDENTITY_MISMATCH' }); }, Infinity);
+  await assert.rejects(failed.run(), { code: 'STUDY_IDENTITY_MISMATCH' });
+  assert.equal(failed.proofs(), 1);
+});

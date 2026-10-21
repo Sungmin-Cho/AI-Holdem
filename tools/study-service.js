@@ -254,10 +254,18 @@ export function withClientAclScope(fn, { platform = process.platform, prove } = 
     files: null, dirty: false, opened: false, prove,
     candidates: null, listing: null, identityMemo: null,
   };
+  const proveAfter = () => proveEntries(batch.candidates, 'after', prove ?? arePrivatePaths);
   const finish = () => {
     if (!batch.opened || !batch.candidates) return;
-    const proveFn = prove ?? arePrivatePaths;
-    try { proveEntries(batch.candidates, 'after', proveFn); }
+    try { proveAfter(); }
+    finally { batch.files = null; batch.opened = false; }
+  };
+  // #306: the trailing proof of a call that succeeded lists its lock and descriptor names once more,
+  // and meets a release in progress like any other read. It is read again within the same bound; a
+  // call that already failed keeps its own error and proves once.
+  const finishSettled = async () => {
+    if (!batch.opened || !batch.candidates) return;
+    try { await readSettled(proveAfter, Infinity, { platform }); }
     finally { batch.files = null; batch.opened = false; }
   };
   return clientAcl.run(batch, () => {
@@ -269,7 +277,7 @@ export function withClientAclScope(fn, { platform = process.platform, prove } = 
     }
     if (result && typeof result.then === 'function') {
       return Promise.resolve(result).then(
-        (value) => { finish(); return value; },
+        async (value) => { await finishSettled(); return value; },
         (error) => { try { finish(); } catch { /* keep the caller's error code */ } throw error; },
       );
     }
@@ -548,7 +556,7 @@ async function verified(ctx, descriptor, owner, deadline) {
     fail('STUDY_DESCRIPTOR_CORRUPT', `health answer denied=${denied.status} status=${health.status} ok=${health.body?.ok}`
       + ` identity=${['pid','startTime','instanceId','storeIdentity','port'].filter((key) => health.body?.[key] !== value[key]).join(',') || 'match'}`);
   }
-  const { after, lock } = aclTransaction(ctx, () => ({ after: readDescriptor(ctx), lock: readLock(ctx) }));
+  const { after, lock } = await readSettled(() => aclTransaction(ctx, () => ({ after: readDescriptor(ctx), lock: readLock(ctx) })), deadline);
   if (after.state !== 'valid' || JSON.stringify(after.value) !== JSON.stringify(value)
     || !sameLock(owner, lock) || !descriptorMatches(value, ctx, lock)) fail();
   return value;
@@ -558,7 +566,7 @@ async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, st
   // Only the already observed live owner may repair this descriptor. None of
   // these reads grants permission to start a process or reclaim its metadata.
   while (platformNow() < deadline) {
-    const { currentOwner, descriptor, awaitingFirstCheckpoint } = aclTransaction(ctx, () => {
+    const { currentOwner, descriptor, awaitingFirstCheckpoint } = await readSettled(() => aclTransaction(ctx, () => {
       const currentOwner = readLock(ctx);
       if (currentOwner?.status !== 'alive' || !sameLock(owner, currentOwner)) {
         const observed = currentOwner
@@ -571,7 +579,7 @@ async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, st
         && JSON.stringify(descriptor.value) === JSON.stringify(staleDescriptor)
         && identityStatus(staleDescriptor.pid, staleDescriptor.startTime, staleEvidence) === 'dead';
       return { currentOwner, descriptor, awaitingFirstCheckpoint };
-    });
+    }), deadline);
     if (descriptor.state === 'valid' && !awaitingFirstCheckpoint) {
       if (expectedInstanceId !== undefined && descriptor.value.instanceId !== expectedInstanceId) {
         fail('STUDY_IDENTITY_MISMATCH');
@@ -583,10 +591,10 @@ async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, st
         // also a transport reset while the same owner is still alive — a blocked
         // spawnSync on win32 can reset the socket without unlinking the descriptor.
         // A wrong health *answer* with a valid descriptor stays closed.
-        const afterOwner = readLock(ctx);
+        const { afterOwner, descriptorState } = await readSettled(
+          () => ({ afterOwner: readLock(ctx), descriptorState: readDescriptor(ctx).state }), deadline);
         if (!shouldRetryLiveWait(error, {
-          afterOwner, owner, descriptorState: readDescriptor(ctx).state,
-          sameOwner: sameLock(owner, afterOwner),
+          afterOwner, owner, descriptorState, sameOwner: sameLock(owner, afterOwner),
         })) throw error;
       }
     }
@@ -602,16 +610,16 @@ function validateParent(ctx, identity) {
   return actual;
 }
 async function attachParent(ctx, value, identity, deadline) {
-  validateParent(ctx, identity);
+  await readSettled(() => validateParent(ctx, identity), deadline);
   while (platformNow() < deadline) {
     try {
       const response = await httpJson(value, '/internal/parent-attach', { control: true, body: identity, deadline });
       if (response.status !== 200 || response.body.ok !== true) fail('PARENT_IDENTITY_MISMATCH');
-      validateParent(ctx, identity);
+      await readSettled(() => validateParent(ctx, identity), deadline);
       return;
     } catch (error) {
       if (error?.code === 'PARENT_IDENTITY_MISMATCH') throw error;
-      const after = readLock(ctx, true);
+      const after = await readSettled(() => readLock(ctx, true), deadline);
       if (!isStudyTransportFailure(error) || after?.status !== 'alive'
         || after.pid !== identity.pid || after.startTime !== identity.startTime) {
         fail('STUDY_DESCRIPTOR_CORRUPT', transportDetail(error));
@@ -637,26 +645,42 @@ function optionsForChild(options) {
   return publishDelayMs === 0 ? { idleTimeoutMs, checkpointMs } : { idleTimeoutMs, checkpointMs, publishDelayMs };
 }
 
-// #306: on Windows a lock name deleted while another process reads it stays pending — before libuv
-// 1.49 for as long as that reader holds it, after it for the instant before the remover closes its
-// own handle — and every read of it answers EPERM: the lock read itself, and the ACL transaction's
-// listing and proof of the same path. That is the lock's release or reclaim in progress, not a
-// verdict. A read failing only that way is read again, for at most PENDING_READ_WAIT_MS of
-// consecutive failures (the remover's own wait for that reader is DELETE_PENDING_WAIT_MS) and never
-// past the call's deadline; one still failing then is thrown as it always was. Nothing is decided
-// from a failed read, so no pending lock is ever taken for alive, dead or absent.
+// #306: on Windows a name deleted while another process reads it stays pending — before libuv 1.49
+// for as long as that reader holds it, after it for the instant before the remover closes its own
+// handle — and every read of it answers EPERM: a lock or descriptor read, and the ACL listing and
+// proof of the same path. That is a release or reclaim in progress, not a verdict. Every read-only
+// step of a client call (ensure, attach, inspect, stop) goes through `readSettled`: a read failing
+// only that way is read again, never anything that writes, spawns or signals. The first failure
+// fixes a bound — PENDING_READ_WAIT_MS from then (the remover's own wait for that reader is
+// DELETE_PENDING_WAIT_MS), never past the call's deadline or the platform budget in force — that no
+// read starts after, and that each read again runs inside (its ACL proof included). A read still
+// failing then is thrown as it always was: the last pending EPERM, also when the bound ran out during
+// the read again (a spent budget, no errno). Any other failure of a read again is thrown at once.
+// Nothing is decided from a failed read, so no pending name is taken for alive, dead or absent. The
+// bound is a wait policy, not a promise that a release ends inside it.
 const PENDING_READ_WAIT_MS = 2 * DELETE_PENDING_WAIT_MS;
 export function isPendingReadFailure(error, platform = process.platform) {
   return platform === 'win32' && error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && error.fsCode === 'EPERM';
 }
-async function readSettled(read, deadline) {
-  const bound = Math.min(deadline, platformNow() + PENDING_READ_WAIT_MS);
+export async function readSettled(read, deadline, { platform = process.platform } = {}) {
+  let bound = null;
+  let pending = null;
   for (;;) {
-    try { return read(); }
-    catch (error) {
-      if (!isPendingReadFailure(error) || platformNow() >= bound) throw error;
+    let failure;
+    try { return bound === null ? read() : withPlatformDeadline(bound, read); }
+    catch (error) { failure = error; }
+    if (!isPendingReadFailure(failure, platform)) {
+      const spent = pending && platformNow() >= bound && failure?.code === 'STUDY_DESCRIPTOR_CORRUPT' && !failure.fsCode;
+      throw spent ? pending : failure;
     }
+    pending = failure;
+    if (bound === null) {
+      try { bound = Math.min(deadline, platformNow() + platformTimeout(PENDING_READ_WAIT_MS)); }
+      catch { throw pending; }
+    }
+    if (platformNow() >= bound) throw pending;
     await sleep(Math.max(1, Math.min(25, bound - platformNow())));
+    if (platformNow() >= bound) throw pending;
   }
 }
 
@@ -721,15 +745,15 @@ async function ensureOwned(ctx, options, deadline, coldDeadline) {
 // here, before the commit, instead of after it.
 async function attachExistingWithinBudget(storeDir, options) {
   const deadline = platformNow() + platformTimeout(WAIT_MS);
-  let { ctx, owner } = readContextOwnership(storeDir);
+  let { ctx, owner } = await readSettled(() => readContextOwnership(storeDir), deadline);
   if (!ctx.trainingStat) return null;
   while (owner && owner.status !== 'alive' && owner.status !== 'dead') {
     if (platformNow() >= deadline) fail('STUDY_DESCRIPTOR_CORRUPT', `owner ${owner.status} pid=${owner.pid ?? 'none'}`);
     await sleep(Math.max(1, Math.min(50, deadline - platformNow())));
-    owner = aclTransaction(ctx, () => { assertContext(ctx); return readLock(ctx); });
+    owner = await readSettled(() => aclTransaction(ctx, () => { assertContext(ctx); return readLock(ctx); }), deadline);
   }
   if (owner?.status !== 'alive') return null;
-  validateParent(ctx, options.parentIdentity);
+  await readSettled(() => validateParent(ctx, options.parentIdentity), deadline);
   const value = await waitForLiveService(ctx, owner, deadline);
   await attachParent(ctx, value, options.parentIdentity, deadline);
   return publicHandle(value);
@@ -749,7 +773,7 @@ async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
     coldDeadline = platformNow() + COLD_START_MS;
     extendPlatformDeadline(coldDeadline);
   }
-  let ctx = context(storeDir);
+  let ctx = await readSettled(() => context(storeDir), deadline);
   if (!ctx.trainingStat) {
     // Safe root identity plus positively absent training metadata authorizes
     // cold directory creation. This does not authorize a raced-in live owner.
@@ -764,7 +788,7 @@ async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
     deadline = Math.min(coldDeadline, platformNow() + platformTimeout(WAIT_MS));
     extendPlatformDeadline(deadline);
   }
-  if (options.parentIdentity !== undefined) validateParent(ctx, options.parentIdentity);
+  if (options.parentIdentity !== undefined) await readSettled(() => validateParent(ctx, options.parentIdentity), deadline);
   let pending = inFlight.get(ctx.storeIdentity);
   if (!pending) {
     pending = ensureOwned(ctx, options, deadline, coldDeadline);
@@ -777,7 +801,7 @@ async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
   })]).finally(() => clearTimeout(timer));
   deadline = platformNow() + platformTimeout(WAIT_MS);
   // Revalidate the caller's own context after awaiting another concurrent ensure.
-  const { current, owner } = aclTransaction(ctx, () => ({ current: readDescriptor(ctx), owner: readLock(ctx) }));
+  const { current, owner } = await readSettled(() => aclTransaction(ctx, () => ({ current: readDescriptor(ctx), owner: readLock(ctx) })), deadline);
   const restored = current.state === 'valid' ? current.value
     : await waitForLiveService(ctx, owner, deadline, { expectedInstanceId: value.instanceId });
   if (JSON.stringify(restored) !== JSON.stringify(value) || !descriptorMatches(value, ctx, owner)) fail();
