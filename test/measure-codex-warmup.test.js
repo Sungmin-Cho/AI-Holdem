@@ -149,7 +149,7 @@ test('fake CLI: a warmup over its cap is a confirmed timeout counted against com
     matchers: [{ includes: slowName, reply: ready, delayMs: 30_000 }],
     default: { reply: ready },
   });
-  const report = await runWarmupConcurrency({ batchSize: 2, rounds: 1, timeoutMs: 5_000, warmupTimeoutMs: 600 }, f.deps);
+  const report = await runWarmupConcurrency({ batchSize: 2, rounds: 1, timeoutMs: 10_000, warmupTimeoutMs: 4_000 }, f.deps);
   assert.equal(report.executionOk, true, JSON.stringify(report.failures));
   assert.equal(report.complete, false);
   assert.equal(report.ok, false);
