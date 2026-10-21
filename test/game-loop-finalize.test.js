@@ -36,6 +36,7 @@ import { createCoachControl, UNAVAILABLE_TEXT } from '../tools/coach-control.js'
 import { defaultEvaluate } from '../tools/training-pipeline.js';
 import { createSessionManager } from '../tools/session-manager.js';
 import { inspectStudyService, stopStudyService } from '../tools/study-service.js';
+import { spawnCli } from '../tools/player-runtime.js';
 import {
   execFileAsync,
   ROOT,
@@ -672,6 +673,117 @@ test('#247 a live coach recorded with the owned start time is confirmed by that 
   assert.equal(legacyReads, 0, 'an owned handle is never read with the legacy reader');
   assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts
     .find((row) => row.generation === 1)?.cleanupState, 'released');
+});
+
+// #311: the adapter starts every POSIX CLI child as the leader of its own process group (#297), and
+// a recorded coach is that child — for codex, its npm launcher. The launcher forwards SIGTERM to the
+// native child and waits for it; a native that ignores SIGTERM keeps it waiting. A SIGKILL of the
+// launcher pid alone then left the native running while the row was released on the launcher's
+// death. The recorded identity is signalled through its process group, so both end.
+test('#311 a recorded coach whose grandchild outlives SIGTERM is ended with that grandchild', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  if (skipOnWin32(t, 'POSIX process groups; a win32-v1 record is terminated through its handle and a Node launcher Job ends its children')) return;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const grandchild = "process.on('SIGTERM', () => {}); process.stdout.write('grand ' + process.pid + '\\n'); setInterval(() => {}, 1000);";
+  const launcher = `const { spawn } = require('node:child_process');
+const child = spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'inherit' });
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { try { child.kill(sig); } catch {} });
+child.on('exit', (code) => process.exit(code ?? 1));`;
+  let out = '';
+  let grandPid = null;
+  const cli = spawnCli({
+    command: process.execPath, args: ['-e', launcher], cwd: os.tmpdir(), env: process.env, input: '',
+    observe: (event) => {
+      if (event.type !== 'stdout') return;
+      out += event.chunk;
+      grandPid ??= Number(/grand (\d+)/.exec(out)?.[1]) || null;
+    },
+  });
+  t.after(() => { try { process.kill(-cli.pid, 'SIGKILL'); } catch { /* already gone */ } });
+  await waitFor(() => grandPid, 'the grandchild did not start');
+  await seedRunningCoach(gameDir, 'old-owner', 1, { pid: cli.pid }, { startTimeOf: ownedProcessStartTime });
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: { orphanTerminateGraceMs: 200, orphanTerminateKillWaitMs: 2_000 },
+  });
+  await loop.resume();
+  await waitFor(() => upper.starts.length >= 1, 'the replacement coach did not start');
+  assert.equal((await loop.run()).phase, 'done');
+  assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts
+    .find((row) => row.generation === 1)?.cleanupState, 'released');
+  // Released on the launcher's death: the grandchild must not have outlived it.
+  await waitUntilDead(grandPid, 2_000);
+  await cli.closed;
+});
+
+// #311: a coach recorded before #297 leads no process group. Its group signal answers ESRCH and the
+// pid is signalled as before; the test runner, whose group that child shares, is never reached.
+test('#311 a recorded coach that leads no process group is signalled by its pid alone', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  if (skipOnWin32(t, 'POSIX process groups')) return;
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan({ ignoreTerm: false });
+  t.after(() => terminateIfAlive(orphan));
+  await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: ownedProcessStartTime });
+  const groups = [];
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      recordedGroupSignal: (pid, signal) => {
+        groups.push({ pid, signal });
+        process.kill(-pid, signal);
+      },
+    },
+  });
+  await loop.resume();
+  await waitFor(() => upper.starts.length >= 1, 'the replacement coach did not start');
+  assert.equal((await loop.run()).phase, 'done');
+  await waitUntilDead(orphan.pid);
+  assert.deepEqual(groups, [{ pid: orphan.pid, signal: 'SIGTERM' }], 'the group was tried first, and answered ESRCH');
+  assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts
+    .find((row) => row.generation === 1)?.cleanupState, 'released');
+});
+
+// #311: a group signal that fails any other way (EPERM: a member this user may not signal) is a
+// signal that did not go through. The pid is not tried instead, and nothing is released.
+test('#311 a recorded coach whose group signal fails is not signalled by pid and stays unconfirmed', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await seedFinishedGame(gameDir);
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const orphan = await startCoachOrphan({ ignoreTerm: false });
+  t.after(() => terminateIfAlive(orphan));
+  await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: ownedProcessStartTime });
+  const groups = [];
+  const signalled = [];
+  const upper = makeCoachAdapter();
+  const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+    upper,
+    stateOverrides: { port: external.lock.port },
+    loopOpts: {
+      finalizeBudgetMs: 3_000 * WIN32_SCALE,
+      finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
+      // The pid path of every other process the loop signals stays real.
+      signalProcess: (pid, signal) => { signalled.push({ pid, signal }); process.kill(pid, signal); },
+      recordedTerminator: null,
+      recordedGroupSignal: (pid, signal) => {
+        groups.push({ pid, signal });
+        throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      },
+    },
+  });
+  await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED' && /SIGNAL_FAILED/.test(error.message));
+  assert.doesNotThrow(() => process.kill(orphan.pid, 0));
+  assert.deepEqual(groups, [{ pid: orphan.pid, signal: 'SIGTERM' }]);
+  assert.deepEqual(signalled.filter((entry) => entry.pid === orphan.pid), [], 'no pid signal after the group signal failed');
 });
 
 // Where the start time is fixed at creation (Windows, macOS) another owned reading is a
