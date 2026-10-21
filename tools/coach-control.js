@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
-import { childSpawnOptions } from '../shared/child-spawn-options.js';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { withNamedLock, writeJsonAtomic, ownedProcessStartTime as defaultOwnedProcessStartTime } from '../engine/state.js';
@@ -709,9 +707,10 @@ function sealUnavailable(auth, {
 }
 
 // #292: why a queued note may be withheld. The publisher's own judgment of the note against
-// the rule the relay applies (assertHostText) refused it; nothing else (a relay answer, a
+// the rule the relay applies (assertHostText) refused it, or (#310) the claim rule a fresh
+// note is held to (coachingClaimAllowed) refuses its text; nothing else (a relay answer, a
 // network failure, an unreadable record) withholds one.
-const WITHHOLD_REASONS = new Set(['FORBIDDEN_LITERAL']);
+const WITHHOLD_REASONS = new Set(['FORBIDDEN_LITERAL', 'REFERENCE_AUTHORITY_CLAIM']);
 
 // #292: a note accepted under an earlier rule and not yet published can be refused by the
 // current one, and resending it forever would hold every later publication. Withholding moves
@@ -1180,9 +1179,13 @@ export function createCoachControl(deps = {}) {
     });
   }
 
+  // #310: accept only. Publishing a coach note is the loop's alone: its publish gate judges the
+  // note against the participant-card and claim rules and withholds a refused one (#292), and a
+  // publisher handed the envelope directly would skip all of that.
   async function watchAccept({
     gameDir, owner, handNo, generation, forbiddenLiterals = [], pollMs = 200, publish = false,
   }) {
+    if (publish) fail('USAGE', 'watch-accept --publish는 지원하지 않습니다. 코치 노트는 루프의 게시 관문만 게시합니다.');
     for (;;) {
       let out;
       try {
@@ -1194,25 +1197,7 @@ export function createCoachControl(deps = {}) {
           throw error;
         }
       }
-      if (out.ok) {
-        if (publish) {
-          const auth = loadAuthorityFile(gameDir);
-          const item = auth.publishQueue[keyOf(handNo)];
-          if (!item?.exactEnvelopePath) fail('NO_ENVELOPE');
-          const publisher = path.join(path.dirname(fileURLToPath(import.meta.url)), 'publish.js');
-          const spawned = spawnSync(process.execPath, [
-            publisher, '--from', item.exactEnvelopePath, '--lock-wait-ms', '15000',
-          ], childSpawnOptions({ encoding: 'utf8' }));
-          let published;
-          try {
-            published = JSON.parse(String(spawned.stdout).trim().split('\n').at(-1));
-          } catch {
-            published = { ok: false, code: 'PUBLISH_FAILED', stderr: spawned.stderr };
-          }
-          return { ...out, published };
-        }
-        return out;
-      }
+      if (out.ok) return out;
       if (out.code === 'NO_RESULT' || out.code === 'MISSING_PATH') {
         await sleep(pollMs);
         continue;

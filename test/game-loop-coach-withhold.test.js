@@ -408,3 +408,146 @@ for (const [name, spoil] of [
     assert.equal(sent.some((args) => args.includes(queued.exactEnvelopePath)), false);
   });
 }
+
+// #310: the claim rule a fresh note is held to (coachingClaimAllowed) can change between
+// versions too, and the relay does not apply it. A queued note it refuses now gets what a fresh
+// one would: withheld for good (text kept on disk, never sent) and the hand's unavailable note
+// published in its place. The participant-card rule decides first.
+const CLAIM = '이 콜은 EV 손실이 1.5bb입니다.';
+
+// A solo game (user and one AI) whose first hand is over, with a coach note for it accepted
+// and queued as an earlier claim rule would have done.
+async function soloGameWithQueuedNote(t, text = CLAIM) {
+  const gameDir = tmpGame();
+  const first = newLoop(t, gameDir);
+  await first.bootstrap({ ai: 1, stack: 100 });
+  putAiFirst(gameDir);
+  await cliJson(gameDir, ['step', '--new-hand']);
+  await cliJson(gameDir, ['apply', 'p1', 'fold']);
+  await cliJson(gameDir, ['step']);
+  assert.equal(readJson(path.join(gameDir, 'state.json')).lastHand?.handNo, 1);
+  const cc = createCoachControl();
+  const owner = readJson(path.join(gameDir, 'loop-state.json')).ownerSessionId;
+  const statsFile = path.join(gameDir, '.test-coach-stats.json');
+  fs.writeFileSync(statsFile, JSON.stringify({ perPlayer: { user: { sample: 1, vpip: 0 } } }));
+  const snapshotFile = path.join(gameDir, 'ui-snapshot.json');
+  const begun = await cc.beginOwner({ gameDir, owner, completed: 1, statsFile, snapshotFile });
+  const descriptor = begun.descriptors.find((row) => row.handNo === 1);
+  fs.writeFileSync(descriptor.exactResultPath, `${JSON.stringify({ handNo: 1, text })}\n`);
+  const accepted = await cc.accept({ gameDir, owner, handNo: 1, generation: descriptor.generation });
+  assert.equal(accepted.ok, true, JSON.stringify(accepted));
+  return { gameDir, first, cc, queued: cc.loadAuthority(gameDir).publishQueue['1'], snapshotFile };
+}
+
+function assertClaimWithheld(gameDir, cc, queued, text = CLAIM) {
+  const auth = cc.loadAuthority(gameDir);
+  assert.equal(auth.publishQueue['1'], undefined);
+  const [evidence] = auth.withheldPublications ?? [];
+  assert.deepEqual([evidence?.queueId, evidence?.reason], [queued.queueId, 'REFERENCE_AUTHORITY_CLAIM']);
+  assert.equal(auth.publishedSeals['1'].queueId, evidence.replacementQueueId);
+  assert.equal(auth.publishedSeals['1'].noteKind, 'unavailable');
+  assert.ok(fs.readFileSync(queued.exactEnvelopePath, 'utf8').includes(text));
+  const snapshot = readJson(path.join(gameDir, 'ui-snapshot.json'));
+  assert.equal(JSON.stringify(snapshot).includes(text), false);
+  assert.deepEqual(snapshot.coach.filter((note) => note.handNo === 1).map((note) => [note.text, note.unavailable]), [[UNAVAILABLE_TEXT, true]]);
+  return evidence;
+}
+
+test('#310 재개는 현재 문구 규칙이 거절할 큐 노트를 보내지 않고 보류한 뒤 unavailable 노트를 게시한다', { timeout: TIMEOUT }, async (t) => {
+  const { gameDir, first, cc, queued } = await soloGameWithQueuedNote(t);
+  await first.requestStop();
+  const sent = [];
+  const restarted = newLoop(t, gameDir, { onPublishInvoke: (args) => sent.push(args) });
+  await restarted.resume();
+  await restarted.requestStop();
+  assertClaimWithheld(gameDir, cc, queued);
+  assert.equal(sent.some((args) => args.includes(queued.exactEnvelopePath)), false);
+  const withheld = readLoopLog(gameDir).filter((row) => row.event === 'coach-publish-withheld');
+  assert.deepEqual(withheld.map((row) => [row.handNo, row.outcome, row.reason]), [[1, 'withheld', 'REFERENCE_AUTHORITY_CLAIM']]);
+});
+
+// What the publisher records before it sends a queued envelope, left behind when the answer is lost.
+async function recordAttemptOf(gameDir, item, publishId = 41) {
+  const { gameEpochOf } = await import('../publish-contract.js');
+  const envelope = readJson(item.exactEnvelopePath);
+  const record = {
+    expectedGameEpoch: gameEpochOf(readJson(path.join(gameDir, 'state.json')).sessionToken),
+    body: { publishId, coach: envelope.coach },
+    coachAuthority: envelope.coachAuthority,
+  };
+  fs.writeFileSync(attemptFile(gameDir), JSON.stringify(record));
+  return record;
+}
+
+test('#310 문구 규칙에 걸리는 노트의 기록 attempt는 보류 뒤 보내지 않고 지워지고 증거에 그 attempt가 남는다', { timeout: TIMEOUT }, async (t) => {
+  const { gameDir, first, cc, queued } = await soloGameWithQueuedNote(t);
+  await first.requestStop();
+  const recorded = await recordAttemptOf(gameDir, queued);
+  const restarted = newLoop(t, gameDir);
+  await restarted.resume();
+  const running = startRun(restarted);
+  await waitFor(
+    () => readLoopLog(gameDir).some((row) => row.event === 'resume-archive-check'),
+    'the resume entry did not get past the recorded attempt',
+    20_000 * WIN32_SCALE,
+  );
+  await restarted.requestStop();
+  const failure = await running.then(() => null, (error) => error);
+  assert.equal(failure, null, failure?.code);
+  assert.equal(fs.existsSync(attemptFile(gameDir)), false);
+  const evidence = assertClaimWithheld(gameDir, cc, queued);
+  assert.equal(evidence.attemptPublishId, recorded.body.publishId);
+  assert.deepEqual(JSON.parse(JSON.parse(fs.readFileSync(evidence.attemptEvidencePath, 'utf8')).raw), recorded);
+});
+
+test('#310 큐 항목에 묶이지 않은 문구 위반 노트는 지금처럼 REFERENCE_AUTHORITY_CLAIM으로 멈추고 아무것도 바꾸거나 보내지 않는다', { timeout: TIMEOUT }, async (t) => {
+  const { gameDir, first, cc, queued } = await soloGameWithQueuedNote(t, '핸드 1의 폴드는 무난했습니다.');
+  // The envelope keeps its authority, but its note is not the one the item was queued with.
+  const envelope = readJson(queued.exactEnvelopePath);
+  envelope.coach[0].text = CLAIM;
+  fs.writeFileSync(queued.exactEnvelopePath, JSON.stringify(envelope));
+  await first.requestStop();
+  const sent = [];
+  const restarted = newLoop(t, gameDir, { onPublishInvoke: (args) => sent.push(args) });
+  const failure = await restarted.resume().then(() => null, (error) => error);
+  await restarted.requestStop();
+  assert.equal(failure?.code, 'REFERENCE_AUTHORITY_CLAIM');
+  const auth = cc.loadAuthority(gameDir);
+  assert.equal(auth.publishQueue['1'].queueId, queued.queueId);
+  assert.equal(auth.withheldPublications, undefined);
+  assert.equal(sent.some((args) => args.includes(queued.exactEnvelopePath)), false);
+  const snapshotFile = path.join(gameDir, 'ui-snapshot.json');
+  assert.equal(fs.existsSync(snapshotFile) && fs.readFileSync(snapshotFile, 'utf8').includes(CLAIM), false);
+});
+
+test('#310 두 규칙에 모두 걸리는 노트는 참가자 카드 사유(FORBIDDEN_LITERAL)로 보류한다', { timeout: TIMEOUT }, async (t) => {
+  const { gameDir, first, cc, queued, leak } = await multiGameWithQueuedLeak(t, {
+    note: (hidden) => `h1이 버린 ${hidden}로는 이 콜의 EV 손실이 1.5bb입니다.`,
+  });
+  await first.requestStop();
+  const restarted = newLoop(t, gameDir);
+  await restarted.resume();
+  await restarted.requestStop();
+  assertWithheld(gameDir, cc, queued, leak);
+});
+
+test('#310 큐가 이미 지나간(stale) 문구 위반 기록은 문구 검사에 막히지 않고 publisher가 보내지 않고 지운다', { timeout: TIMEOUT }, async (t) => {
+  const { gameDir, first, cc, queued } = await soloGameWithQueuedNote(t);
+  await first.requestStop();
+  await recordAttemptOf(gameDir, queued);
+  // The queue moved past the recorded item without sealing or withholding it.
+  const authPath = path.join(gameDir, '.coach-authority.json');
+  const auth = readJson(authPath);
+  delete auth.publishQueue['1'];
+  fs.writeFileSync(authPath, JSON.stringify(auth));
+  const sent = [];
+  const restarted = newLoop(t, gameDir, { onPublishInvoke: (args) => sent.push(args) });
+  await restarted.resume();
+  const failure = await startRun(restarted).then(() => null, (error) => error);
+  await restarted.requestStop();
+  assert.equal(fs.existsSync(attemptFile(gameDir)), false, `the stale record was removed: ${failure?.code}`);
+  assert.ok(sent.some((args) => args.includes('--retry')), 'the stale record went to the publisher');
+  const snapshotFile = path.join(gameDir, 'ui-snapshot.json');
+  assert.equal(fs.existsSync(snapshotFile) && fs.readFileSync(snapshotFile, 'utf8').includes(CLAIM), false);
+  assert.equal(cc.loadAuthority(gameDir).withheldPublications, undefined);
+});

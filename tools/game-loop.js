@@ -1626,6 +1626,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // attempt of the withheld note is then stale, and the publisher removes exactly that record
   // unsent; a queued envelope is replaced by its successor. Returns null when the body goes
   // out as it is.
+  // #310: the claim rule a fresh note is held to (validateCoachNote) can change between versions
+  // too, and the relay does not apply it: a queued note it refuses now gets what a fresh one
+  // would (the hand's unavailable note), its stored text never rewritten. The participant-card
+  // rule decides first; a note both refuse is withheld as FORBIDDEN_LITERAL.
   const withheldCoachPublication = async (args, { replaying, record, envelope }) => {
     const body = replaying ? record?.body : envelope;
     const notes = Array.isArray(body?.coach) ? body.coach : [];
@@ -1634,37 +1638,46 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (verdicts.includes('FORBIDDEN_LITERAL_UNAVAILABLE')) {
       throw codedError('FORBIDDEN_LITERAL_UNAVAILABLE', '코치 노트의 참가자 카드 판정 자료를 읽지 못해 게시하지 않았습니다.');
     }
-    if (!verdicts.includes('FORBIDDEN_LITERAL')) return null;
+    let reason = null;
+    if (verdicts.includes('FORBIDDEN_LITERAL')) reason = 'FORBIDDEN_LITERAL';
+    else if (notes.some((note) => !coachingClaimAllowed(note?.text))) reason = 'REFERENCE_AUTHORITY_CLAIM';
+    if (!reason) return null;
     const authority = replaying ? record?.coachAuthority : envelope?.coachAuthority;
     const handNo = notes[0]?.handNo;
     // The note judged must be the queue item's own, and the body carry nothing else: exactly
     // the proof-bearing form of that item (isBoundCoachNote), so every string judged is one its
-    // digest covers. Anything else withholds nothing and is not sent.
+    // digest covers. Anything else withholds nothing and is not sent: a claim the gate below
+    // refuses as before (REFERENCE_AUTHORITY_CLAIM).
     const coachOnly = replaying
       ? isCoachOnlyAttempt(record)
       : Object.keys(envelope ?? {}).every((key) => key === 'coach' || key === 'coachAuthority');
     if (!coachOnly || notes.length !== 1 || typeof authority?.exactEnvelopePath !== 'string'
       || !isBoundCoachNote(notes[0], authority)) {
+      if (reason === 'REFERENCE_AUTHORITY_CLAIM') return null;
       throw codedError('COACH_WITHHOLD_UNBOUND', '다른 참가자의 카드를 인용한 코치 노트가 큐 항목에 묶여 있지 않아 게시하지 않았습니다.');
     }
     // Only the queue item the body was made for. A body the queue has already moved past is
     // the publisher's to discard as stale — unless it was a withholding that moved it, which
-    // a stop may have interrupted before the attempt was removed.
+    // a stop may have interrupted before the attempt was removed. Stale stays stale (a queueId
+    // names its game and generation, and generations only grow), and the publisher compares
+    // the item under its lock before any POST, so the body goes to it without the claim check
+    // below. Not bound to the record: a record of another game is the publisher's to remove
+    // (STALE_GAME_ATTEMPT), and a binding would leave it in place (ATTEMPT_CHANGED).
     const auth = readCoachAuthority();
     const current = auth?.publishQueue?.[String(handNo)]?.queueId === authority.queueId;
     const withheld = (auth?.withheldPublications ?? []).some((row) => row.queueId === authority.queueId);
-    if (!current && !withheld) return null;
+    if (!current && !withheld) return { stale: true };
     const out = await runCoach([
       'withhold-queued',
       '--hand', String(handNo),
       '--queue-id', authority.queueId,
       '--payload-sha256', String(authority.payloadSha256),
       '--envelope-path', authority.exactEnvelopePath,
-      '--reason', 'FORBIDDEN_LITERAL',
+      '--reason', reason,
       '--snapshot-file', coachSnapshotPath,
       ...(replaying ? ['--attempt-body-sha256', sha256Text(JSON.stringify(record?.body ?? null))] : []),
     ]);
-    log('coach-publish-withheld', { handNo, outcome: out?.outcome ?? 'UNKNOWN', reason: 'FORBIDDEN_LITERAL', retry: replaying });
+    log('coach-publish-withheld', { handNo, outcome: out?.outcome ?? 'UNKNOWN', reason, retry: replaying });
     // The recorded attempt now names a queue item that is no longer queued.
     if (replaying) return { result: { ...(await discardSettledAttempt(args, record)), withheld: true } };
     const next = readCoachAuthority()?.publishQueue?.[String(handNo)];
@@ -1723,6 +1736,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     const withheld = retiring ? null : await withheldCoachPublication(args, { replaying, record, envelope });
     if (withheld?.result) return withheld.result;
+    if (withheld?.stale) return spawnPublish(args);
     if (withheld) {
       args = withheld.args;
       envelope = withheld.envelope;

@@ -253,3 +253,23 @@ test('#292 withhold-queued CLI는 결과를 JSON으로 쓰고 인자가 모자�
   assert.deepEqual([out.ok, out.outcome], [true, 'withheld']);
   assert.equal(ctx.cc.loadAuthority(ctx.dir).withheldPublications[0].attemptPublishId, 3);
 });
+
+// #310: the claim rule a fresh note is held to can change between versions too. A queued note
+// it refuses now is withheld the same way, its reason kept on the evidence row and the
+// replacement envelope; any other reason is still refused.
+test('#310 withhold-queued는 문구 규칙 사유(REFERENCE_AUTHORITY_CLAIM)도 받고 사유를 증거와 대체 envelope에 남긴다', async () => {
+  const ctx = setup();
+  const item = await queueNote(ctx, { handNo: 1, text: '이 콜은 EV 손실이 1.5bb입니다.' });
+  const out = await ctx.cc.withholdQueued(withholdArgs(ctx, item, { reason: 'REFERENCE_AUTHORITY_CLAIM' }));
+  assert.equal(out.outcome, 'withheld');
+  const auth = ctx.cc.loadAuthority(ctx.dir);
+  assert.deepEqual([auth.withheldPublications[0].queueId, auth.withheldPublications[0].reason], [item.queueId, 'REFERENCE_AUTHORITY_CLAIM']);
+  const envelope = JSON.parse(fs.readFileSync(auth.publishQueue['1'].exactEnvelopePath, 'utf8'));
+  assert.equal(envelope.coachAuthority.reason, 'withheld:REFERENCE_AUTHORITY_CLAIM');
+  assert.deepEqual(envelope.coach.map((note) => [note.text, note.unavailable]), [[UNAVAILABLE_TEXT, true]]);
+  const other = setup();
+  const otherItem = await queueNote(other, { handNo: 1, text: '이 콜은 EV 손실이 1.5bb입니다.' });
+  const before = fs.readFileSync(path.join(other.dir, '.coach-authority.json'), 'utf8');
+  await assert.rejects(other.cc.withholdQueued(withholdArgs(other, otherItem, { reason: 'PUBLISH_REJECTED' })), { code: 'USAGE' });
+  assert.equal(fs.readFileSync(path.join(other.dir, '.coach-authority.json'), 'utf8'), before);
+});
