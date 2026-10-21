@@ -13,7 +13,7 @@ import {
   readOwnedLock,
   writeJsonAtomic,
 } from '../engine/state.js';
-import { createStartTimeProbe, reusedPidRecord, skipOnWin32 } from './helpers/platform.js';
+import { createStartTimeProbe, isRunning, reusedPidRecord, skipOnWin32 } from './helpers/platform.js';
 import {
   createGameLoop,
   exitCodeFor,
@@ -9003,6 +9003,35 @@ test('interruptDecision is identity-bound and waits for confirmed attempt outcom
   assert.equal(after.code,'INTERRUPTED');assert.equal(after.category,'interrupted');assert.equal(after.softWait,false);assert.equal(after.closeConfirmed,true);assert.equal(after.status,'recovery_required');
   assert.deepEqual(readJson(path.join(gameDir,'state.json')).hand.actions,[]);
   assert.deepEqual(await loop.interruptDecision(identity),{interrupted:false});
+});
+// #297: codex의 npm 런처는 실제 바이너리를 상속 stdio의 자식으로 돌린다. 직계 pid만 SIGKILL하면 그 손자가 stdio를
+// 쥔 채 남아 close가 오지 않고, 사용자의 "AI 취소"가 CHILD_CLOSE_UNCONFIRMED(unsafe)로 끝났다. 실제 어댑터에 그 모양의
+// 가짜 CLI(`wrapper: true`)를 물려 중단이 확인된 INTERRUPTED로 끝나는지 본다.
+test('#297 interruptDecision through the real codex adapter ends the launcher grandchild and records a confirmed INTERRUPTED', {timeout:30000*WIN32_SCALE},async t=>{
+  if (skipOnWin32(t,'POSIX process groups; win32 keeps direct-child termination')) return;
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'holdem-297-wrapper-'));
+  t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const scriptPath=path.join(dir,'script.json'),logPath=path.join(dir,'calls.jsonl');
+  const ready=`${JSON.stringify({type:'thread.started',thread_id:'th-297'})}\n${JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'ready'}})}\n`;
+  fs.writeFileSync(scriptPath,JSON.stringify({wrapper:true,matchers:[{argvIncludes:'resume',delayMs:30_000,reply:''}],default:{reply:ready}}));
+  const adapter=createPlayerRuntime('codex',{env:{FAKE_CLI_SCRIPT:scriptPath,FAKE_CLI_LOG:logPath},terminateKillWaitMs:1000,
+    exec:(spec)=>spawnCli({...spec,command:process.execPath,args:[path.join(ROOT,'test/helpers/fake-cli.js'),...spec.args]})});
+  const rows=()=>(fs.existsSync(logPath)?fs.readFileSync(logPath,'utf8'):'').split('\n').filter(Boolean).map(JSON.parse);
+  const running=isRunning;
+  const leafOf=()=>rows().find(row=>Array.isArray(row.argv)&&row.argv.includes('resume'));
+  t.after(()=>{const leaf=leafOf();if(leaf&&running(leaf.pid)){try{process.kill(leaf.pid,'SIGKILL');}catch{}}});
+  const {gameDir,loop}=await setupAiFirst(t,{adapter,loopOpts:{playerBudget:{softMs:200,hardMs:20_000}}});
+  const run=loop.run();const recovered=assert.rejects(run,{code:'PLAYER_RECOVERY_REQUIRED'});
+  await waitFor(()=>leafOf()&&readJson(path.join(gameDir,'loop-state.json')).pendingDecision?.softWait===true,'decide child was not ready');
+  const leaf=leafOf();
+  assert.ok(rows().some(row=>row.wrapperPid&&row.childPid===leaf.pid),'the decision runs in the launcher grandchild');
+  const pending=readJson(path.join(gameDir,'loop-state.json')).pendingDecision;
+  assert.deepEqual(await loop.interruptDecision({gameEpoch:pending.gameEpoch,decisionId:pending.decisionId,generation:pending.generation}),{interrupted:true});
+  await recovered;
+  const after=readJson(path.join(gameDir,'loop-state.json')).pendingDecision;
+  assert.equal(after.code,'INTERRUPTED');assert.equal(after.closeConfirmed,true);assert.equal(after.status,'recovery_required');
+  await waitFor(()=>!running(leaf.pid),'the grandchild is still running after the interrupt');
+  assert.deepEqual(readJson(path.join(gameDir,'state.json')).hand.actions,[],'an interrupt never picks an action');
 });
 test('a valid response wins an interrupt racing before proposedAction commit', {timeout:20000*WIN32_SCALE},async t=>{
   let loop,gameDir,answer;

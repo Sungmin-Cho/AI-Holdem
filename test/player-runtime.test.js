@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { skipOnWin32 } from './helpers/platform.js';
+import { isRunning, skipOnWin32, waitExited } from './helpers/platform.js';
 import crypto from 'node:crypto';
 import {
   RUNTIME_TABLE,
@@ -134,13 +134,14 @@ function fakeRuntime(kind = 'claude', script = {}, opts = {}) {
   const logPath = path.join(dir, 'calls.jsonl');
   fs.writeFileSync(scriptPath, JSON.stringify({ default: { reply: 'ready' }, ...script }));
   const kills = [];
+  const killAt = [];
   const handles = [];
   const rt = createPlayerRuntime(kind, {
     env: { FAKE_CLI_SCRIPT: scriptPath, FAKE_CLI_LOG: logPath },
     exec: (spec) => {
       const handle = spawnCli({ ...spec, command: process.execPath, args: [FAKE_CLI, ...spec.args] });
       handles.push(handle);
-      return { ...handle, kill: (signal) => { kills.push(signal); return handle.kill(signal); } };
+      return { ...handle, kill: (signal) => { kills.push(signal); killAt.push(Date.now()); return handle.kill(signal); } };
     },
     ...opts,
   });
@@ -149,6 +150,7 @@ function fakeRuntime(kind = 'claude', script = {}, opts = {}) {
   return {
     rt,
     kills,
+    killAt,
     calls,
     last: () => calls().at(-1),
     cleanup: () => { for (const h of handles) { try { h.kill('SIGKILL'); } catch { /* 이미 종료 */ } } },
@@ -628,6 +630,232 @@ test('decide 타임아웃은 SIGKILL 후 실제 close가 확인된 뒤에만 TIM
   } finally {
     f.cleanup();
   }
+});
+
+// #297: codex npm 런처는 실제 바이너리를 상속 stdio의 자식으로 돌린다. 직계(래퍼)만 SIGKILL하면 손자가 stdio를 쥔 채
+// 요청을 끝까지 수행해 close가 오지 않는다. 래퍼 모드 fake CLI(`wrapper: true`)가 그 모양을 그대로 흉내 낸다.
+function wrappedCall(f) {
+  const wrapper = f.calls().find((entry) => Number.isInteger(entry.wrapperPid));
+  const call = f.calls().find((entry) => Array.isArray(entry.argv));
+  return { wrapper, call };
+}
+
+function killRecordedGrandchild(f) {
+  // 테스트가 띄운 손자 pid(래퍼 로그와 손자 로그가 일치할 때만)만 정리한다 — 패턴으로 고르지 않는다.
+  const { wrapper, call } = wrappedCall(f);
+  if (wrapper && call && wrapper.childPid === call.pid && isRunning(call.pid)) {
+    try { process.kill(call.pid, 'SIGKILL'); } catch { /* 이미 종료 */ }
+  }
+}
+
+// 손자가 준비(로그 기록 = TERM 핸들러 설치·stdin 수신 뒤)를 마친 뒤에 신호가 갔어야 재현이 성립한다.
+function assertSignalledAfterReady(f, call) {
+  assert.ok(f.killAt.length > 0, '신호가 없었다');
+  assert.ok(call.readyAt <= f.killAt[0], `손자가 준비되기 전에 신호가 갔다(ready ${call.readyAt}, kill ${f.killAt[0]})`);
+}
+
+async function waitForCall(f, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!wrappedCall(f).call && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+  return wrappedCall(f).call;
+}
+
+test('#297 decide 타임아웃: 래퍼의 손자가 stdio를 쥐어도 그룹째 끝내고 close를 확인한 뒤 TIMEOUT', { timeout: 10_000 }, async (t) => {
+  if (skipOnWin32(t, 'POSIX process groups; win32 keeps direct-child termination')) return;
+  const f = fakeRuntime('codex', { wrapper: true, default: { reply: 'late', delayMs: 30_000 } });
+  try {
+    await assert.rejects(
+      f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 1500 }),
+      (error) => error.code === 'TIMEOUT',
+    );
+    const { wrapper, call } = wrappedCall(f);
+    assert.ok(wrapper && call, '래퍼와 손자가 모두 기록되어야 한다');
+    assert.equal(wrapper.childPid, call.pid, '응답을 맡은 프로세스는 래퍼의 자식이다');
+    assertSignalledAfterReady(f, call);
+    assert.equal(await waitExited(call.pid), true, '손자가 타임아웃 뒤에도 실행 중이다');
+    assert.deepEqual(f.kills, ['SIGKILL']);
+  } finally {
+    killRecordedGrandchild(f);
+    f.cleanup();
+  }
+});
+
+test('#297 decide 중단: 래퍼의 손자까지 끝내고 close를 확인한 뒤 INTERRUPTED', { timeout: 10_000 }, async (t) => {
+  if (skipOnWin32(t, 'POSIX process groups; win32 keeps direct-child termination')) return;
+  const f = fakeRuntime('codex', { wrapper: true, default: { reply: 'late', delayMs: 30_000 } });
+  const controller = new AbortController();
+  try {
+    const pending = f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 20_000, signal: controller.signal });
+    assert.ok(await waitForCall(f), '손자가 준비되지 않았다');
+    controller.abort();
+    await assert.rejects(pending, (error) => error.code === 'INTERRUPTED');
+    const { call } = wrappedCall(f);
+    assertSignalledAfterReady(f, call);
+    assert.equal(await waitExited(call.pid), true, '중단 뒤 손자가 실행 중이다');
+  } finally {
+    killRecordedGrandchild(f);
+    f.cleanup();
+  }
+});
+
+test('#297 oneshot terminate: SIGTERM을 무시하는 손자도 SIGKILL 단계에서 그룹째 끝나 confirmed', { timeout: 10_000 }, async (t) => {
+  if (skipOnWin32(t, 'POSIX process groups; SIGTERM is TerminateProcess on win32')) return;
+  const f = fakeRuntime(
+    'codex',
+    { wrapper: true, default: { reply: '늦은 본문', delayMs: 30_000, ignoreTerm: true } },
+    { terminateGraceMs: 300, terminateKillWaitMs: 2000 },
+  );
+  try {
+    const handle = f.rt.oneshotStart({ tier: 'upper', prompt: 'p', timeoutMs: 5000 });
+    assert.ok(await waitForCall(f), '손자가 준비되지 않았다');
+    assert.deepEqual(await handle.terminate(), { confirmed: true });
+    assert.deepEqual(f.kills, ['SIGTERM', 'SIGKILL'], 'TERM을 무시하는 손자 때문에 KILL 단계까지 간다');
+    assertSignalledAfterReady(f, wrappedCall(f).call);
+    assert.equal(await waitExited(wrappedCall(f).call.pid), true, '손자가 실행 중이다');
+    await assert.rejects(handle.done);
+  } finally {
+    killRecordedGrandchild(f);
+    f.cleanup();
+  }
+});
+
+function spyProcessKill(t) {
+  const sent = [];
+  const original = process.kill;
+  t.after(() => { process.kill = original; });
+  process.kill = function spy(pid, signal) { sent.push([pid, signal]); return original.call(process, pid, signal); };
+  return sent;
+}
+
+async function releaseHolder(f, release) {
+  if (!fs.existsSync(release)) fs.writeFileSync(release, '');
+  const orphanPid = f.calls().find((entry) => Number.isInteger(entry.orphanPid))?.orphanPid;
+  if (orphanPid) assert.equal(await waitExited(orphanPid), true, '해제한 보유자가 끝나지 않았다');
+}
+
+test('#297 decide 타임아웃 잔여 경계 A: 그룹을 벗어난 보유자가 stdio를 쥐면 CHILD_CLOSE_UNCONFIRMED, 보유자가 끝난 뒤 dispose가 다시 신호하지 않고 확인', { timeout: 15_000 }, async (t) => {
+  if (skipOnWin32(t, 'POSIX sessions and process groups')) return;
+  const release = path.join(tmpDir('release'), 'release');
+  const sent = spyProcessKill(t);
+  const f = fakeRuntime('codex', { default: { reply: 'late', delayMs: 30_000, orphanUntil: release } }, { terminateKillWaitMs: 300 });
+  try {
+    await assert.rejects(f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 1000 }), { code: 'CHILD_CLOSE_UNCONFIRMED' });
+    const call = f.calls().find((entry) => Array.isArray(entry.argv));
+    assertSignalledAfterReady(f, call);
+    assert.equal(await waitExited(call.pid), true, '직계는 그룹 신호로 끝났다');
+    await assert.rejects(f.rt.dispose(), { code: 'CHILD_CLOSE_UNCONFIRMED' }, '보유자가 남아 있는 동안 dispose는 종료를 확인하지 못한다');
+    await releaseHolder(f, release);
+    await f.rt.dispose();
+    assert.deepEqual(f.kills, ['SIGKILL'], '재관측은 신호를 다시 보내지 않는다');
+    assert.deepEqual(sent.filter(([pid]) => pid < 0), [[-call.pid, 'SIGKILL']], 'OS 그룹 신호는 한 번뿐이다');
+  } finally {
+    await releaseHolder(f, release);
+    f.cleanup();
+  }
+});
+
+test('#297 decide 타임아웃 잔여 경계 B: 직계가 먼저 exit하고 같은 그룹의 보유자가 stdio를 쥐면 그룹에 신호하지 않고 CHILD_SIGNAL_FAILED, 보유자가 끝난 뒤 dispose 확인', { timeout: 15_000 }, async (t) => {
+  if (skipOnWin32(t, 'POSIX sessions and process groups')) return;
+  const release = path.join(tmpDir('release'), 'release');
+  const sent = spyProcessKill(t);
+  const f = fakeRuntime('codex', { default: { reply: 'early', orphanUntil: release, orphanSameGroup: true } }, { terminateKillWaitMs: 300 });
+  try {
+    const pending = f.rt.decide({ playerId: 'p1', sessionId: 's', message: 'm', timeoutMs: 1500 });
+    pending.catch(() => {});
+    const call = await (async () => {
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        const found = f.calls().find((entry) => Array.isArray(entry.argv));
+        if (found && !isRunning(found.pid)) return found;
+        assert.ok(Date.now() < deadline, '직계가 먼저 exit하지 않았다');
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    })();
+    await assert.rejects(pending, { code: 'CHILD_SIGNAL_FAILED' });
+    const orphanPid = f.calls().find((entry) => Number.isInteger(entry.orphanPid)).orphanPid;
+    assert.equal(isRunning(orphanPid), true, '같은 그룹의 보유자에게 신호하지 않았다');
+    assert.deepEqual(sent.filter(([pid]) => pid < 0), [], 'exit가 보고된 직계의 그룹 번호로는 신호하지 않는다');
+    assert.ok(f.killAt[0] > call.readyAt);
+    await assert.rejects(f.rt.dispose(), { code: 'CHILD_SIGNAL_FAILED' });
+    await releaseHolder(f, release);
+    await f.rt.dispose();
+    assert.deepEqual(sent.filter(([pid]) => pid < 0), [], '정리에서도 그룹 번호로 신호하지 않는다');
+  } finally {
+    await releaseHolder(f, release);
+    f.cleanup();
+  }
+});
+
+test('#297 spawnCli.kill: 직계가 살아 있으면 그 프로세스 그룹에, exit 보고 뒤에는 그룹 신호 없이 false', { timeout: 10_000 }, async (t) => {
+  if (skipOnWin32(t, 'POSIX process groups')) return;
+  const sent = [];
+  const original = process.kill;
+  t.after(() => { process.kill = original; });
+  process.kill = function spy(pid, signal) { sent.push([pid, signal]); return original.call(process, pid, signal); };
+
+  const live = spawnCli({ command: process.execPath, args: ['-e', 'setTimeout(() => {}, 30000)'], cwd: os.tmpdir(), env: process.env, input: '' });
+  assert.equal(Number(execFileSync('ps', ['-o', 'pgid=', '-p', String(live.pid)], { encoding: 'utf8' }).trim()), live.pid,
+    '자식은 자기 프로세스 그룹의 리더다');
+  sent.length = 0;
+  assert.equal(live.kill('SIGKILL'), true);
+  assert.deepEqual(sent, [[-live.pid, 'SIGKILL']], '살아 있는 직계에는 그룹 신호 한 번');
+  await live.closed;
+
+  const exited = spawnCli({ command: process.execPath, args: ['-e', 'process.exit(0)'], cwd: os.tmpdir(), env: process.env, input: '' });
+  await exited.done;
+  sent.length = 0;
+  assert.equal(exited.kill('SIGKILL'), false, 'exit가 보고된 직계에는 신호가 전달되지 않는다');
+  assert.deepEqual(sent.filter(([pid]) => pid < 0), [], 'exit 보고 뒤에는 그룹 번호로 신호하지 않는다');
+
+  // 그룹이 이미 비었으면(ESRCH) 숫자 pid로 다시 보내지 않고 false다.
+  const raced = spawnCli({ command: process.execPath, args: ['-e', 'setTimeout(() => {}, 30000)'], cwd: os.tmpdir(), env: process.env, input: '' });
+  process.kill = function esrch(pid, signal) {
+    sent.push([pid, signal]);
+    if (pid < 0) throw Object.assign(new Error('no such process group'), { code: 'ESRCH' });
+    return original.call(process, pid, signal);
+  };
+  sent.length = 0;
+  assert.equal(raced.kill('SIGKILL'), false);
+  assert.deepEqual(sent, [[-raced.pid, 'SIGKILL']], 'ESRCH 뒤 직계 pid로 다시 보내지 않는다');
+  assert.equal(isRunning(raced.pid), true, 'ESRCH 뒤 직계 핸들로도 신호하지 않았다(음성 대조군)');
+  process.kill = original;
+  original.call(process, -raced.pid, 'SIGKILL');
+  await raced.closed;
+
+  // EPERM 등 다른 오류면 직계에만 보낸다(ChildProcess.kill — 숫자 pid가 아니라 그 핸들로).
+  const denied = spawnCli({ command: process.execPath, args: ['-e', 'setTimeout(() => {}, 30000)'], cwd: os.tmpdir(), env: process.env, input: '' });
+  process.kill = function eperm(pid, signal) {
+    sent.push([pid, signal]);
+    if (pid < 0) throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+    return original.call(process, pid, signal);
+  };
+  sent.length = 0;
+  assert.equal(denied.kill('SIGKILL'), true, '직계 핸들 신호로 대신한다');
+  process.kill = original;
+  await denied.closed;
+  assert.deepEqual(sent, [[-denied.pid, 'SIGKILL']]);
+
+  // 형제 그룹은 영향을 받지 않는다.
+  const a = spawnCli({ command: process.execPath, args: ['-e', 'setTimeout(() => {}, 30000)'], cwd: os.tmpdir(), env: process.env, input: '' });
+  const b = spawnCli({ command: process.execPath, args: ['-e', 'setTimeout(() => {}, 30000)'], cwd: os.tmpdir(), env: process.env, input: '' });
+  assert.notEqual(a.pid, b.pid);
+  a.kill('SIGKILL');
+  await a.closed;
+  assert.equal(isRunning(b.pid), true, '다른 자식의 그룹에는 신호가 가지 않는다');
+  b.kill('SIGKILL');
+  await b.closed;
+});
+
+test('#297 spawnCli observe: 관측자가 모든 이벤트에서 던져도 자식 수명·출력·done/closed는 그대로다', { timeout: 10_000 }, async () => {
+  const seen = [];
+  const child = spawnCli({
+    command: process.execPath, args: ['-e', 'process.stdout.write("a\\nb\\n")'], cwd: os.tmpdir(), env: process.env, input: '',
+    observe: (event) => { seen.push(event.type); throw new Error('observer failure'); },
+  });
+  const result = await child.done;
+  await child.closed;
+  assert.deepEqual([result.code, result.signal, result.stdout], [0, null, 'a\nb\n']);
+  assert.ok(seen.includes('stdout') && seen.includes('exit') && seen.includes('close'), seen.join(','));
 });
 
 test('probe: 카나리 센티널이 응답에 나오면 containment false, 프롬프트에는 카나리 경로만 실린다', async () => {

@@ -59,7 +59,7 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 | `tools/session-launcher.js`, `tools/session-preparation.js` | 기존 CLI와 앱이 공유하는 store launcher 및 초기화 완료 증거. |
 | `tools/game-loop.js` | 사이드카 본체 — 부트스트랩(loop 락 → `init` → 서버 기동), 핸드 안 액션 루프, 워치독, 코치 파이프라인, 종합 리뷰, 종료 시퀀스를 한 detached 프로세스에서 오케스트레이션. |
 | `tools/player-decision.js` | LLM 결정 분류·베팅이 없는 스트리트의 bet 정규화·안전 진단 투영·교정 메시지. game-loop는 남은 예산 안에서 교정 1회 후 미해결 결정을 보존한다. |
-| `tools/player-runtime.js` | LLM CLI를 부르는 유일한 어댑터 — 런타임별 probe·워밍업·세션 유지 결정·1회성 상위 모델 호출과 컨테인먼트 계약을 소유(`RUNTIME_TABLE`). |
+| `tools/player-runtime.js` | LLM CLI를 부르는 유일한 어댑터 — 런타임별 probe·워밍업·세션 유지 결정·1회성 상위 모델 호출과 컨테인먼트 계약을 소유(`RUNTIME_TABLE`). POSIX에서 CLI 자식은 자기 프로세스 그룹으로 띄우고, 직계가 살아 있는 동안 종료 신호를 그 그룹에 보낸다(npm 런처의 손자까지, #297). |
 | `tools/coach-control.js` | 코치 authority 상태기계 — `gameEpoch`/`activeOwnerSessionId`/핸드별 `generation`으로 큐·재개·중복 요청을 판정. `.coach-authority.json`이 정본이다: released 전이는 선언과 writer 자신의 검증 결과(`release.verification`)를 행에 같은 원자 쓰기로 남기고, `.coach-adapter-trace.jsonl`은 `traceOutbox`로 뒤따라 맞추는 감사 mirror다(추가 실패가 커밋을 실패시키지 않는다). released는 종착 상태다. |
 | `tools/coach-evidence.js` | 영속 코치 행 판정(sidecar 읽기, tuple·identity 충돌, NOT_SPAWNED·legacy 적격성, lsof 스캐너, 시작 시각 관찰)을 loop와 cleanup writer가 공유하는 모듈. `--evidence`는 어떤 검증을 할지 고르는 선택자일 뿐 증거가 아니며, writer는 같은 판정을 자기 관찰로 다시 한다. POSIX 시작 시각은 zone이 없어 TZ 오프셋만큼 다른 값은 교체가 아니라 unknown이다. |
 | `tools/publish.js` | 게시 CLI — `engine/cli.js step` envelope의 공개분만 골라 서버에 POST하고 `publishId`를 관리. |

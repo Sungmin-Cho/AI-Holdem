@@ -59,7 +59,9 @@ rewriting argv, which the design forbids. `benchmarkPlayerPin(kind, {model, effo
 
 ## Comparison CLI
 
-`node tools/compare-codex-players.js [--live] [--samples N] [--timeout-ms N] [--budget-ms N] [--json]`
+`node tools/compare-codex-players.js [--live] [--samples N] [--rounds N] [--timeout-ms N] [--warmup-timeout-ms N] [--decide-timeout-ms N] [--budget-ms N] [--json]`
+
+(Usage as of #297; the flags added there are described in "#297: CLI child process groups and lifecycle timelines" below.)
 
 - Without `--live` it prints the plan and spawns nothing. No store/model flags exist
   (`--store-dir`, `--game-dir`, `--model` are rejected with usage, exit 2).
@@ -374,3 +376,108 @@ verified, Luna produced one legal decision, and Sol's first warmup exceeded
 confirmed cleanup. See coaching-quality-validation.md for the complete
 observation and the separate earlier six-spot result. Do not infer readiness
 from the earlier schema /1 success or from fixture tests.
+
+## #297: CLI child process groups and lifecycle timelines
+
+The installed `codex` command is the npm launcher (`@openai/codex/bin/codex.js`). It runs
+the platform binary as a child with inherited stdio, forwards only SIGINT/SIGTERM/SIGHUP,
+and waits for that child. A SIGKILL sent only to the launcher pid therefore leaves the
+binary running its request while it holds the adapter's stdout/stderr pipes. When the binary
+keeps those pipes open past the adapter's close confirmation (`killWaitMs`, 2 s), the timeout
+or interrupt fails with `CHILD_CLOSE_UNCONFIRMED`, and a later disposal succeeds once the
+binary finishes on its own. A binary that ends within that wait is still confirmed.
+
+Observed directly on codex-cli 0.163.0: signalling the launcher 1.5 s after
+`turn.started` gave exit +1 ms but close +11.4 s. The binary completed its turn. The same
+probe with SIGTERM, or with a process-group SIGKILL, closed in under 10 ms. The historical
+`/3` checkpoint above is consistent with this mechanism, but its process tree was not
+recorded, so the match remains a hypothesis rather than an observation.
+
+### Runtime change (`spawnCli`)
+
+- POSIX: each CLI child is spawned `detached` (its own session and process group, pgid =
+  pid). argv, env and cwd are unchanged.
+- `kill(signal)` sends to the group (`-pid`) only while the direct child's exit has not been
+  reported. That pid is then still this process's unreaped child, so no other group can
+  carry that number.
+  - Once the exit is reported, it falls back to `ChildProcess.kill`, which sends nothing
+    and returns `false`.
+  - ESRCH from the group returns `false` without a numeric-pid retry.
+  - Any other error falls back to the direct child's handle.
+- Every adapter path benefits, because each one goes through this `kill`: timeout and user
+  interrupt (`runOnce`), disposal, and coach `terminate()` (SIGTERM, then SIGKILL).
+- Residual cases stay unconfirmed instead of being forced. A descendant that left the group
+  (setsid) cannot be reached. Neither can a same-group descendant that is still holding
+  stdio after the direct child exited. Both are pinned by tests, and the disposal retry
+  confirms them once they close.
+- Residual risk:
+  - The #255 S4 window (reaped but not yet reported) has the same length as before. If the
+    number is reused as a new group leader inside it, though, that whole group is signalled
+    instead of one pid.
+  - A parent killed with SIGKILL still leaves CLI children running until they finish.
+- Windows is unchanged and not verified for this launcher shape. It would need launcher
+  resolution plus an owned Job object. Recorded-pid signal paths (coach recovery in
+  `game-loop.js`) still signal the recorded pid.
+- The app service was already detached, so production CLI children already ran without a
+  controlling terminal.
+
+### Comparison tool, schema `codex-player-comparison/4`
+
+- **New options:**
+  - `--rounds N` (1–8) repeats the spot list, so samples = spots × rounds. The order
+    alternates by sample index, and the denominators use spots × rounds.
+  - `--warmup-timeout-ms`/`--decide-timeout-ms` default to `--timeout-ms`, which stays the
+    probe cap. This lets one tool reproduce production caps (warmup 120 s, decide hard
+    300 s) or force short caps.
+- **`budgetMs`** is a call-start budget. A phase starts only if the remaining budget covers
+  that phase's cap. Termination confirmation and disposal come on top. The plan's
+  `worstCaseCallMs` is the smaller of the summed call caps and the budget; it is not a bound
+  on the whole process, which can outlive the report while an unconfirmed child holds stdio.
+  Phase durations (probe included) use the runner's monotonic clock; the adapter's
+  `waitedMs` is monotonic too.
+- **Per-child timelines** (`probe.timelines`, `samples[].timelines.{warmup,decide}`):
+  - Recorded per child: spawn offset, first stdout, JSONL event names from a closed
+    allow-list (unknown names become `other`, non-JSON lines become `nonjson`), kills
+    (time, signal, delivered), exit (code/signal) and close.
+  - Bounds: at most 64 names are kept (`eventsDropped` counts the rest), and lines over
+    64 KiB of UTF-8 are counted in `oversizeLines` without being parsed, whatever the chunk
+    boundaries. Thread/turn start and end times live in fixed fields, so a turn that ends
+    after the name cap is still seen as ended.
+  - Error-class events carry only a closed class (`reconnect`, `rate_limit`,
+    `code_mode_unavailable`, `timeout`, `other`), never the message.
+  - Derived values are CLI-observed proxies, not provider measurements: `bootMs`,
+    `threadToTurnMs`, `turnMs`, `censored` with `turnObservedMs`, `lastEventToSignalMs`
+    (the last line before the first signal; output after the signal does not change it),
+    `signalToExitMs`, `signalToCloseMs` and `exitToCloseMs`. Unobserved values are `null`.
+  - Timelines are rendered after disposal, so a late close shows its real time.
+- **Other new report fields:** `cleanup.attempts[]` (start, duration, open children,
+  errors per attempt), `samples[].errorDetails` (purpose, signal, waitBudgetMs, waitedMs,
+  closeConfirmed), `summary.phases.{warmup,decide}` (planned, attempted, answered, timeout,
+  failed, interrupted, terminationUnconfirmed, unobserved, skipped; counted from each sample's
+  own `phaseOutcomes`, so attempted equals answered plus every failure kind), `summary.warmupMs` (including
+  `cold` for the first create of the variant), `environment` (Node, platform, loadavg) and
+  `startedAtIso`.
+- **Raw-text rule:** the no-raw-text rule covers these diagnostic fields. The normalised
+  one-line `reason` per legal sample stays as before.
+- **Signals:** SIGINT/SIGTERM during `--live` stops new calls and interrupts an in-flight
+  warmup or decide through the adapter's confirmed-close path. An in-flight probe takes no
+  signal, so it runs to completion or to its own cap (`--timeout-ms`, up to 300 s) first. A
+  stop that lands during disposal is recorded as `phase: cleanup`. Disposal still runs, and the report is
+  printed as incomplete: `aborted.code: STOPPED` is recorded even when the stop lands in the
+  last sample, `complete` is false, and the exit code is 3. A termination-unconfirmed abort
+  keeps priority. A second signal takes the default action, which does not guarantee child
+  cleanup.
+- **Gates:** `ok` and the three gates keep their meaning. The new fields are observations
+  and do not relax any gate.
+
+Fixture evidence (`test/player-runtime.test.js`, `test/codex-player-comparison.test.js`,
+`test/game-loop.test.js`, names prefixed `#297`):
+
+- The launcher-shaped fake CLI (`wrapper: true`) reproduces the original signature on the
+  pinned base `912de13`:
+  - decide timeout and interrupt end in `CHILD_CLOSE_UNCONFIRMED`;
+  - coach terminate ends in `CLOSE_UNSETTLED`;
+  - the game loop's interrupt is not confirmed (`{interrupted:false}`).
+- The same tests pass with the change. The residual boundaries are pinned with an explicit
+  holder release instead of timing.
+

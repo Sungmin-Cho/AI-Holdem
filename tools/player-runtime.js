@@ -777,24 +777,58 @@ export function buildPlayerPrompt({ persona, summaryPlaceholder = DEFAULT_SUMMAR
  * 기본 exec. 셸을 거치지 않는 인자 배열 spawn이고, 프롬프트는 stdin으로만 넘어간다.
  * `done`은 exit 코드와 무관하게 resolve한다(해석은 어댑터 몫) — spawn 자체가 실패할
  * 때만 reject한다. 테스트는 command만 바꿔 이 함수에 위임한다.
+ *
+ * #297: codex의 npm 런처는 실제 바이너리를 상속 stdio의 자식으로 돌린다. 직계 pid만 SIGKILL하면 그 손자가
+ * stdio를 쥔 채 요청을 끝까지 수행하고, close가 오지 않아 종료 확인이 실패한다. 그래서 POSIX에서는 자식을
+ * 자기 프로세스 그룹(`detached`, setsid)으로 띄우고, `kill`은 직계의 exit가 보고되기 전에만 그룹(`-pid`)에
+ * 보낸다 — 그동안은 그 pid가 이 프로세스의 자식이라 같은 번호의 다른 그룹이 있을 수 없다. exit가 보고된
+ * 뒤에는 번호가 재사용될 수 있으므로 `ChildProcess.kill`(신호 없이 false)로 돌아가고, 그룹이 이미 비어
+ * ESRCH면 숫자 pid로 다시 보내지 않고 false다. #255 S4 창(libuv가 reap했지만 exit를 아직 알리지 않은 순간)의
+ * 길이는 `ChildProcess.kill`과 같지만, 그 사이 번호가 재사용되어 새 그룹의 리더가 되면 단일 pid가 아니라 그
+ * 그룹 전체가 신호를 받는다 — 피해 범위가 넓어지는 잔여 위험으로 둔다(재사용에는 같은 번호가 그 루프 패스 안에
+ * 다시 할당되어야 한다). 그룹을 스스로 벗어난 후손이나 직계가 먼저 끝난 뒤 남은 같은 그룹의 후손에는 여기서
+ * 신호하지 않는다 — close 확인이 그대로 그 경우를 종료 미확인으로 잡는다. Windows에는 그룹이 없어 직계만 종료한다.
+ * `observe`(선택)는 비교 도구 계측용으로 stdout chunk·exit·close를 받는다. 던져도 자식에는 영향이 없다.
  */
-export function spawnCli({ command, args, cwd, env, input }) {
-  const child = spawn(command, args, childSpawnOptions({ cwd, env, stdio: ['pipe', 'pipe', 'pipe'] }));
+export function spawnCli({ command, args, cwd, env, input, observe = null }) {
+  const group = process.platform !== 'win32';
+  const child = spawn(command, args, childSpawnOptions({
+    cwd, env, stdio: ['pipe', 'pipe', 'pipe'], ...(group ? { detached: true } : {}),
+  }));
+  const notify = (event) => {
+    if (!observe) return;
+    try { observe(event); } catch { /* 계측은 자식 수명에 관여하지 않는다 */ }
+  };
   let stdout = '';
   let stderr = '';
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
-  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stdout.on('data', (chunk) => { stdout += chunk; notify({ type: 'stdout', chunk }); });
   child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.on('exit', (code, signal) => notify({ type: 'exit', code, signal }));
   // 자식이 stdin을 읽지 않고 끝나도 EPIPE로 사이드카가 죽지 않게 한다.
   child.stdin.on('error', () => {});
   child.stdin.end(input == null ? '' : String(input));
   const done = new Promise((resolve, reject) => {
     child.on('error', reject);
-    child.on('close', (code, signal) => resolve({ code, signal, stdout, stderr }));
+    child.on('close', (code, signal) => {
+      notify({ type: 'close', code, signal });
+      resolve({ code, signal, stdout, stderr });
+    });
   });
   const closed = new Promise((resolve) => child.once('close', () => resolve()));
-  return { pid: child.pid ?? null, kill: (signal) => child.kill(signal), done, closed };
+  const kill = (signal) => {
+    if (group && Number.isInteger(child.pid) && child.exitCode === null && child.signalCode === null) {
+      try {
+        process.kill(-child.pid, signal);
+        return true;
+      } catch (error) {
+        if (error.code === 'ESRCH') return false;
+      }
+    }
+    return child.kill(signal);
+  };
+  return { pid: child.pid ?? null, kill, done, closed };
 }
 
 function isAlive(pid) {
@@ -1062,10 +1096,11 @@ export function createPlayerRuntime(kind, opts = {}) {
   async function confirmChildClose(entry, signal) {
     await Promise.resolve();
     if (entry.closed) return;
-    const started = Date.now();
+    // 대기 시간은 단조 시계로 잰다(벽시계 보정에 흔들리지 않게).
+    const started = performance.now();
     const details = () => ({ runtime: kind, pid: entry.handle.pid ?? null,
       purpose: entry.purpose, model: entry.model, signal,
-      waitBudgetMs: killWaitMs, waitedMs: Date.now() - started,
+      waitBudgetMs: killWaitMs, waitedMs: Math.round(performance.now() - started),
       closeConfirmed: entry.closed });
     // #255 S4 (accepted): on POSIX `ChildProcess.kill` signals the numeric pid. libuv reaps
     // several children in one SIGCHLD pass and then runs their exit callbacks one by one, so
