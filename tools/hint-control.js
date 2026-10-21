@@ -6,6 +6,7 @@ import { loadReferenceDataset } from './preflop-dataset.js';
 import { buildPreActionHint, recommendationHash } from '../training/pre-action-hint.js';
 import { observationHash, hintError } from '../shared/decision-observation.js';
 import { gameEpochOf } from '../publish-contract.js';
+import { lstatExact } from '../shared/exact-stat.js';
 
 export function checkHintResume(config, requested) {
   if (config?.humanCount > 1 && (config.hints === 'on' || requested === 'on')) {
@@ -42,13 +43,14 @@ export function createHintControl({sessionDir,runCli,ready,enabled=()=>true,asse
       assertActive();
       checkingSource=true;
       if (!source) {
-        const capture=()=>{const stat=fs.lstatSync(path.join(sessionDir,'reference-source.json'));
+        // Exact identities (#308): a Number-valued ino past 2^53 (Windows) can match a replacement.
+        const capture=()=>{const stat=lstatExact(path.join(sessionDir,'reference-source.json'));
           return {raw:openContained(sessionDir,['reference-source.json'],{maxBytes:4096}).toString('utf8'),ino:stat.ino,dev:stat.dev};};
         const before=capture(),resolved=readSessionReference(sessionDir,{expectedDescriptor:before.raw}),loaded=loadReferenceDataset(resolved),after=capture();
         if (before.raw!==after.raw || before.ino!==after.ino || before.dev!==after.dev) throw hintError('HINT_SOURCE_UNAVAILABLE');
         source=resolved;dataset=loaded;descriptor=after;
       } else {
-        const stat=fs.lstatSync(path.join(sessionDir,'reference-source.json'));
+        const stat=lstatExact(path.join(sessionDir,'reference-source.json'));
         if (stat.ino!==descriptor.ino || stat.dev!==descriptor.dev || openContained(sessionDir,['reference-source.json'],{maxBytes:4096}).toString('utf8')!==descriptor.raw) {
           sourceInvalid=true;return unavailable('HINT_SOURCE_UNAVAILABLE');
         }

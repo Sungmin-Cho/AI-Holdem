@@ -9,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, ownedProcessStartTime, parseOwnedLockIdentity, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
 import { startDrillServer } from './drill-server.js';
+import { lstatExact, fstatExact, plainIdOf } from '../shared/exact-stat.js';
 
 const SELF = fileURLToPath(import.meta.url);
 const LOCK = 'study.lock.d';
@@ -50,9 +51,13 @@ const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 const NONBLOCK = fs.constants.O_NONBLOCK ?? 0;
 const inFlight = new Map();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Stats here are exact (#308): dev and ino are bigint, as a Number-valued ino past 2^53 (Windows) can
+// match a replacement. The two identities a store hands on — in its descriptor and to its child —
+// keep the Number values they were always computed from (`plainIdOf`, as a plain stat gives them).
 const sameInode = (a, b) => a && b && a.dev === b.dev && a.ino === b.ino;
+const plainId = plainIdOf;
 const trainingIdentity = (ctx) => createHash('sha256').update(JSON.stringify([
-  ctx.training, ctx.trainingStat?.dev, ctx.trainingStat?.ino,
+  ctx.training, plainId(ctx.trainingStat?.dev), plainId(ctx.trainingStat?.ino),
 ])).digest('hex');
 function fail(code = 'STUDY_DESCRIPTOR_CORRUPT', detail, fsCode) {
   // The code is the contract; the detail only ever reaches logs and stderr.
@@ -118,7 +123,7 @@ export function memoizedStartTimeOf(memo, startTimeOf) {
 }
 function statOrNull(file) {
   platformTimeout(WAIT_MS);
-  try { return fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; failFs(error); }
+  try { return lstatExact(file); } catch (error) { if (error.code === 'ENOENT') return null; failFs(error); }
 }
 // Windows ACL proof is a PowerShell child. A client call (ensure/inspect/stop)
 // opens one AsyncLocalStorage scope: one before proof, nested and sequential
@@ -336,7 +341,7 @@ function context(storeDir, { create = false } = {}) {
     stat = statOrNull(training);
   }
   if (stat) ctx.trainingStat = directory(training, { privateMode: true });
-  ctx.storeIdentity = createHash('sha256').update(JSON.stringify([root, original.dev, original.ino])).digest('hex');
+  ctx.storeIdentity = createHash('sha256').update(JSON.stringify([root, plainId(original.dev), plainId(original.ino)])).digest('hex');
   assertContext(ctx);
   return ctx;
 }
@@ -357,7 +362,7 @@ function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized =
   let fd;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW | NONBLOCK);
-    const opened = fs.fstatSync(fd);
+    const opened = fstatExact(fd);
     if (!sameInode(before, opened) || !safeFile(opened, privateMode, file) || (!allowOversized && opened.size > maxBytes)) {
       if (missing()) return null;
       fail();
@@ -366,7 +371,7 @@ function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized =
     if (allowOversized && opened.size > maxBytes) return { text: null, stat: opened };
     const bytes = Buffer.alloc(opened.size);
     const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
-    const after = fs.fstatSync(fd);
+    const after = fstatExact(fd);
     if (!sameInode(opened, statOrNull(file)) || after.size > maxBytes || !safeFile(after, privateMode, file)) {
       if (missing()) return null;
       fail();
@@ -940,7 +945,7 @@ function publish(ctx, own, value) {
     assertOwnLock(ctx, own);
     fd = fs.openSync(file, fs.constants.O_WRONLY | NOFOLLOW | NONBLOCK
       | (before ? 0 : fs.constants.O_CREAT | fs.constants.O_EXCL), 0o600);
-    const opened = fs.fstatSync(fd);
+    const opened = fstatExact(fd);
     if (!safeFile(opened, true, file) || (before && !sameInode(before.stat, opened))) fail();
     assertContext(ctx);
     if (!sameInode(opened, statOrNull(file))) fail();

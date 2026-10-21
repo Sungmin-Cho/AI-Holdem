@@ -6,6 +6,7 @@ import {
   NOTE_MAX_CHARS, NOTE_MAX_BYTES,
 } from '../publish-contract.js';
 import { openContained } from '../tools/training-store.js';
+import { lstatExact, fstatExact } from '../shared/exact-stat.js';
 
 const RECEIPT_FILE = 'ui-action-receipt.json';
 // #235: requests the pause gate refused with durable proof. Only the current
@@ -34,16 +35,17 @@ const owners = new WeakMap();
 // directory at the old pathname after a game-root replacement.
 export function createRelayRootOwner(root) {
   const resolved = path.resolve(root);
-  const original = fs.lstatSync(resolved);
+  // Identities are exact (#308): a Number-valued ino past 2^53 (Windows) can match a replacement.
+  const original = lstatExact(resolved);
   if (!original.isDirectory() || original.isSymbolicLink()) throw coded('RELAY_ROOT_CHANGED');
   const canonical = fs.realpathSync(resolved);
   const assert = (fd) => {
     try {
-      const st = fs.lstatSync(resolved);
+      const st = lstatExact(resolved);
       if (!st.isDirectory() || st.isSymbolicLink() || st.dev !== original.dev || st.ino !== original.ino
         || fs.realpathSync(resolved) !== canonical) throw coded('RELAY_ROOT_CHANGED');
       if (fd !== undefined) {
-        const opened = fs.fstatSync(fd);
+        const opened = fstatExact(fd);
         if (!opened.isDirectory() || opened.dev !== original.dev || opened.ino !== original.ino) throw coded('RELAY_ROOT_CHANGED');
       }
     } catch { throw coded('RELAY_ROOT_CHANGED'); }
@@ -74,7 +76,7 @@ export function writeRelayJsonAtomic(owner, name, value) {
   try {
     owner.assert();
     fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o600);
-    temporary = fs.fstatSync(fd);
+    temporary = fstatExact(fd);
     owner.assert();
     fs.writeFileSync(fd, bytes, 'utf8');
     owner.assert();
@@ -83,8 +85,8 @@ export function writeRelayJsonAtomic(owner, name, value) {
     owner.assert();
     // The pathname can be replaced while the original fd remains valid. Keep that
     // fd open and compare both identities immediately before the rename.
-    const opened = fs.fstatSync(fd);
-    const named = fs.lstatSync(tmp);
+    const opened = fstatExact(fd);
+    const named = lstatExact(tmp);
     if (!opened.isFile() || opened.nlink !== 1 || !named.isFile() || named.isSymbolicLink() || named.nlink !== 1
       || opened.dev !== temporary.dev || opened.ino !== temporary.ino
       || named.dev !== opened.dev || named.ino !== opened.ino) throw coded('UNSAFE_PATH');
@@ -104,7 +106,7 @@ export function writeRelayJsonAtomic(owner, name, value) {
   } catch (error) {
     try {
       owner.assert();
-      const st = fs.lstatSync(tmp);
+      const st = lstatExact(tmp);
       if (temporary && st.dev === temporary.dev && st.ino === temporary.ino && st.isFile() && !st.isSymbolicLink() && st.nlink === 1) fs.unlinkSync(tmp);
     } catch { /* do not unlink anything through a replaced root */ }
     throw error;
@@ -141,7 +143,7 @@ export function createActionReceiptStore(root, gameEpoch, { checkpoint = () => {
   const inspectFile = (target) => {
     owner.assert();
     try {
-      const st = fs.lstatSync(target);
+      const st = lstatExact(target);
       if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1) throw fail();
       return st;
     } catch (error) {

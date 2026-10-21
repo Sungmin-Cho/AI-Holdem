@@ -9,6 +9,7 @@ import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { childSpawnOptions } from "../shared/child-spawn-options.js";
+import { lstatExact } from "../shared/exact-stat.js";
 import { fileURLToPath } from "node:url";
 import {
   acquireOwnedLock,
@@ -49,7 +50,8 @@ export async function inspectAppService(store) {
   if (!lock || lock.status === "dead") return { status: "stopped" };
   if (lock.status !== "alive") throw new Error("APP_IDENTITY_UNAVAILABLE");
   const file = path.join(dir, "descriptor.json");
-  const st = fs.lstatSync(file);
+  // Exact identity (#308): a Number-valued ino past 2^53 (Windows) can match a replacement.
+  const st = lstatExact(file);
   if (
     !st.isFile() ||
     st.isSymbolicLink() ||
@@ -81,7 +83,7 @@ export async function inspectAppService(store) {
   if (!response.ok || snapshot.instanceId !== d.instanceId)
     throw new Error("APP_IDENTITY_UNAVAILABLE");
   const after = readOwnedLock(store, LOCK),
-    afterStat = fs.lstatSync(file);
+    afterStat = lstatExact(file);
   if (
     after?.status !== "alive" ||
     after.pid !== lock.pid ||
