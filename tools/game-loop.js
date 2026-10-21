@@ -79,7 +79,7 @@ import {
   consultCoachCloseEvidence, scanCoachRuntimeProcesses, parseLsofCwdRecords, legacyCoachRuntimeCandidates,
   createCoachEvidenceReader, parsePersistedCoachHandle, validSidecarIdentity, sidecarTupleMismatch, rowIdentities,
   notSpawnedHolds, legacyEligible, observeRecordedIdentity, processAlive, coachProcessStartTime,
-  recordedTerminatorTimeoutMs, signalRecordedSessionGroup,
+  recordedTerminatorTimeoutMs, processLeadsSession, signalSessionGroup,
 } from './coach-evidence.js';
 // Re-exported for existing importers (tests and tools) of these names.
 export {
@@ -883,14 +883,16 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // launcher whose native child does the work. A session leader never leaves its session or its
   // group, only a process already in its session can join the group, and POSIX (XBD 4.14) reuses
   // neither its pid nor its group's id while it lives — so while the recorded identity is seen
-  // alive, in the same synchronous run as the signal (#255 S3), the group is the leader's own
-  // and its descendants'. Anything else — a record from before #297, a pid of 1 or less, a
-  // leader check that cannot be read — keeps the pid signal: `recordedGroupSignal(pid, signal)`
-  // returns false having sent nothing. Its own seam, like the two above: an injected
-  // `signalProcess` keeps the pid path.
-  const recordedGroupSignal = opts.recordedGroupSignal !== undefined
-    ? opts.recordedGroupSignal
-    : (!opts.signalProcess && process.platform !== 'win32' ? signalRecordedSessionGroup : null);
+  // alive around the leader read, in the same synchronous run as the signal (#255 S3), the group
+  // is the leader's own and its descendants'. Anything else — a record from before #297, a pid of
+  // 1 or less, a leader read that fails — keeps the pid signal. Two seams:
+  // `recordedSessionLeader(pid, { timeoutMs })` → true | false | null (null: no leader read, the pid
+  // path as before #311; an injected `signalProcess` keeps it null, like the two seams above) and
+  // `recordedGroupSignal(pid, signal)`, the group signal itself.
+  const recordedSessionLeader = opts.recordedSessionLeader !== undefined
+    ? opts.recordedSessionLeader
+    : (!opts.signalProcess && process.platform !== 'win32' ? processLeadsSession : null);
+  const recordedGroupSignal = opts.recordedGroupSignal ?? signalSessionGroup;
   // #192 O1/L1: test seam for judgment g's process scanner. Defaults to the real POSIX
   // lsof-based scan, reusing this instance's own `lsofPath`/`osVerifyMs` conventions.
   const scanCoachRuntimeProcessesFn = opts.scanCoachRuntimeProcesses
@@ -4902,15 +4904,34 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (outcome === 'replaced') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
         return outcome === 'terminated' || outcome === 'absent' ? null : { outcome: 'unconfirmed', reason: 'SIGNAL_FAILED' };
       }
-      const now = persistedCoachIdentityState(identity);
-      if (now === 'dead') return null;
-      if (now === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
-      if (now === 'ambiguous') return { outcome: 'unconfirmed', reason: 'IDENTITY_AMBIGUOUS' };
-      if (now !== 'alive') return { outcome: 'unconfirmed', reason: 'IDENTITY_UNKNOWN' };
+      // undefined while the identity reads alive, else what this returns.
+      const unlessAlive = () => {
+        const now = persistedCoachIdentityState(identity);
+        if (now === 'alive') return undefined;
+        if (now === 'dead') return null;
+        if (now === 'mismatch') return { outcome: 'released', reason: 'IDENTITY_REPLACED' };
+        if (now === 'ambiguous') return { outcome: 'unconfirmed', reason: 'IDENTITY_AMBIGUOUS' };
+        return { outcome: 'unconfirmed', reason: 'IDENTITY_UNKNOWN' };
+      };
+      let stop = unlessAlive();
+      if (stop !== undefined) return stop;
+      let viaGroup = false;
+      if (recordedSessionLeader) {
+        // #311: the leader read is a process of its own on macOS (ps). It gets what is left of the
+        // deadline; a deadline spent during it sends nothing, and the identity is observed again
+        // after it, so the signal still follows its own observation.
+        const leaderMs = remainingMsUntil(deadlineNs);
+        if (leaderMs <= 0) return { outcome: 'unconfirmed', reason: 'DEADLINE_EXCEEDED' };
+        viaGroup = recordedSessionLeader(identity.pid, { timeoutMs: leaderMs }) === true;
+        if (remainingMsUntil(deadlineNs) <= 0) return { outcome: 'unconfirmed', reason: 'DEADLINE_EXCEEDED' };
+        stop = unlessAlive();
+        if (stop !== undefined) return stop;
+      }
       try {
-        // A group signal that fails is not retried at the pid: a group the leader check passed is
-        // gone only with its leader (ESRCH, read as dead), and any other error is unconfirmed.
-        if (!recordedGroupSignal?.(identity.pid, signal)) signalProcess(identity.pid, signal);
+        // A group signal that fails is not retried at the pid: a group whose leader was just seen
+        // is gone only with it (ESRCH, read as dead), and any other error is unconfirmed.
+        if (viaGroup) recordedGroupSignal(identity.pid, signal);
+        else signalProcess(identity.pid, signal);
       } catch (error) {
         if (error.code !== 'ESRCH') return { outcome: 'unconfirmed', reason: 'SIGNAL_FAILED' };
       }

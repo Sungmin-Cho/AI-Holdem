@@ -30,7 +30,7 @@ import {
   legacyCoachRuntimeCandidates,
   scanCoachRuntimeProcesses,
 } from '../tools/game-loop.js';
-import { processLeadsSession, signalRecordedSessionGroup } from '../tools/coach-evidence.js';
+import { processLeadsSession, signalSessionGroup } from '../tools/coach-evidence.js';
 import { gameEpochOf, payloadSha256, publicProofId } from '../publish-contract.js';
 import { reviewWaivable } from '../tools/recovery-exit.js';
 import { createCoachControl, UNAVAILABLE_TEXT } from '../tools/coach-control.js';
@@ -619,8 +619,9 @@ test('#214 a start time that differs only by a time-zone offset is unknown, not 
       finalizeBudgetMs: 3_000 * WIN32_SCALE,
       finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
       signalProcess: (pid, signal) => { signalled.push({ pid, signal }); process.kill(pid, signal); },
-      // #311: nor signalled through its group.
-      recordedGroupSignal: (pid, signal) => { signalled.push({ pid, signal, group: true }); return false; },
+      // #311: nor signalled through its group, nor read for a session it leads.
+      recordedSessionLeader: (pid) => { signalled.push({ pid, leader: true }); return true; },
+      recordedGroupSignal: (pid, signal) => { signalled.push({ pid, signal, group: true }); },
     },
   });
   await assert.rejects(loop.resume(), (error) => error.code === 'FINALIZATION_ABORTED' && /IDENTITY_UNKNOWN/.test(error.message));
@@ -745,20 +746,20 @@ test('#311 a recorded coach that leads no session is signalled by its pid alone'
     stateOverrides: { port: external.lock.port },
     loopOpts: {
       signalProcess: (pid, signal) => { signalled.push({ pid, signal }); process.kill(pid, signal); },
-      recordedGroupSignal: (pid, signal) => {
-        const sent = signalRecordedSessionGroup(pid, signal, {
-          kill: (target, sig) => { groups.push({ target, sig }); process.kill(target, sig); },
-        });
-        tried.push({ pid, signal, sent });
-        return sent;
+      // The real leader read, watched.
+      recordedSessionLeader: (pid, options) => {
+        const leads = processLeadsSession(pid, options);
+        tried.push({ pid, leads });
+        return leads;
       },
+      recordedGroupSignal: (pid, signal) => { groups.push({ pid, signal }); },
     },
   });
   await loop.resume();
   await waitFor(() => upper.starts.length >= 1, 'the replacement coach did not start');
   assert.equal((await loop.run()).phase, 'done');
   await waitUntilDead(orphan.pid);
-  assert.deepEqual(tried, [{ pid: orphan.pid, signal: 'SIGTERM', sent: false }]);
+  assert.deepEqual(tried, [{ pid: orphan.pid, leads: false }]);
   assert.deepEqual(groups, [], 'no group signal without a session it leads');
   assert.deepEqual(signalled.filter((entry) => entry.pid === orphan.pid), [{ pid: orphan.pid, signal: 'SIGTERM' }]);
   assert.equal(readJson(path.join(gameDir, '.coach-authority.json')).retiredAttempts
@@ -792,6 +793,7 @@ for (const [code, reason] of [['EPERM', 'SIGNAL_FAILED'], ['ESRCH', 'STILL_ALIVE
         // The pid path of every other process the loop signals stays real.
         signalProcess: (pid, signal) => { signalled.push({ pid, signal }); process.kill(pid, signal); },
         recordedTerminator: null,
+        recordedSessionLeader: (pid) => pid === orphan.pid,
         recordedGroupSignal: (pid, signal) => {
           groups.push({ pid, signal });
           throw Object.assign(new Error(code), { code });
@@ -865,14 +867,27 @@ test('#311 a session leader is told from a process that only shares a session', 
   assert.equal(processLeadsSession(plain.pid), false);
   for (const pid of [1, 0, -1, -leader.pid, 1.5, Number.NaN, 2 ** 53]) assert.equal(processLeadsSession(pid), false, String(pid));
 
-  const proc = (text) => ({ readFileSync: () => { if (text === null) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); return text; } });
-  const linux = (text, pid = 4242) => processLeadsSession(pid, { platform: 'linux', fsImpl: proc(text) });
+  // A procfs that resolves pids in this process's own namespace: NSpid holds our pid alone.
+  const OWN_NS = 'Name:\tnode\nNSpid:\t999\n';
+  const proc = (text, status = OWN_NS) => ({
+    readFileSync: (file) => {
+      const value = file === '/proc/self/status' ? status : text;
+      if (value === null) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      return value;
+    },
+  });
+  const linux = (text, status) => processLeadsSession(4242, { platform: 'linux', fsImpl: proc(text, status), selfPid: 999 });
   assert.equal(linux('4242 (codex) S 1 4242 4242 0 -1'), true);
   assert.equal(linux('4242 (a) b) c) S 1 4242 4242 0 -1'), true, 'the command name may hold spaces and parentheses');
   assert.equal(linux('4242 (codex) S 1 4242 77 0 -1'), false, 'a group leader in another session');
   assert.equal(linux('4242 (codex) S 1 77 77 0 -1'), false);
   assert.equal(linux(null), null);
   assert.equal(linux('garbage'), null);
+  // An ancestor's procfs (NSpid lists more than one level), one that names another pid for us, a
+  // kernel without NSpid, an unreadable status: the stat file would describe another process.
+  for (const status of ['Name:\tnode\nNSpid:\t53122\t999\n', 'Name:\tnode\nNSpid:\t1000\n', 'Name:\tnode\n', null]) {
+    assert.equal(linux('4242 (codex) S 1 4242 4242 0 -1', status), null, JSON.stringify(status));
+  }
   const ps = (out) => ({ exec: () => { if (out instanceof Error) throw out; return out; } });
   const darwin = (out, pid = 4242) => processLeadsSession(pid, { platform: 'darwin', ...ps(out) });
   assert.equal(darwin(' 4242 Ss\n'), true);
@@ -883,29 +898,74 @@ test('#311 a session leader is told from a process that only shares a session', 
   assert.equal(processLeadsSession(4242, { platform: 'freebsd' }), null);
 });
 
-// #311: the default group signal sends nothing unless the leader check reads true, and then sends
-// to the group alone; a pid of 1 or less is refused before any check (kill(-1) is every process).
-test('#311 the recorded group signal reaches only a group its pid provably leads', () => {
-  const run = (pid, leads) => {
-    const checked = [];
-    const kills = [];
-    const sent = signalRecordedSessionGroup(pid, 'SIGTERM', {
-      leadsSession: (id) => { checked.push(id); return leads; },
-      kill: (target, signal) => { kills.push([target, signal]); },
-    });
-    return { sent, checked, kills };
-  };
+// #311: the group signal itself refuses a pid of 1 or less (kill(-1) is every process) and any
+// pid that is not a safe integer, sending nothing; otherwise it signals the group alone.
+test('#311 the recorded group signal never reaches kill(-1)', () => {
   for (const pid of [1, 0, -1, -4242, 1.5, Number.NaN, 2 ** 53, '4242']) {
-    assert.deepEqual(run(pid, true), { sent: false, checked: [], kills: [] }, String(pid));
+    const kills = [];
+    assert.throws(() => signalSessionGroup(pid, 'SIGTERM', { kill: (...args) => kills.push(args) }), { code: 'EINVAL' }, String(pid));
+    assert.deepEqual(kills, [], String(pid));
   }
-  assert.deepEqual(run(4242, false), { sent: false, checked: [4242], kills: [] });
-  assert.deepEqual(run(4242, null), { sent: false, checked: [4242], kills: [] });
-  assert.deepEqual(run(4242, true), { sent: true, checked: [4242], kills: [[-4242, 'SIGTERM']] });
-  assert.throws(() => signalRecordedSessionGroup(4242, 'SIGKILL', {
-    leadsSession: () => true,
-    kill: () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); },
-  }), { code: 'EPERM' });
+  const kills = [];
+  signalSessionGroup(4242, 'SIGKILL', { kill: (...args) => kills.push(args) });
+  assert.deepEqual(kills, [[-4242, 'SIGKILL']]);
 });
+
+// #311: the leader read takes time of its own (ps on macOS) and gets what is left of the deadline.
+// A deadline spent during it sends nothing at all — no group signal and no pid signal after it —
+// and an identity replaced during it gets no signal: the signal follows an observation taken after
+// the read. (Without that observation, or that deadline check, the group signal would follow.)
+for (const during of ['deadline', 'replacement']) {
+  test(`#311 a ${during === 'deadline' ? 'deadline spent' : 'coach replaced'} during the leader read sends no signal`, { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+    const gameDir = tmpGame();
+    const init = await seedFinishedGame(gameDir);
+    const external = await startExternalServer(gameDir, init.sessionToken);
+    t.after(() => terminateIfAlive(external.child));
+    const orphan = await startCoachOrphan({ ignoreTerm: false });
+    t.after(() => terminateIfAlive(orphan));
+    const seeded = await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: ownedProcessStartTime });
+    const clock = createJumpClock();
+    let replaced = false;
+    const leaderReads = [];
+    const sent = [];
+    const upper = makeCoachAdapter();
+    const finalizeBudgetMs = 3_000 * WIN32_SCALE;
+    const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+      upper,
+      stateOverrides: { port: external.lock.port },
+      loopOpts: {
+        finalizeBudgetMs,
+        finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
+        monotonicNs: clock.monotonicNs,
+        recordedTerminator: null,
+        ownedProcessStartTime: (pid) => {
+          if (pid !== orphan.pid) return ownedProcessStartTime(pid);
+          return replaced ? laterOwnedStartTime(seeded.startTime) : seeded.startTime;
+        },
+        signalProcess: (pid, signal) => {
+          if (pid === orphan.pid) sent.push(['pid', signal]);
+          else process.kill(pid, signal);
+        },
+        recordedSessionLeader: (pid, options) => {
+          leaderReads.push({ pid, timeoutMs: options?.timeoutMs });
+          if (during === 'deadline') clock.jumpBy(finalizeBudgetMs + 1_000);
+          else replaced = true;
+          return true;
+        },
+        recordedGroupSignal: (pid, signal) => { sent.push(['group', signal]); },
+      },
+    });
+    // Either way the finalization stops: past its deadline, or — for the replacement, which only
+    // the injected reader sees — at the release writer, whose own reading finds the coach alive.
+    await assert.rejects(loop.resume(), { code: 'FINALIZATION_ABORTED' });
+    assert.equal(leaderReads.length, 1);
+    assert.equal(leaderReads[0].pid, orphan.pid);
+    assert.ok(Number.isInteger(leaderReads[0].timeoutMs) && leaderReads[0].timeoutMs > 0
+      && leaderReads[0].timeoutMs <= finalizeBudgetMs, `leader read given ${leaderReads[0].timeoutMs} ms`);
+    assert.deepEqual(sent, [], 'no signal after the leader read');
+    assert.doesNotThrow(() => process.kill(orphan.pid, 0));
+  });
+}
 
 // Where the start time is fixed at creation (Windows, macOS) another owned reading is a
 // replacement: released without a signal. On Linux it proves nothing: nothing is signalled
@@ -1021,11 +1081,10 @@ for (const via of ['pid', 'group']) {
           signals.push(via === 'pid' ? signal : `pid ${signal}`);
           if (signal === 'SIGTERM') termSent = true;
         },
-        recordedGroupSignal: via === 'pid' ? null : (pid, signal) => {
-          if (pid !== orphan.pid) return false;
+        recordedSessionLeader: via === 'pid' ? null : (pid) => pid === orphan.pid,
+        recordedGroupSignal: (pid, signal) => {
           signals.push(signal);
           if (signal === 'SIGTERM') termSent = true;
-          return true;
         },
       },
     });
@@ -1239,11 +1298,10 @@ for (const [boundary, via] of [['SIGKILL', 'pid'], ['SIGTERM', 'pid'], ['SIGKILL
           signals.push(via === 'pid' ? signal : `pid ${signal}`);
           if (signal === 'SIGTERM') armed = true;
         },
-        recordedGroupSignal: via === 'pid' ? null : (pid, signal) => {
-          if (pid !== orphan.pid) return false;
+        recordedSessionLeader: via === 'pid' ? null : (pid) => pid === orphan.pid,
+        recordedGroupSignal: (pid, signal) => {
           signals.push(signal);
           if (signal === 'SIGTERM') armed = true;
-          return true;
         },
       },
     });
