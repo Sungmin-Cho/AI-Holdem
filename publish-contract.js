@@ -106,6 +106,16 @@ export function validateCoachDecisions(decisions, handNo) {
   return null;
 }
 
+// #310: the claim rule (coachingClaimAllowed) on all of a coach note it governs: the text, which
+// only the loop's publish gate judges, and each decision row's strings, which the relay judges
+// too (validateCoachDecisions). Form errors are not claims; those checks keep them.
+export function coachNoteClaimAllowed(note) {
+  if (!coachingClaimAllowed(note?.text)) return false;
+  if (!Array.isArray(note?.decisions)) return true;
+  return note.decisions.every((row) => !row || typeof row !== 'object' || Array.isArray(row)
+    || COACH_DECISION_KEYS.every((field) => typeof row[field] !== 'string' || coachingClaimAllowed(row[field])));
+}
+
 export function payloadSha256(tuple) {
   return sha256Hex(canonicalPayloadJson(tuple));
 }
@@ -218,6 +228,8 @@ export function isCoachOnlyAttempt(record) {
 export function isBoundCoachNote(note, authority) {
   if (!plainObject(note) || !plainObject(note.coachProof) || !plainObject(authority)
     || typeof authority.queueId !== 'string' || note.handNo !== authority.handNo) return false;
+  // #310: a note whose decisions are not rows the digest can read (`[null]`) is no item's.
+  if (note.decisions !== undefined && (!Array.isArray(note.decisions) || !note.decisions.every(plainObject))) return false;
   const digest = payloadSha256(note);
   return digest === authority.payloadSha256 && note.coachProof.payloadSha256 === digest
     && note.coachProof.id === publicProofId(authority.queueId)
