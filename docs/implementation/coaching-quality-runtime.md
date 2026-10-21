@@ -517,12 +517,12 @@ Fixture evidence (`test/player-runtime.test.js`, `test/codex-player-comparison.t
 
 `node tools/player-latency-report.js <store or game dir> [--since ISO] [--json]`
 
-- **Input:** opens `loop.log` files read-only and never follows symlinks.
+- **Input:** opens `loop.log` files read-only. It never follows symlinks, neither for session directories nor for files: each file is opened with `O_NOFOLLOW` and must be the same regular file that was checked.
 - **Grouping:** calls are grouped by runtime, model, kind and warmup batch size.
 - **Decision deduplication:** decisions are deduplicated per call inside each session
-  file. A `player-call` with `purpose: decision` wins for each (decisionId, generation,
-  callNo); `player-attempt` fills only the calls it lacks. Old rows without `callNo` match
-  by order.
+  file. Rows with a `callNo` match by number first: a `player-call` with `purpose: decision`
+  wins for each (decisionId, generation, callNo), and `player-attempt` fills only the calls
+  it lacks. Only the remaining rows without `callNo` match each other by order.
 - **Output:** denominators and outcome counts, and nearest-rank percentiles of answered
   calls. Over-threshold counts are warmup > 60 s and decision > 25 s / > 300 s.
   Timeouts are censored and counted apart. Timing distributions are included, plus up to
@@ -530,6 +530,9 @@ Fixture evidence (`test/player-runtime.test.js`, `test/codex-player-comparison.t
 - **Legacy proxy:** LLM sessions without start-warmup records report
   `server-spawn` → `bootstrap-playing` as an upper-bound proxy that includes relay
   start-up. Starts that never reached playing are counted, not ranked.
+  - A session counts as LLM if it has player calls or if its `loop-state.json` says
+    `opponentRuntime: llm`; only that one field is read. Policy games also log
+    `runtime-models`, so that event alone does not identify an LLM game.
 
 ### Warmup concurrency measurement (`tools/measure-codex-warmup.js`)
 
@@ -552,5 +555,6 @@ Fixture evidence (`test/player-runtime.test.js`, `test/codex-player-comparison.t
   - C1 lists timeouts regardless of completeness.
   - C2 lists answers over 60 s with their phases.
   - C3 calls a parallel effect only for an `ok` run, when the parallel median is at
-    least 1.5 × the sequential median **and** at least 2 s above it.
+    least 1.5 × the sequential median **and** at least 2 s above it. This is checked on
+    the raw medians; the rounded ratio in the summary is for display only.
 - **Limits:** these are observations from small samples, not distribution guarantees.

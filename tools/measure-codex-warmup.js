@@ -328,7 +328,9 @@ export function summarizeVariant(variantId, batches, options) {
   }
   const p = out.parallel.warmupMs.median;
   const s = out.sequential.warmupMs.median;
+  // ratio는 표시용(소수 둘째 자리)이다. C3 판정은 원 중앙값으로 한다.
   out.parallelVsSequential = {
+    parallelMedianMs: p, sequentialMedianMs: s,
     ratio: p !== null && s !== null && s > 0 ? Math.round((p / s) * 100) / 100 : null,
     diffMs: p !== null && s !== null ? p - s : null,
   };
@@ -376,9 +378,9 @@ export function judgeWarmups({ options, variants, batches, aborted, cleanup, unt
         phases: call.timelines.map((timeline) => ({ bootMs: timeline.derived.bootMs, turnMs: timeline.derived.turnMs, exitToCloseMs: timeline.derived.exitToCloseMs })) }))),
     // C3: 변형별 병렬 영향(사전 고정 기준). ok가 아니면 결론을 내지 않는다(null).
     c3ParallelEffect: variants.map((variant) => {
-      const { ratio, diffMs } = variant.summary.parallelVsSequential;
+      const { ratio, diffMs, parallelMedianMs: p, sequentialMedianMs: s } = variant.summary.parallelVsSequential;
       return { variant: variant.id, ratio, diffMs,
-        observed: !ok || ratio === null ? null : ratio >= C.parallelRatio && diffMs >= C.parallelDiffMs };
+        observed: !ok || p === null || s === null ? null : p >= C.parallelRatio * s && p - s >= C.parallelDiffMs };
     }),
   };
   return { executionOk, complete, ok, failures, findings, planned: { batches: COMPARISON_VARIANTS.length * options.rounds * 2 } };

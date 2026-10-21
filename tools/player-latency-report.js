@@ -33,32 +33,70 @@ function reportError(code, message) {
 const finite = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
 const text = (value, max = 64) => (typeof value === 'string' && value.length <= max ? value : null);
 
-function regularFile(file) {
+const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
+
+// 심볼릭 링크가 아닌 실제 디렉터리/일반 파일인가(링크는 따라가지 않는다).
+function lstatKind(file) {
   try {
-    return fs.lstatSync(file).isFile();
+    const stat = fs.lstatSync(file);
+    if (stat.isSymbolicLink()) return 'link';
+    return stat.isDirectory() ? 'dir' : stat.isFile() ? 'file' : 'other';
   } catch (error) {
-    if (error.code === 'ENOENT') return false;
+    if (error.code === 'ENOENT') return 'absent';
     throw error;
   }
 }
 
-/** store(`.session-store/sessions/*\/loop.log`) 또는 game dir(`loop.log`)의 기록 파일 목록. */
+/**
+ * store(`.session-store/sessions/<세션>/loop.log`) 또는 game dir(`loop.log`)의 기록 파일 목록. 경로의 디렉터리와 파일은
+ * 모두 심볼릭 링크가 아니어야 한다 — 링크를 거쳐 store 밖의 기록을 읽지 않는다.
+ */
 export function findLoopLogs(root) {
   const resolved = path.resolve(root);
-  const sessions = path.join(resolved, '.session-store', 'sessions');
-  let dirs = null;
-  try {
-    if (fs.lstatSync(sessions).isDirectory()) dirs = fs.readdirSync(sessions).sort();
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
-  if (dirs) {
-    return dirs.map((name) => ({ key: name, file: path.join(sessions, name, 'loop.log') }))
-      .filter(({ file }) => regularFile(file));
+  const store = path.join(resolved, '.session-store');
+  const sessions = path.join(store, 'sessions');
+  if (lstatKind(store) === 'dir' && lstatKind(sessions) === 'dir') {
+    return fs.readdirSync(sessions).sort()
+      .filter((name) => lstatKind(path.join(sessions, name)) === 'dir')
+      .map((name) => ({ key: name, file: path.join(sessions, name, 'loop.log'), state: path.join(sessions, name, 'loop-state.json') }))
+      .filter(({ file }) => lstatKind(file) === 'file');
   }
   const single = path.join(resolved, 'loop.log');
-  if (regularFile(single)) return [{ key: path.basename(resolved), file: single }];
+  if (lstatKind(single) === 'file') return [{ key: path.basename(resolved), file: single, state: path.join(resolved, 'loop-state.json') }];
   throw reportError('NO_LOOP_LOGS', `NO_LOOP_LOGS: ${resolved}에 loop.log가 없습니다.`);
+}
+
+// 링크를 따르지 않고 읽기 전용으로 연다. 연 파일이 일반 파일이고 lstat과 같은 inode여야 한다.
+function readNoFollow(file, maxBytes) {
+  const before = fs.lstatSync(file);
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW);
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.ino !== before.ino || stat.dev !== before.dev) throw reportError('UNSAFE_PATH', `UNSAFE_PATH: ${file}`);
+    if (stat.size > maxBytes) return null;
+    const raw = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < stat.size) {
+      const read = fs.readSync(fd, raw, offset, stat.size - offset, offset);
+      if (read === 0) break;
+      offset += read;
+    }
+    return raw.subarray(0, offset);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** 세션의 상대 런타임(`loop-state.json`의 opponentRuntime 한 필드만). 없거나 읽을 수 없으면 null. */
+export function readOpponentRuntime(stateFile) {
+  try {
+    if (lstatKind(stateFile) !== 'file') return null;
+    const bytes = readNoFollow(stateFile, 4 * 1024 * 1024);
+    const value = bytes ? JSON.parse(bytes.toString('utf8'))?.opponentRuntime : null;
+    return typeof value === 'string' && value.length <= 32 ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 // 허용한 필드만 남긴다. timing은 숫자·불리언만이다.
@@ -96,24 +134,10 @@ function project(raw) {
 /** 한 기록 파일을 읽기 전용으로 읽어 허용한 이벤트만 돌려준다. */
 export function readLoopRecords(file, limits = REPORT_LIMITS) {
   const skipped = { oversizeFile: 0, oversizeLines: 0, unparsableLines: 0 };
-  const fd = fs.openSync(file, 'r');
-  let raw;
-  try {
-    const { size } = fs.fstatSync(fd);
-    if (size > limits.fileBytes) {
-      skipped.oversizeFile = 1;
-      return { records: [], skipped };
-    }
-    raw = Buffer.alloc(size);
-    let offset = 0;
-    while (offset < size) {
-      const read = fs.readSync(fd, raw, offset, size - offset, offset);
-      if (read === 0) break;
-      offset += read;
-    }
-    raw = raw.subarray(0, offset);
-  } finally {
-    fs.closeSync(fd);
+  const raw = readNoFollow(file, limits.fileBytes);
+  if (raw === null) {
+    skipped.oversizeFile = 1;
+    return { records: [], skipped };
   }
   const records = [];
   for (const line of raw.toString('utf8').split('\n')) {
@@ -207,16 +231,15 @@ function playerCallsOf(records) {
     } else group(attempt.decisionKey).attempts.push(attempt);
   }
   for (const { calls, attempts: tries } of groups.values()) {
-    const numbered = [...calls, ...tries].every((record) => record.callNo !== null);
-    if (numbered) {
-      const byNo = new Map();
-      for (const attempt of tries) if (!byNo.has(attempt.callNo)) byNo.set(attempt.callNo, attempt);
-      for (const call of calls) byNo.set(call.callNo, call);
-      out.push(...byNo.values());
-    } else {
-      // 옛 행은 callNo가 없다: 같은 결정 안에서 순번으로 대응한다.
-      out.push(...calls, ...tries.slice(calls.length));
-    }
+    // 번호가 있는 행끼리 먼저 callNo로 대응한다(player-call 우선).
+    const byNo = new Map();
+    for (const attempt of tries) if (attempt.callNo !== null && !byNo.has(attempt.callNo)) byNo.set(attempt.callNo, attempt);
+    for (const call of calls) if (call.callNo !== null) byNo.set(call.callNo, call);
+    out.push(...byNo.values());
+    // 남은 번호 없는 옛 행끼리만 순번으로 대응한다. 번호 있는 행과는 대응할 근거가 없어 따로 센다.
+    const oldCalls = calls.filter((record) => record.callNo === null);
+    const oldTries = tries.filter((record) => record.callNo === null);
+    out.push(...oldCalls, ...oldTries.slice(oldCalls.length));
   }
   return out;
 }
@@ -235,12 +258,16 @@ export function aggregateLatency(sessions, { since = null } = {}) {
   const skipped = { oversizeFile: 0, oversizeLines: 0, unparsableLines: 0 };
   const runtimes = {};
   let llmSessions = 0;
+  let withCalls = 0;
   for (const session of sessions) {
     for (const key of Object.keys(skipped)) skipped[key] += session.skipped?.[key] ?? 0;
     const records = session.records.filter((record) => afterSince(record, sinceMs));
     const calls = playerCallsOf(records);
-    if (calls.length === 0) continue;
+    // LLM 세션은 플레이어 호출이 있거나, loop-state의 상대 런타임이 llm인 세션이다(호출 없이 시작에 실패한 옛 세션 포함).
+    const llm = calls.length > 0 || session.opponentRuntime === 'llm';
+    if (!llm) continue;
     llmSessions += 1;
+    if (calls.length > 0) withCalls += 1;
     for (const runtime of new Set(calls.map((call) => call.runtime ?? 'unknown'))) runtimes[runtime] = (runtimes[runtime] ?? 0) + 1;
     for (const call of calls) {
       const kind = kindOf(call.purpose);
@@ -253,8 +280,8 @@ export function aggregateLatency(sessions, { since = null } = {}) {
       const spawn = records.find((record) => record.event === 'server-spawn' && record.at);
       const playing = spawn && records.find((record) => record.event === 'bootstrap-playing' && record.at && record.at >= spawn.at);
       const model = records.find((record) => record.event === 'runtime-models')?.player ?? null;
-      const runtime = model?.runtime ?? calls[0].runtime;
-      const modelId = model?.model ?? calls[0].model;
+      const runtime = model?.runtime ?? calls[0]?.runtime ?? 'unknown';
+      const modelId = model?.model ?? calls[0]?.model ?? 'unknown';
       if (spawn && !playing) unfinishedStarts.push({ runtime, model: modelId });
       else if (playing) {
         const ms = Date.parse(playing.at) - Date.parse(spawn.at);
@@ -273,7 +300,7 @@ export function aggregateLatency(sessions, { since = null } = {}) {
   return {
     schema: REPORT_SCHEMA,
     since,
-    sessions: { scanned: sessions.length, withPlayerCalls: llmSessions, byRuntime: runtimes },
+    sessions: { scanned: sessions.length, llm: llmSessions, withPlayerCalls: withCalls, byRuntime: runtimes },
     skipped,
     groups: [...groups.values()].map((group) => ({
       runtime: group.runtime, model: group.model, kind: group.kind, batchSize: group.batchSize,
@@ -303,7 +330,7 @@ export function aggregateLatency(sessions, { since = null } = {}) {
 }
 
 export function buildLatencyReport(root, options = {}) {
-  const sessions = findLoopLogs(root).map(({ key, file }) => ({ key, ...readLoopRecords(file) }));
+  const sessions = findLoopLogs(root).map(({ key, file, state }) => ({ key, ...readLoopRecords(file), opponentRuntime: readOpponentRuntime(state) }));
   return aggregateLatency(sessions, options);
 }
 
@@ -311,7 +338,7 @@ const fmt = (value) => (value === null || value === undefined ? '-' : `${(value 
 
 export function formatLatencyReport(report) {
   const lines = [
-    `플레이어 호출 지연(읽기 전용 집계) — 기록 ${report.sessions.scanned}개 중 호출 있는 세션 ${report.sessions.withPlayerCalls}개${report.since ? `, ${report.since} 이후` : ''}`,
+    `플레이어 호출 지연(읽기 전용 집계) — 기록 ${report.sessions.scanned}개 중 LLM 세션 ${report.sessions.llm}개(호출 있는 세션 ${report.sessions.withPlayerCalls}개)${report.since ? `, ${report.since} 이후` : ''}`,
   ];
   for (const group of report.groups) {
     const failed = Object.entries(group.outcomes.failed).map(([key, n]) => `${key} ${n}`).join(', ') || '0';
@@ -321,8 +348,9 @@ export function formatLatencyReport(report) {
     for (const [key, value] of Object.entries(group.timing)) lines.push(`  ${key} 중앙값 ${fmt(value.median)} · 최대 ${fmt(value.max)} (n=${value.n})`);
   }
   for (const proxy of report.legacyStartWarmupUpperBound) {
-    lines.push(`- ${proxy.runtime}/${proxy.model} 시작 warmup 상한 대리값(relay 기동 포함): 세션 ${proxy.sessions}, 중앙값 ${fmt(proxy.ms.median)} · 최대 ${fmt(proxy.ms.max)}`);
+    lines.push(`- ${proxy.runtime}/${proxy.model} 시작 warmup 상한 대리값(relay 기동 포함): 세션 ${proxy.sessions}, 중앙값 ${fmt(proxy.ms.median)} · 최대 ${fmt(proxy.ms.max)} · playing 전 끝난 시작 ${proxy.unfinishedStarts}`);
   }
+  lines.push(`playing에 이르지 못한 LLM 시작(대리값에서 제외): ${report.unfinishedStarts}`);
   lines.push(`건너뛴 줄: 손상 ${report.skipped.unparsableLines}, 상한 초과 ${report.skipped.oversizeLines}, 상한 초과 파일 ${report.skipped.oversizeFile}`);
   lines.push(...report.caveats.map((caveat) => `주의: ${caveat}`));
   return lines.join('\n');

@@ -218,6 +218,10 @@ test('C3 follows the pre-fixed rule: ratio ≥ 1.5 and difference ≥ 2 s, only 
     { par: [9000, 9500, 10000], seq: [4000, 4500, 5000], observed: true },
     // ratio 2.0 but a 1.1 s difference: below the 2 s floor.
     { par: [2000, 2200, 2400], seq: [1000, 1100, 1200], observed: false },
+    // 1.4999 rounds to 1.50 for display but is below the pre-fixed 1.5 (diff 4,999 ms ≥ 2 s).
+    { par: [14999, 14999, 14999], seq: [10000, 10000, 10000], observed: false },
+    // exactly 1.5 and a 5 s difference.
+    { par: [15000, 15000, 15000], seq: [10000, 10000, 10000], observed: true },
     { par: [6000, 6500, 7000], seq: [5000, 5200, 5400], observed: false },
   ];
   for (const { par, seq, observed } of cases) {

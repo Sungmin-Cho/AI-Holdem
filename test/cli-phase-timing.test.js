@@ -90,8 +90,10 @@ test('non-JSON and malformed lines are ignored without throwing', () => {
 });
 
 test('withTiming attaches once and never throws on unusual errors', () => {
-  const error = new Error('x');
-  withTiming(error, { a: 1 });
+  const error = Object.assign(new Error('x'), { code: 'TIMEOUT', details: { purpose: 'create' } });
+  assert.equal(withTiming(error, { a: 1 }), error, 'the same error object is passed on');
+  assert.equal(error.code, 'TIMEOUT');
+  assert.deepEqual(error.details, { purpose: 'create' });
   withTiming(error, { a: 2 });
   assert.deepEqual(error.timing, { a: 1 });
   const frozen = Object.freeze(new Error('y'));
@@ -107,17 +109,19 @@ function fakeRuntime(kind, script, opts = {}) {
   const scriptPath = path.join(dir, 'script.json');
   fs.writeFileSync(scriptPath, JSON.stringify(script));
   const handles = [];
+  const kills = [];
   const rt = createPlayerRuntime(kind, {
     env: { FAKE_CLI_SCRIPT: scriptPath, FAKE_CLI_LOG: path.join(dir, 'calls.jsonl') },
     exec: (spec) => {
       const handle = spawnCli({ ...spec, command: process.execPath, args: [FAKE_CLI, ...spec.args] });
       handles.push(handle);
-      return handle;
+      return { ...handle, kill: (signal) => { kills.push(signal); return handle.kill(signal); } };
     },
     ...opts,
   });
   return {
     rt,
+    kills,
     cleanup: async () => {
       for (const handle of handles) { try { handle.kill('SIGKILL'); } catch { /* 이미 종료 */ } }
       await rt.dispose?.().catch(() => {});
@@ -183,6 +187,7 @@ test('a timed-out call carries the signal and the confirmed close in its timing'
         return true;
       },
     );
+    assert.deepEqual(f.kills, ['SIGKILL'], 'timing adds no signal');
   } finally {
     await f.cleanup();
   }

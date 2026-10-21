@@ -6,12 +6,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { aggregateLatency, buildLatencyReport, findLoopLogs, main, readLoopRecords, REPORT_LIMITS } from '../tools/player-latency-report.js';
 
-function store(sessions) {
+function store(sessions, states = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-latency-'));
+  fs.mkdirSync(path.join(root, '.session-store', 'sessions'), { recursive: true });
   for (const [name, lines] of Object.entries(sessions)) {
     const dir = path.join(root, '.session-store', 'sessions', name);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'loop.log'), lines.map((line) => (typeof line === 'string' ? line : JSON.stringify(line))).join('\n') + '\n');
+    if (states[name]) fs.writeFileSync(path.join(dir, 'loop-state.json'), JSON.stringify(states[name]));
   }
   return root;
 }
@@ -94,7 +96,7 @@ test('old sessions without player-call fall back to player-attempt, and get the 
     ],
   });
   const report = buildLatencyReport(root);
-  assert.deepEqual(report.sessions, { scanned: 3, withPlayerCalls: 2, byRuntime: { codex: 2 } });
+  assert.deepEqual(report.sessions, { scanned: 3, llm: 2, withPlayerCalls: 2, byRuntime: { codex: 2 } });
   const decision = report.groups.find((group) => group.kind === 'decision');
   assert.equal(decision.model, 'gpt-6-luna');
   assert.equal(decision.calls, 2);
@@ -141,8 +143,8 @@ test('decision calls are matched per call number inside a session; sessions are 
     // callNo가 없는 옛 행: 순번으로 대응한다(call 1개, attempt 2개 → 호출 2개).
     c: [
       call(1, 'decision', 4000, { decisionId: 'd-1-preflop-0', generation: 1 }),
-      attempt(1, 4000, { decisionId: 'd-1-preflop-0', generation: 1, model: 'gpt-6.1-sol' }),
-      attempt(2, 5000, { decisionId: 'd-1-preflop-0', generation: 1, model: 'gpt-6.1-sol' }),
+      attempt(1, 4000, { decisionId: 'd-1-preflop-0', generation: 1, callNo: null, model: 'gpt-6.1-sol' }),
+      attempt(2, 5000, { decisionId: 'd-1-preflop-0', generation: 1, callNo: null, model: 'gpt-6.1-sol' }),
     ],
   });
   const decision = buildLatencyReport(root).groups.find((group) => group.kind === 'decision');
@@ -150,12 +152,16 @@ test('decision calls are matched per call number inside a session; sessions are 
   assert.deepEqual(decision.answeredMs, { n: 5, min: 1000, median: 3000, p90: 5000, p95: 5000, max: 5000 });
 });
 
-test('an LLM session whose start never reached playing is counted apart from the proxy distribution', () => {
+test('an LLM session whose start never reached playing is counted apart from the proxy distribution, even with no call at all', () => {
   const root = store({
     failed: [
       { at: at(0), event: 'runtime-models', player: { runtime: 'codex', model: 'gpt-6-luna' } },
       { at: at(1), event: 'server-spawn' },
-      attempt(3, 4000, { model: 'gpt-6-luna' }),
+    ],
+    // 정책 게임도 runtime-models를 남긴다 — loop-state가 llm이 아니면 LLM 시작으로 세지 않는다.
+    policy: [
+      { at: at(0), event: 'runtime-models', player: { runtime: 'codex', model: 'gpt-6-luna' } },
+      { at: at(1), event: 'server-spawn' },
     ],
     started: [
       { at: at(0), event: 'runtime-models', player: { runtime: 'codex', model: 'gpt-6-luna' } },
@@ -164,11 +170,35 @@ test('an LLM session whose start never reached playing is counted apart from the
       attempt(6, 4000, { model: 'gpt-6-luna' }),
     ],
   });
+  // store() 뒤에 loop-state를 넣는다.
+  fs.writeFileSync(path.join(root, '.session-store', 'sessions', 'failed', 'loop-state.json'), JSON.stringify({ opponentRuntime: 'llm', secret: 'x' }));
+  fs.writeFileSync(path.join(root, '.session-store', 'sessions', 'policy', 'loop-state.json'), JSON.stringify({ opponentRuntime: 'policy' }));
   const report = buildLatencyReport(root);
   assert.equal(report.unfinishedStarts, 1);
+  assert.equal(report.sessions.llm, 2);
+  assert.equal(report.sessions.withPlayerCalls, 1);
   assert.equal(report.legacyStartWarmupUpperBound[0].sessions, 1);
   assert.equal(report.legacyStartWarmupUpperBound[0].unfinishedStarts, 1);
   assert.equal(report.legacyStartWarmupUpperBound[0].ms.max, 4000);
+  assert.doesNotMatch(JSON.stringify(report), /secret/);
+  const out = [];
+  main([root], { stdout: { write: (chunk) => out.push(chunk) }, stderr: { write: () => {} } });
+  assert.match(out.join(''), /playing에 이르지 못한 LLM 시작\(대리값에서 제외\): 1/);
+});
+
+test('callNo-numbered rows match by number first; only the remaining unnumbered rows match by order', () => {
+  const id = { decisionId: 'd-1-preflop-0', generation: 1 };
+  const root = store({ s: [
+    call(1, 'decision', 2000, { ...id, callNo: 2 }),
+    attempt(1, 300000, { ...id, callNo: 1, code: 'TIMEOUT', category: 'timeout', censored: true, model: 'gpt-6.1-sol' }),
+    attempt(2, 2000, { ...id, callNo: 2, model: 'gpt-6.1-sol' }),
+    attempt(3, 7000, { ...id, callNo: null, model: 'gpt-6.1-sol' }),
+  ] });
+  const decision = buildLatencyReport(root).groups.find((group) => group.kind === 'decision');
+  assert.equal(decision.calls, 3, 'call #2, the timed-out attempt #1, and the unnumbered old row');
+  assert.equal(decision.outcomes.timeout, 1, 'the #1 timeout is kept');
+  assert.deepEqual(decision.answeredMs.max, 7000);
+  assert.equal(decision.answeredMs.n, 2, '#2 is counted once');
 });
 
 test('damaged, partial and oversize lines are skipped and counted; --since filters by record time', () => {
@@ -209,6 +239,9 @@ test('a game dir with a single loop.log is accepted; an empty path is refused; s
   const sessions = path.join(linked, '.session-store', 'sessions');
   fs.mkdirSync(path.join(sessions, 'x'), { recursive: true });
   fs.symlinkSync(path.join(gameDir, 'loop.log'), path.join(sessions, 'x', 'loop.log'));
+  assert.deepEqual(findLoopLogs(linked), []);
+  // 세션 디렉터리 자체가 store 밖을 가리키는 링크여도 따라가지 않는다.
+  fs.symlinkSync(gameDir, path.join(sessions, 'outside'));
   assert.deepEqual(findLoopLogs(linked), []);
 });
 
