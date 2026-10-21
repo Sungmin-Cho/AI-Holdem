@@ -878,6 +878,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const processTerminator = opts.processTerminator !== undefined
     ? opts.processTerminator
     : (!opts.signalProcess && process.platform === 'win32' ? terminateWin32ProcessStartedAt : null);
+  // #311: on POSIX a recorded coach is signalled through the process group its pid names, and
+  // through the pid alone when there is none (ESRCH). The adapter starts every CLI child as the
+  // leader of its own group (#297), and that child can be a launcher whose native child does the
+  // work. POSIX (XBD 4.14) never gives a live process a pid that is some group's id, nor reuses a
+  // group's id while it lasts: while the recorded identity is seen alive — in the same synchronous
+  // run as the signal, as #255 S3 requires — a group with its pid is one it made, its own and its
+  // descendants'. A record from before #297 leads no group and keeps the pid signal. Its own seam,
+  // like the two above: an injected `signalProcess` keeps the pid path.
+  const recordedGroupSignal = opts.recordedGroupSignal !== undefined
+    ? opts.recordedGroupSignal
+    : (!opts.signalProcess && process.platform !== 'win32' ? (pid, signal) => process.kill(-pid, signal) : null);
   // #192 O1/L1: test seam for judgment g's process scanner. Defaults to the real POSIX
   // lsof-based scan, reusing this instance's own `lsofPath`/`osVerifyMs` conventions.
   const scanCoachRuntimeProcessesFn = opts.scanCoachRuntimeProcesses
@@ -4895,7 +4906,15 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (now === 'ambiguous') return { outcome: 'unconfirmed', reason: 'IDENTITY_AMBIGUOUS' };
       if (now !== 'alive') return { outcome: 'unconfirmed', reason: 'IDENTITY_UNKNOWN' };
       try {
-        signalProcess(identity.pid, signal);
+        if (!recordedGroupSignal) signalProcess(identity.pid, signal);
+        else {
+          try {
+            recordedGroupSignal(identity.pid, signal);
+          } catch (error) {
+            if (error.code !== 'ESRCH') throw error;
+            signalProcess(identity.pid, signal);
+          }
+        }
       } catch (error) {
         if (error.code !== 'ESRCH') return { outcome: 'unconfirmed', reason: 'SIGNAL_FAILED' };
       }
