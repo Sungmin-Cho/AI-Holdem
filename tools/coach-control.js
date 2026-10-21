@@ -706,6 +706,8 @@ function sealUnavailable(auth, {
   return { ok: true, queueId, noteKind: 'unavailable' };
 }
 
+const WATCH_ACCEPT_PUBLISH_REFUSED = 'watch-accept --publish는 지원하지 않습니다. 코치 노트는 루프의 게시 관문만 게시합니다.';
+
 // #292: why a queued note may be withheld. The publisher's own judgment of the note against
 // the rule the relay applies (assertHostText) refused it, or (#310) the claim rule a fresh
 // note is held to (coachingClaimAllowed) refuses its text; nothing else (a relay answer, a
@@ -1185,7 +1187,7 @@ export function createCoachControl(deps = {}) {
   async function watchAccept({
     gameDir, owner, handNo, generation, forbiddenLiterals = [], pollMs = 200, publish = false,
   }) {
-    if (publish) fail('USAGE', 'watch-accept --publish는 지원하지 않습니다. 코치 노트는 루프의 게시 관문만 게시합니다.');
+    if (publish) fail('USAGE', WATCH_ACCEPT_PUBLISH_REFUSED);
     for (;;) {
       let out;
       try {
@@ -1881,6 +1883,8 @@ export async function runCoachControlCli(argv = process.argv.slice(2), deps = {}
       acceptEvidence: opts['accept-evidence'],
     });
   } else if (command === 'watch-accept') {
+    // #310: refused before anything is read (the forbidden file included).
+    if (opts.publish) fail('USAGE', WATCH_ACCEPT_PUBLISH_REFUSED);
     result = await cc.watchAccept({
       gameDir,
       owner: opts.owner,
@@ -1888,7 +1892,6 @@ export async function runCoachControlCli(argv = process.argv.slice(2), deps = {}
       generation: Number(opts.generation),
       forbiddenLiterals: readForbiddenFile(opts['forbidden-file']),
       pollMs: Number(opts['poll-ms'] ?? 200),
-      publish: Boolean(opts.publish),
     });
   } else if (command === 'complete-unavailable') {
     result = await cc.completeUnavailable({

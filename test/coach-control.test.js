@@ -642,8 +642,10 @@ test('#310 watch-accept --publish는 아무것도 accept하지 않고 USAGE로 �
     cc.watchAccept({ gameDir: dir, owner, handNo: 1, generation, publish: true }),
     (error) => error instanceof CoachError && error.code === 'USAGE',
   );
+  // The CLI refuses before it reads anything, a forbidden file that does not exist included.
   await assert.rejects(runCoachControlCli([
-    'watch-accept', '--game-dir', dir, '--owner', owner, '--hand', '1', '--generation', String(generation), '--publish',
+    'watch-accept', '--game-dir', dir, '--owner', owner, '--hand', '1', '--generation', String(generation),
+    '--forbidden-file', path.join(dir, 'no-such-forbidden.json'), '--publish',
   ]), { code: 'USAGE' });
   assert.equal(fs.readFileSync(authPath, 'utf8'), before);
   assert.equal(cc.loadAuthority(dir).publishQueue['1'], undefined);

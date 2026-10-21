@@ -60,6 +60,7 @@ import {
   recheckRejectionTupleOf,
   rejectionTupleOf,
   sanitizeRejectionFields,
+  coachNoteClaimAllowed,
   isBoundCoachNote,
   isCoachOnlyAttempt,
   participantSessionOf,
@@ -1641,7 +1642,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     let reason = null;
     if (verdicts.includes('FORBIDDEN_LITERAL')) reason = 'FORBIDDEN_LITERAL';
-    else if (notes.some((note) => !coachingClaimAllowed(note?.text))) reason = 'REFERENCE_AUTHORITY_CLAIM';
+    else if (notes.some((note) => !coachNoteClaimAllowed(note))) reason = 'REFERENCE_AUTHORITY_CLAIM';
     if (!reason) return null;
     const authority = replaying ? record?.coachAuthority : envelope?.coachAuthority;
     const handNo = notes[0]?.handNo;
@@ -1659,15 +1660,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     // Only the queue item the body was made for. A body the queue has already moved past is
     // the publisher's to discard as stale — unless it was a withholding that moved it, which
-    // a stop may have interrupted before the attempt was removed. Stale stays stale (a queueId
-    // names its game and generation, and generations only grow), and the publisher compares
-    // the item under its lock before any POST, so the body goes to it without the claim check
-    // below. Not bound to the record: a record of another game is the publisher's to remove
-    // (STALE_GAME_ATTEMPT), and a binding would leave it in place (ATTEMPT_CHANGED).
+    // a stop may have interrupted before the attempt was removed. A claim the gate below refuses
+    // stays refused, stale or not: within a game an item leaves the queue only sealed or withheld
+    // (coachAttemptSettled), and a body handed on unchecked could be another one by the time the
+    // publisher reads its record.
     const auth = readCoachAuthority();
     const current = auth?.publishQueue?.[String(handNo)]?.queueId === authority.queueId;
     const withheld = (auth?.withheldPublications ?? []).some((row) => row.queueId === authority.queueId);
-    if (!current && !withheld) return { stale: true };
+    if (!current && !withheld) return null;
     const out = await runCoach([
       'withhold-queued',
       '--hand', String(handNo),
@@ -1737,13 +1737,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     const withheld = retiring ? null : await withheldCoachPublication(args, { replaying, record, envelope });
     if (withheld?.result) return withheld.result;
-    if (withheld?.stale) return spawnPublish(args);
     if (withheld) {
       args = withheld.args;
       envelope = withheld.envelope;
     }
-    const feedback = [...(Array.isArray(envelope?.coach) ? envelope.coach.map((note) => note.text) : []), envelope?.review];
-    if (feedback.some((text) => !coachingClaimAllowed(text))) {
+    // #310: a coach note is judged on its text and its decision strings (the relay refuses the
+    // latter itself, after the body is recorded); a review on its text.
+    const notes = Array.isArray(envelope?.coach) ? envelope.coach : [];
+    if (notes.some((note) => !coachNoteClaimAllowed(note)) || !coachingClaimAllowed(envelope?.review)) {
       throw codedError('REFERENCE_AUTHORITY_CLAIM', '게시할 피드백에 근거 범위를 벗어난 표현이 있습니다.');
     }
     return spawnPublish(args);
