@@ -1114,6 +1114,17 @@ test('#306: a pending read is read again only within its bound, and never starte
     return 'late';
   }, 100.5, win32), { now: () => at }), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EPERM' });
   assert.equal(fractional, 2);
+  // The bound is where reads stop being started (r3): a read again started inside it that returns
+  // after it is what it observed, and stands.
+  at = 0.25;
+  let late = 0;
+  assert.equal(await withPlatformDeadline(10_000, () => readSettled(() => {
+    late += 1;
+    if (late === 1) throw pending();
+    at = 500;
+    return 'late';
+  }, 100.5, win32), { now: () => at }), 'late');
+  assert.equal(late, 2);
 
   // The platform budget in force.
   let started = platformNow();
