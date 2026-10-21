@@ -944,12 +944,18 @@ test('#306: an ensure whose service child reclaims a dead owner\'s lock past a r
   // removing the lock directory); the client polls the lock through all of it.
   const holder = holdOpen(path.join(lockPath(first.storeDir), 'pid'), { pendingLingerMs: 1500 });
   await holder.held;
-  const second = await launch(t, {}, first.storeDir);
+  // One call, made directly (r1): the launch helper would retry a failed ensure that spawned nothing.
+  const children = [];
+  const handle = await api.ensureStudyService(first.storeDir, {
+    onChild(child) { child.ref(); children.push(registerOwnedProcess(child, 'study service')); },
+  });
+  t.after(() => api.stopStudyService(first.storeDir, { expectedInstanceId: handle.instanceId }).catch(() => {}));
   const closed = await holder.closed;
   t.diagnostic(`holder ${closed.out.trim().replace(/\n/g, ' | ')}`);
   assert.equal(closed.code, 0, closed.err);
-  assert.notEqual(second.handle.instanceId, first.handle.instanceId);
-  assert.equal((await api.inspectStudyService(first.storeDir)).instanceId, second.handle.instanceId);
+  assert.equal(children.length, 1, 'one service child');
+  assert.notEqual(handle.instanceId, first.handle.instanceId);
+  assert.equal((await api.inspectStudyService(first.storeDir)).instanceId, handle.instanceId);
 });
 
 test('#306: an inspect that meets a lock whose pid file is pending deletion still fails closed', {
@@ -1096,6 +1102,18 @@ test('#306: a pending read is read again only within its bound, and never starte
     platformTimeout(1);
     return 'late';
   }, platformNow() + 200, win32), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EPERM' });
+  // The budget's whole milliseconds run out a fraction of one before the bound (r1): the read again
+  // fails as a spent budget while the clock is still short of the bound, and keeps the EPERM too.
+  let at = 0.25;
+  let fractional = 0;
+  await assert.rejects(withPlatformDeadline(10_000, () => readSettled(() => {
+    fractional += 1;
+    if (fractional === 1) throw pending();
+    at = 100;
+    platformTimeout(1);
+    return 'late';
+  }, 100.5, win32), { now: () => at }), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EPERM' });
+  assert.equal(fractional, 2);
 
   // The platform budget in force.
   let started = platformNow();

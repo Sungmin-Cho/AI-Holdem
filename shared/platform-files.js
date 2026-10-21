@@ -11,7 +11,9 @@ export function platformTimeout(maximum) {
   const budget = budgets.getStore();
   if (!budget) return maximum;
   const remaining = Math.floor(budget.deadline - budget.now());
-  if (remaining <= 0) throw Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT'), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
+  // `budgetSpent` tells a spent budget from a corrupt file under the same code (#306: a read again
+  // that runs out keeps the pending failure it was retrying).
+  if (remaining <= 0) throw Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT'), { code: 'STUDY_DESCRIPTOR_CORRUPT', budgetSpent: true });
   return Math.min(maximum, remaining);
 }
 export function extendPlatformDeadline(deadline) {

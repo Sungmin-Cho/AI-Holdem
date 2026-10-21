@@ -654,8 +654,9 @@ function optionsForChild(options) {
 // fixes a bound — PENDING_READ_WAIT_MS from then (the remover's own wait for that reader is
 // DELETE_PENDING_WAIT_MS), never past the call's deadline or the platform budget in force — that no
 // read starts after, and that each read again runs inside (its ACL proof included). A read still
-// failing then is thrown as it always was: the last pending EPERM, also when the bound ran out during
-// the read again (a spent budget, no errno). Any other failure of a read again is thrown at once.
+// failing then is thrown as it always was: the last pending EPERM, also when the budget ran out
+// during the read again (`budgetSpent` — the bound is a fraction of a millisecond away when the
+// budget's whole milliseconds are gone). Any other failure of a read again is thrown at once.
 // Nothing is decided from a failed read, so no pending name is taken for alive, dead or absent. The
 // bound is a wait policy, not a promise that a release ends inside it.
 const PENDING_READ_WAIT_MS = 2 * DELETE_PENDING_WAIT_MS;
@@ -669,10 +670,7 @@ export async function readSettled(read, deadline, { platform = process.platform 
     let failure;
     try { return bound === null ? read() : withPlatformDeadline(bound, read); }
     catch (error) { failure = error; }
-    if (!isPendingReadFailure(failure, platform)) {
-      const spent = pending && platformNow() >= bound && failure?.code === 'STUDY_DESCRIPTOR_CORRUPT' && !failure.fsCode;
-      throw spent ? pending : failure;
-    }
+    if (!isPendingReadFailure(failure, platform)) throw pending && failure?.budgetSpent === true ? pending : failure;
     pending = failure;
     if (bound === null) {
       try { bound = Math.min(deadline, platformNow() + platformTimeout(PENDING_READ_WAIT_MS)); }
@@ -701,7 +699,8 @@ async function ensureOwned(ctx, options, deadline, coldDeadline) {
         || descriptorIdentityStatus(descriptor.value, owner) !== 'dead') fail();
       if (owner && (owner.pid !== descriptor.value.pid || owner.startTime !== descriptor.value.startTime)) fail();
     }
-    assertContext(ctx);
+    // A read like the first: on Windows it lists the lock and descriptor names again (#306 r1).
+    await readSettled(() => assertContext(ctx), deadline);
     // Only the detached service child acquires/reclaims its lifetime lock. Clients
     // never remove a lock or send process signals, including failed startup paths.
     deadline = coldDeadline ?? platformNow() + COLD_START_MS;
