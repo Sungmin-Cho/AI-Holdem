@@ -218,7 +218,7 @@ function makeExplain({ delayMs = 0, gate = null, calls, text = VALID_EXPLAIN, te
   };
 }
 
-async function playUntil(loop, gameDir, { until, timeoutMs = 20_000 } = {}) {
+async function playUntil(loop, gameDir, { until, timeoutMs = 20_000, choose = null } = {}) {
   const running = startRun(loop);
   const sent = new Set();
   const deadline = Date.now() + timeoutMs;
@@ -237,7 +237,7 @@ async function playUntil(loop, gameDir, { until, timeoutMs = 20_000 } = {}) {
         // forever, and the old driver then returned without throwing.
         const action = {
           decisionId: legal.decisionId,
-          action: legal.canCheck ? 'check' : 'fold',
+          action: choose?.(legal) ?? (legal.canCheck ? 'check' : 'fold'),
         };
         const result = await postUserAction(lock, action);
         if (result?.status === 409 || result?.code === 'ACTION_REJECTED') continue;
@@ -1436,25 +1436,11 @@ test('#303 a restart of recorded hands explains what the stop ended and never re
   await resumed.requestStop().catch(() => {});
 });
 
-// #303, the issue's own case: in one hand H, A's explanation failed and B's was still running when
-// the stop came. The stop records H itself; the restart explains B only.
-test('#303 one hand: A failed, B was running at the stop; the restart explains B only', { timeout: 120_000 }, async (t) => {
+// #303, the issue's own case: in one hand H, A's explanation failed and B was still to be explained
+// (running, or queued at the explain lock) when the stop came. The stop records H itself; the
+// restart explains B only.
+test('#303 one hand: A failed, B was still to explain at the stop; the restart explains B only', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
-  // Two evaluations per decision (a second provider version), so each hand has items A and B.
-  const evaluate = (sessionDir, handNo) => handleOf(() => {
-    const state = readJson(path.join(sessionDir, 'state.json'));
-    const snaps = userDecisions(sessionDir, handNo);
-    if (!snaps.length) return { ok: false, code: 'NO_DECISION' };
-    const epoch = gameEpochOf(state.sessionToken);
-    return {
-      ok: true,
-      evaluations: snaps.flatMap((snap) => {
-        const base = cannedEvaluation(snap.decisionId, epoch);
-        const second = evaluationIdOf({ gameEpoch: epoch, decisionId: snap.decisionId, providerId: 'local-preflop-baseline', providerVersion: '1.0.1' });
-        return [base, { ...base, evaluationId: second }];
-      }),
-    };
-  }, { delayMs: 40 });
   const explainCalls = [];
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
@@ -1464,8 +1450,8 @@ test('#303 one hand: A failed, B was running at the stop; the restart explains B
     resolver: async () => ({ player: null, upper: null, notices: [] }),
     opts: { port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true,
       training: {
-        evaluate,
-        // A comes back empty; B (and everything after it) is held until the stop ends it.
+        evaluate: makeEvaluate(),
+        // A comes back empty; every later explanation is held until the stop ends it.
         explain: (evaluation) => {
           explainCalls.push(evaluation);
           return explainCalls.length === 1 ? handleOf('') : handleOf(VALID_EXPLAIN, { gate });
@@ -1475,15 +1461,25 @@ test('#303 one hand: A failed, B was running at the stop; the restart explains B
   t.after(() => first.requestStop().catch(() => {}));
   await first.bootstrap({ ai: 1, mode: 'cash-training', stackBb: 100, blinds: '50/100', hands: 8, opponentRuntime: 'policy' });
   putUserOnTheButton(gameDir);
-  const itemHands = () => [...new Set(authorityItems(gameDir).map((item) => item.handNo))];
-  await playUntil(first, gameDir, { until: () => explainCalls.length >= 2 && itemHands().length >= 2, timeoutMs: 60_000 });
+  // The user calls (or checks) the first decision instead of folding, so that hand has a second
+  // decision of the user's own: two real items, A and B.
+  let decided = 0;
+  const choose = (legal) => (decided++ === 0 && !legal.canCheck && legal.callAmount > 0 ? 'call' : null);
+  const lastHandNo = () => readJson(path.join(gameDir, 'state.json')).lastHand?.handNo ?? 0;
+  await playUntil(first, gameDir, {
+    choose,
+    until: () => explainCalls.length >= 1 && lastHandNo() > explainCalls[0].handNo,
+    timeoutMs: 60_000,
+  });
   await first.requestStop();
-  const [a, b] = explainCalls;
-  assert.equal(a.handNo, b.handNo, 'A and B are items of one hand');
-  const lastHandNo = readJson(path.join(gameDir, 'state.json')).lastHand?.handNo;
-  assert.notEqual(a.handNo, lastHandNo, 'H is not the last hand (which a restart registers anyway)');
+  const a = explainCalls[0];
+  const handItems = authorityItems(gameDir).filter((item) => item.handNo === a.handNo);
+  const rest = handItems.filter((item) => item.evaluationId !== a.evaluationId);
+  assert.ok(rest.length >= 1 && new Set(handItems.map((item) => item.decisionId)).size === handItems.length,
+    `H has items of distinct decisions besides A: ${JSON.stringify(handItems.map((item) => item.decisionId))}`);
+  assert.notEqual(a.handNo, lastHandNo(), 'H is not the last hand (which a restart registers anyway)');
   assert.deepEqual([explanationOf(gameDir, a)?.status, explanationOf(gameDir, a)?.sealReason], ['unavailable', 'explain-failed']);
-  assert.equal(explanationOf(gameDir, b), null, 'the attempt the stop ended is not a failure');
+  assert.ok(rest.every((item) => explanationOf(gameDir, item) === null), 'what the stop kept from finishing is not a failure');
   const loopPath = path.join(gameDir, 'loop-state.json');
   assert.ok((readJson(loopPath).trainingDeferredHands ?? []).includes(a.handNo), 'the stop recorded H itself');
   const explained = [];
@@ -1491,20 +1487,20 @@ test('#303 one hand: A failed, B was running at the stop; the restart explains B
     gameDir,
     resolver: async () => ({ player: null, upper: null, notices: [] }),
     opts: { port: 0, waitMs: 40, opponentRuntime: 'policy', trainingEnabled: true,
-      training: { evaluate, explain: (evaluation) => { explained.push(evaluation.evaluationId); return handleOf(VALID_EXPLAIN, { delayMs: 30 }); } } },
+      training: { evaluate: makeEvaluate(), explain: (evaluation) => { explained.push(evaluation.evaluationId); return handleOf(VALID_EXPLAIN, { delayMs: 30 }); } } },
   });
   t.after(() => resumed.requestStop().catch(() => {}));
   await resumed.resume();
-  await waitFor(() => explanationOf(gameDir, b)?.status === 'ready', 'B was not explained after the restart', 20_000);
+  await waitFor(() => rest.every((item) => explanationOf(gameDir, item)?.status === 'ready'), 'B was not explained after the restart', 20_000);
   await waitFor(() => readJson(loopPath).trainingDeferredHands === undefined, 'the record was not cleared once the hands ran through', 20_000);
   assert.equal(explained.includes(a.evaluationId), false, `A was attempted again: ${JSON.stringify(explained)}`);
   await resumed.requestStop().catch(() => {});
 });
 
 // #303: the real explainer, waiting on the background upper-model resolution (R2). A start that
-// throws once the model is known makes no attempt (the item stays unsealed); the hand's next
-// explanation still goes out.
-test('#303 an explainer that cannot start after the upper model resolves makes no attempt; the next explanation goes on', { timeout: 120_000 }, async (t) => {
+// throws once the model is known makes no attempt (the item stays unsealed); the next explanation
+// still goes out, and its started call's failure is final (explain-failed).
+test('#303 an explainer that cannot start after the upper model resolves makes no attempt; a started call that fails is final', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();
   let releaseUpper;
   const upperGate = new Promise((resolve) => { releaseUpper = resolve; });
@@ -1521,6 +1517,7 @@ test('#303 an explainer that cannot start after the upper model resolves makes n
       if (!String(call?.prompt ?? '').startsWith('역할: 학습 해설')) return done('');
       starts.push(explanationIdOf(call.prompt));
       if (starts.length === 1) throw Object.assign(new Error('RUNTIME_NOT_VERIFIED'), { code: 'RUNTIME_NOT_VERIFIED' });
+      if (starts.length === 2) return { done: Promise.reject(new Error('child failed')), terminate: async () => ({ confirmed: true }) };
       return done(JSON.stringify({ evaluationId: starts.at(-1), explanation: VALID_EXPLAIN }));
     },
   };
@@ -1539,13 +1536,19 @@ test('#303 an explainer that cannot start after the upper model resolves makes n
     until: () => new Set(authorityItems(gameDir).map((item) => item.handNo)).size >= 2,
     timeoutMs: 60_000,
   });
+  // An explanation is waiting on the upper resolution (the R2 branch), not yet started.
+  await waitFor(() => loop.pauseProgress.resolver === true && loop.pauseProgress.explain > 0,
+    'no explanation was waiting on the upper resolution', 20_000);
   assert.deepEqual(starts, [], 'explanations wait on the upper resolution');
   releaseUpper();
   await waitFor(() => starts.length >= 2 && authorityItems(gameDir).some((item) => item.evaluationId === starts[1]
-    && explanationOf(gameDir, item)?.status === 'ready'), 'the explanation after the failed start was not made', 20_000);
-  const failed = authorityItems(gameDir).find((item) => item.evaluationId === starts[0]);
-  assert.ok(failed, JSON.stringify(starts));
-  assert.equal(explanationOf(gameDir, failed), null, 'a start that threw is not a finished failure');
+    && explanationOf(gameDir, item)?.status === 'unavailable'), 'the explanation after the failed start was not made', 20_000);
+  const items = authorityItems(gameDir);
+  const notStarted = items.find((item) => item.evaluationId === starts[0]);
+  const rejected = items.find((item) => item.evaluationId === starts[1]);
+  assert.ok(notStarted && rejected, JSON.stringify(starts));
+  assert.equal(explanationOf(gameDir, notStarted), null, 'a start that threw is not a finished failure');
+  assert.equal(explanationOf(gameDir, rejected).sealReason, 'explain-failed', 'a started call that failed is final');
   await loop.requestStop().catch(() => {});
 });
 
