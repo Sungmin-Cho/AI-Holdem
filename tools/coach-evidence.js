@@ -4,7 +4,7 @@
 // imports neither tools/game-loop.js nor tools/coach-control.js (both import it).
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { validWin32StartTime } from '../engine/process-identity.js';
 import {
   validOwnedIdentity, parseLinuxReading, createLinuxProcessStartTime,
@@ -309,6 +309,48 @@ export function processAlive(pid) {
     if (error.code === 'EPERM') return true;
     throw error;
   }
+}
+
+// #311: whether `pid` leads its own session (and so its own process group): true, false, or
+// null when it cannot be read. Linux reads /proc/<pid>/stat (pgrp and session, after the
+// command name); macOS reads `ps` (pgid, and the `s` session-leader flag — its `sess` column
+// is always 0). A session leader never leaves its session or its group, and only a process
+// already in that session can join the group, so every member of the group is the leader or
+// came from it. `fsImpl`/`exec` are test seams.
+export function processLeadsSession(pid, { platform = process.platform, fsImpl = fs, exec = execFileSync, timeoutMs = 3000 } = {}) {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return false;
+  if (platform === 'linux') {
+    let text;
+    try { text = fsImpl.readFileSync(`/proc/${pid}/stat`, 'utf8'); } catch { return null; }
+    const close = text.lastIndexOf(')');
+    if (close < 0) return null;
+    const [, , pgrp, session] = text.slice(close + 1).trim().split(' ');
+    if (!/^\d+$/.test(pgrp ?? '') || !/^\d+$/.test(session ?? '')) return null;
+    return Number(pgrp) === pid && Number(session) === pid;
+  }
+  if (platform === 'darwin') {
+    let out;
+    try {
+      out = exec('ps', ['-p', String(pid), '-o', 'pgid=,stat='], {
+        encoding: 'utf8', timeout: timeoutMs, env: { ...process.env, LANG: 'C', LC_ALL: 'C' },
+      });
+    } catch { return null; }
+    const [pgid, stat] = String(out).trim().split(/\s+/);
+    if (!/^\d+$/.test(pgid ?? '') || typeof stat !== 'string' || stat === '') return null;
+    return Number(pgid) === pid && stat.includes('s');
+  }
+  return null;
+}
+
+// #311: signal the process group a recorded coach leads, when it provably leads one — a pid
+// above 1 (kill(-1) is every process the caller may signal) that leads its own session. Returns
+// false, sending nothing, otherwise; the caller then signals the pid alone, as before. A kill
+// error is the caller's to judge.
+export function signalRecordedSessionGroup(pid, signal, { leadsSession = processLeadsSession, kill = process.kill.bind(process) } = {}) {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return false;
+  if (leadsSession(pid) !== true) return false;
+  kill(-pid, signal);
+  return true;
 }
 
 // Root-bound readers. `statGameRoot` and `sidecarNoFollowFlag` are the loop's existing seams.

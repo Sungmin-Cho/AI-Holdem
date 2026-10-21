@@ -79,7 +79,7 @@ import {
   consultCoachCloseEvidence, scanCoachRuntimeProcesses, parseLsofCwdRecords, legacyCoachRuntimeCandidates,
   createCoachEvidenceReader, parsePersistedCoachHandle, validSidecarIdentity, sidecarTupleMismatch, rowIdentities,
   notSpawnedHolds, legacyEligible, observeRecordedIdentity, processAlive, coachProcessStartTime,
-  recordedTerminatorTimeoutMs,
+  recordedTerminatorTimeoutMs, signalRecordedSessionGroup,
 } from './coach-evidence.js';
 // Re-exported for existing importers (tests and tools) of these names.
 export {
@@ -878,17 +878,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const processTerminator = opts.processTerminator !== undefined
     ? opts.processTerminator
     : (!opts.signalProcess && process.platform === 'win32' ? terminateWin32ProcessStartedAt : null);
-  // #311: on POSIX a recorded coach is signalled through the process group its pid names, and
-  // through the pid alone when there is none (ESRCH). The adapter starts every CLI child as the
-  // leader of its own group (#297), and that child can be a launcher whose native child does the
-  // work. POSIX (XBD 4.14) never gives a live process a pid that is some group's id, nor reuses a
-  // group's id while it lasts: while the recorded identity is seen alive — in the same synchronous
-  // run as the signal, as #255 S3 requires — a group with its pid is one it made, its own and its
-  // descendants'. A record from before #297 leads no group and keeps the pid signal. Its own seam,
-  // like the two above: an injected `signalProcess` keeps the pid path.
+  // #311: on POSIX a recorded coach that leads its own session is signalled through its process
+  // group. The adapter starts every CLI child that way (#297, setsid), and that child can be a
+  // launcher whose native child does the work. A session leader never leaves its session or its
+  // group, only a process already in its session can join the group, and POSIX (XBD 4.14) reuses
+  // neither its pid nor its group's id while it lives — so while the recorded identity is seen
+  // alive, in the same synchronous run as the signal (#255 S3), the group is the leader's own
+  // and its descendants'. Anything else — a record from before #297, a pid of 1 or less, a
+  // leader check that cannot be read — keeps the pid signal: `recordedGroupSignal(pid, signal)`
+  // returns false having sent nothing. Its own seam, like the two above: an injected
+  // `signalProcess` keeps the pid path.
   const recordedGroupSignal = opts.recordedGroupSignal !== undefined
     ? opts.recordedGroupSignal
-    : (!opts.signalProcess && process.platform !== 'win32' ? (pid, signal) => process.kill(-pid, signal) : null);
+    : (!opts.signalProcess && process.platform !== 'win32' ? signalRecordedSessionGroup : null);
   // #192 O1/L1: test seam for judgment g's process scanner. Defaults to the real POSIX
   // lsof-based scan, reusing this instance's own `lsofPath`/`osVerifyMs` conventions.
   const scanCoachRuntimeProcessesFn = opts.scanCoachRuntimeProcesses
@@ -4906,15 +4908,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (now === 'ambiguous') return { outcome: 'unconfirmed', reason: 'IDENTITY_AMBIGUOUS' };
       if (now !== 'alive') return { outcome: 'unconfirmed', reason: 'IDENTITY_UNKNOWN' };
       try {
-        if (!recordedGroupSignal) signalProcess(identity.pid, signal);
-        else {
-          try {
-            recordedGroupSignal(identity.pid, signal);
-          } catch (error) {
-            if (error.code !== 'ESRCH') throw error;
-            signalProcess(identity.pid, signal);
-          }
-        }
+        // A group signal that fails is not retried at the pid: a group the leader check passed is
+        // gone only with its leader (ESRCH, read as dead), and any other error is unconfirmed.
+        if (!recordedGroupSignal?.(identity.pid, signal)) signalProcess(identity.pid, signal);
       } catch (error) {
         if (error.code !== 'ESRCH') return { outcome: 'unconfirmed', reason: 'SIGNAL_FAILED' };
       }
