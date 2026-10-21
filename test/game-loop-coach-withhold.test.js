@@ -411,9 +411,10 @@ for (const [name, spoil] of [
 }
 
 // #310: the claim rule a fresh note is held to (coachingClaimAllowed) can change between
-// versions too, and the relay does not apply it. A queued note it refuses now gets what a fresh
-// one would: withheld for good (text kept on disk, never sent) and the hand's unavailable note
-// published in its place. The participant-card rule decides first.
+// versions too. The relay applies it to decision strings only, never to the text. A queued note
+// it refuses now is a stored, proof-bound body that is never rewritten: withheld whole (text kept
+// on disk, never sent) and the hand's unavailable note published in its place. The
+// participant-card rule decides first.
 const CLAIM = '이 콜은 EV 손실이 1.5bb입니다.';
 
 // A solo game (user and one AI) whose first hand is over, with a coach note for it accepted
@@ -537,10 +538,15 @@ test('#310 큐가 이미 지나간(stale) 문구 위반 기록은 지금처럼 �
   await first.requestStop();
   const recorded = await recordAttemptOf(gameDir, queued);
   // The queue moved past the recorded item without sealing or withholding it (within a game only
-  // a seal or a withholding does, and coachAttemptSettled settles both).
+  // a seal or a withholding of that item does, and coachAttemptSettled settles both): the hand is
+  // sealed as another item, so nothing coaches it again and only the record's resend is left.
   const authPath = path.join(gameDir, '.coach-authority.json');
   const auth = readJson(authPath);
   delete auth.publishQueue['1'];
+  auth.publishedSeals['1'] = {
+    queueId: `${auth.gameEpoch}:1:99:${'0'.repeat(64)}`, handNo: 1, noteKind: 'unavailable', payloadSha256: '0'.repeat(64),
+    publicProofId: '1'.repeat(64), overfold: false, publishedAtRevision: null,
+  };
   fs.writeFileSync(authPath, JSON.stringify(auth));
   const sent = [];
   const restarted = newLoop(t, gameDir, { onPublishInvoke: (args) => sent.push(args) });
@@ -605,6 +611,49 @@ test('#310 참가자 카드를 판정할 수 없으면 문구 규칙에 걸려�
   await restarted.requestStop();
   assert.equal(spoiled, true, 'the drain was reached');
   assert.equal(failure?.code, 'FORBIDDEN_LITERAL_UNAVAILABLE');
+  const auth = cc.loadAuthority(gameDir);
+  assert.equal(auth.publishQueue['1'].queueId, queued.queueId);
+  assert.equal(auth.withheldPublications, undefined);
+  assert.equal(sent.some((args) => args.includes(queued.exactEnvelopePath)), false);
+});
+
+test('#310 decisions 문자열만 문구 위반인 노트의 기록 attempt도 보류 뒤 보내지 않고 지워지고 증거에 남는다', { timeout: TIMEOUT }, async (t) => {
+  const clean = '핸드 1의 폴드는 무난했습니다.';
+  const { gameDir, first, cc, queued: accepted } = await soloGameWithQueuedNote(t, clean);
+  const why = '이 폴드의 EV 손실은 1.5bb입니다.';
+  const queued = requeueAs(gameDir, accepted, {
+    handNo: 1, text: clean, decisions: [{ decisionId: 'd-1-preflop-0', why, outcome: '상대가 폴드했습니다.', alternative: '레이즈도 검토할 수 있었습니다.' }],
+  });
+  await first.requestStop();
+  const recorded = await recordAttemptOf(gameDir, queued);
+  const restarted = newLoop(t, gameDir);
+  await restarted.resume();
+  const running = startRun(restarted);
+  await waitFor(
+    () => readLoopLog(gameDir).some((row) => row.event === 'resume-archive-check'),
+    'the resume entry did not get past the recorded attempt',
+    20_000 * WIN32_SCALE,
+  );
+  await restarted.requestStop();
+  const failure = await running.then(() => null, (error) => error);
+  assert.equal(failure, null, failure?.code);
+  assert.equal(fs.existsSync(attemptFile(gameDir)), false);
+  const evidence = assertClaimWithheld(gameDir, cc, queued, why);
+  assert.deepEqual(JSON.parse(JSON.parse(fs.readFileSync(evidence.attemptEvidencePath, 'utf8')).raw), recorded);
+});
+
+test('#310 decisions가 행이 아닌([null]) 문구 위반 본문은 결속되지 않아 지금처럼 REFERENCE_AUTHORITY_CLAIM으로 멈추고 아무것도 바꾸지 않는다', { timeout: TIMEOUT }, async (t) => {
+  const { gameDir, first, cc, queued } = await soloGameWithQueuedNote(t, '핸드 1의 폴드는 무난했습니다.');
+  const envelope = readJson(queued.exactEnvelopePath);
+  envelope.coach[0].text = CLAIM;
+  envelope.coach[0].decisions = [null];
+  fs.writeFileSync(queued.exactEnvelopePath, JSON.stringify(envelope));
+  await first.requestStop();
+  const sent = [];
+  const restarted = newLoop(t, gameDir, { onPublishInvoke: (args) => sent.push(args) });
+  const failure = await restarted.resume().then(() => null, (error) => error);
+  await restarted.requestStop();
+  assert.equal(failure?.code, 'REFERENCE_AUTHORITY_CLAIM');
   const auth = cc.loadAuthority(gameDir);
   assert.equal(auth.publishQueue['1'].queueId, queued.queueId);
   assert.equal(auth.withheldPublications, undefined);

@@ -228,6 +228,8 @@ export function isCoachOnlyAttempt(record) {
 export function isBoundCoachNote(note, authority) {
   if (!plainObject(note) || !plainObject(note.coachProof) || !plainObject(authority)
     || typeof authority.queueId !== 'string' || note.handNo !== authority.handNo) return false;
+  // #310: a note whose decisions are not rows the digest can read (`[null]`) is no item's.
+  if (note.decisions !== undefined && (!Array.isArray(note.decisions) || !note.decisions.every(plainObject))) return false;
   const digest = payloadSha256(note);
   return digest === authority.payloadSha256 && note.coachProof.payloadSha256 === digest
     && note.coachProof.id === publicProofId(authority.queueId)

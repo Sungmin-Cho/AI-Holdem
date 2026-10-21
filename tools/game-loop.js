@@ -1629,9 +1629,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // unsent; a queued envelope is replaced by its successor. Returns null when the body goes
   // out as it is.
   // #310: the claim rule a fresh note is held to (validateCoachNote) can change between versions
-  // too, and the relay does not apply it: a queued note it refuses now gets what a fresh one
-  // would (the hand's unavailable note), its stored text never rewritten. The participant-card
-  // rule decides first; a note both refuse is withheld as FORBIDDEN_LITERAL.
+  // too. The relay applies it to decision strings only (refusing the body), never to the text, so
+  // this gate is the one place that holds the text to it. A fresh note loses only its refused
+  // sentences; a queued one is a stored, proof-bound body that is never rewritten, so a refused
+  // one is withheld whole for the hand's unavailable note. The participant-card rule decides
+  // first; a note both refuse is withheld as FORBIDDEN_LITERAL.
   const withheldCoachPublication = async (args, { replaying, record, envelope }) => {
     const body = replaying ? record?.body : envelope;
     const notes = Array.isArray(body?.coach) ? body.coach : [];
@@ -3505,7 +3507,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           // A pause (or the finalization priority) that closed while this
           // waited: start nothing and let the pipeline re-register the hand.
           if (!trainingMayExplain(evaluation.handNo)) return EXPLAIN_HELD;
-          started = explainForPipeline(evaluation);
+          // #303: an explainer that cannot start now (a closed or unverified runtime) makes no
+          // attempt, as when a direct call throws; only a started call's failure is final.
+          try {
+            started = explainForPipeline(evaluation);
+          } catch {
+            return EXPLAIN_NONE;
+          }
           return started.promise;
         }),
         terminate: async () => {

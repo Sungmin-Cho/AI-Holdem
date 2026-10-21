@@ -680,22 +680,32 @@ test('#303 an explainer that throws before it starts makes no attempt: the item 
   assert.equal(auth.items[b.evaluationId].annotations.explanation.status, 'ready');
 });
 
-test('#303 an attempt the caller ended (failureFinal false) and an explainer with no model stay unsealed', async () => {
+test('#303 an attempt the caller ended (failureFinal false) stays unsealed', async () => {
   const dir = tmp();
-  const { gameEpoch, evaluations: [a, b] } = await twoItemHand(dir);
-  let stopped = false;
+  const { gameEpoch, evaluations: [a] } = await twoItemHand(dir);
+  // A stop ended A's explainer, which came back empty.
   const result = await runTwoItemHand(dir, gameEpoch, {
-    // A's explainer is ended by a stop and comes back empty; B has no model to call.
-    explain: (evaluation) => {
-      if (evaluation.evaluationId === a.evaluationId) { stopped = true; return handleOf(null); }
-      return handleOf(pipeline.EXPLAIN_NONE);
-    },
+    explain: () => handleOf(null),
     admitExplain: () => true,
-    failureFinal: () => !stopped,
+    failureFinal: () => false,
   });
   assert.equal(result.ok, true);
   assert.equal(result.deferred, undefined);
   const auth = createTrainingControl().loadAuthority(dir);
   assert.equal(auth.items[a.evaluationId].annotations?.explanation, undefined, 'a stop recorded the hand; the item waits for it');
-  assert.equal(auth.items[b.evaluationId].annotations?.explanation, undefined, 'no attempt was made; the cutoff seals it');
+});
+
+test('#303 an explainer with no model to call makes no attempt even when failures are final', async () => {
+  const dir = tmp();
+  const { gameEpoch, evaluations: [a, b] } = await twoItemHand(dir);
+  const result = await runTwoItemHand(dir, gameEpoch, {
+    explain: (evaluation) => handleOf(evaluation.evaluationId === a.evaluationId ? pipeline.EXPLAIN_NONE : VALID_EXPLAIN),
+    admitExplain: () => true,
+    failureFinal: () => true,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.deferred, undefined, 'no model is not a deferral: the hand is not registered again');
+  const auth = createTrainingControl().loadAuthority(dir);
+  assert.equal(auth.items[a.evaluationId].annotations?.explanation, undefined, 'the cutoff seals it');
+  assert.equal(auth.items[b.evaluationId].annotations.explanation.status, 'ready');
 });
