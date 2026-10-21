@@ -4927,6 +4927,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         stop = unlessAlive();
         if (stop !== undefined) return stop;
       }
+      // Nothing is sent past the deadline: the observation just taken is a process read of its own
+      // (ps for a start time) and can spend what was left (#311 r2).
+      if (remainingMsUntil(deadlineNs) <= 0) return { outcome: 'unconfirmed', reason: 'DEADLINE_EXCEEDED' };
       try {
         // A group signal that fails is not retried at the pid: a group whose leader was just seen
         // is gone only with it (ESRCH, read as dead), and any other error is unconfirmed.

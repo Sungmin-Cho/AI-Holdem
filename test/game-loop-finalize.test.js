@@ -967,6 +967,65 @@ for (const during of ['deadline', 'replacement']) {
   });
 }
 
+// #311 r2: the observation the signal follows is a process read of its own (ps for a start time)
+// and can spend what is left of the deadline as well. Nothing is sent then — through the group, at
+// the pid after a leader read that is false, or at the pid where no leader read is made — and the
+// SIGKILL step keeps the same rule. (Without the check after that observation, each would signal.)
+for (const [step, leads] of [['SIGTERM', true], ['SIGTERM', false], ['SIGTERM', null], ['SIGKILL', true]]) {
+  test(`#311 a deadline spent observing the coach right before its ${step} sends no ${step} (leader read ${leads === null ? 'not made' : leads})`, { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+    const gameDir = tmpGame();
+    const init = await seedFinishedGame(gameDir);
+    const external = await startExternalServer(gameDir, init.sessionToken);
+    t.after(() => terminateIfAlive(external.child));
+    const orphan = await startCoachOrphan({ ignoreTerm: true });
+    t.after(() => terminateIfAlive(orphan));
+    const seeded = await seedRunningCoach(gameDir, 'old-owner', 1, orphan, { startTimeOf: ownedProcessStartTime });
+    const clock = createJumpClock();
+    const finalizeBudgetMs = 3_000 * WIN32_SCALE;
+    let reads = 0;
+    let leaderCalls = 0;
+    let armed = false;
+    let jumped = false;
+    const sent = [];
+    const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
+      upper: makeCoachAdapter(),
+      stateOverrides: { port: external.lock.port },
+      loopOpts: {
+        finalizeBudgetMs,
+        finalizeCutoffLeadMs: 2_000 * WIN32_SCALE,
+        orphanTerminateGraceMs: 100,
+        monotonicNs: clock.monotonicNs,
+        recordedTerminator: null,
+        ownedProcessStartTime: (pid) => {
+          if (pid !== orphan.pid) return ownedProcessStartTime(pid);
+          reads += 1;
+          // Without a leader read, the SIGTERM step's own observation is the second read.
+          if ((armed || (leads === null && reads === 2)) && !jumped) {
+            jumped = true;
+            clock.jumpBy(finalizeBudgetMs + 1_000);
+          }
+          return seeded.startTime;
+        },
+        signalProcess: (pid, signal) => {
+          if (pid === orphan.pid) sent.push(['pid', signal]);
+          else process.kill(pid, signal);
+        },
+        recordedSessionLeader: leads === null ? null : () => {
+          leaderCalls += 1;
+          if (leaderCalls === (step === 'SIGTERM' ? 1 : 2)) armed = true;
+          return leads;
+        },
+        recordedGroupSignal: (pid, signal) => { sent.push(['group', signal]); },
+      },
+    });
+    await assert.rejects(loop.resume(), { code: 'FINALIZATION_ABORTED' });
+    assert.equal(jumped, true, 'the deadline was spent during that observation');
+    assert.deepEqual(sent.filter(([, signal]) => signal === step), [], `no ${step} past the deadline`);
+    if (step === 'SIGKILL') assert.deepEqual(sent, [['group', 'SIGTERM']]);
+    assert.doesNotThrow(() => process.kill(orphan.pid, 0));
+  });
+}
+
 // Where the start time is fixed at creation (Windows, macOS) another owned reading is a
 // replacement: released without a signal. On Linux it proves nothing: nothing is signalled
 // and nothing is released on its strength.
