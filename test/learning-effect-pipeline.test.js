@@ -461,3 +461,21 @@ test('a game answer and a practice answer in the intervention land in their own 
   assert.equal(report.descriptive.intervention.game.answers, 1);
   assert.equal(report.descriptive.intervention.game.allowedRate, 1);
 });
+
+test('an index outside the plan is not a duplicate; both diagnostics stay apart and the denominator holds', () => {
+  const [, , p1, p2] = pool.runs;
+  // 사후 실행: 원장은 10문항인데 이벤트 넷 + 계획 밖 인덱스 10(이벤트 total 11) 하나, 그리고 인덱스 0의 중복 하나.
+  const partial = placeRun(p2.slice(0, 4), { startMs: 8 * DAY + H });
+  partial.row.total = 10;
+  for (const event of partial.events) event.studyRun.total = 10;
+  const outOfPlan = relabel(p2[4], { runId: partial.runId, mode: 'assessment', total: 11, index: 10, startedAt: partial.row.startedAt, appliedAt: at(8 * DAY + H + 20 * M) });
+  const duplicate = relabel(p2[0], { runId: partial.runId, mode: 'assessment', total: 10, index: 0, startedAt: partial.row.startedAt, appliedAt: at(8 * DAY + H + 21 * M) });
+  partial.events.push(outOfPlan, duplicate);
+  const report = evaluateLearningEffect(scenario({ post: [placeRun(p1, { startMs: 8 * DAY }), partial] }).input);
+  assert.equal(report.diagnostics.duplicateEvents, 1);
+  assert.equal(report.diagnostics.outOfPlanIndices, 1);
+  assert.equal(report.items.post.planned, 20);
+  assert.equal(report.items.post.excluded.INCOMPLETE_RUN, 4);
+  assert.equal(report.items.post.excluded.UNANSWERED, 6);
+  assert.equal(report.items.post.clean + Object.values(report.items.post.excluded).reduce((sum, n) => sum + n, 0), 20);
+});

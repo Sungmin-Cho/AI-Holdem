@@ -396,10 +396,12 @@ export function evaluateLearningEffect({ events, exposureLog, runLog, enrollment
   };
   // 점수에 쓰지 않는 실행의 문항 분모: 계획 문항 인덱스마다 응답 여부를 센다. 같은 인덱스의 중복 이벤트는 문항이 아니라
   // 진단값(`duplicateEvents`)이다 — 그래야 n + 제외 합이 계획 문항 수와 맞는다.
-  const diagnostics = { duplicateEvents: 0 };
+  // 계획 범위 밖의 고유 인덱스(원장과 이벤트의 문항 수 불일치)는 `outOfPlanIndices`로 따로 센다.
+  const diagnostics = { duplicateEvents: 0, outOfPlanIndices: 0 };
   const unscored = (entry, run, exclude, answeredReason = 'INCOMPLETE_RUN') => {
     const answered = [...run.indices].filter((index) => index >= 0 && index < entry.total).length;
-    diagnostics.duplicateEvents += Math.max(0, run.events - answered);
+    diagnostics.duplicateEvents += Math.max(0, run.events - run.indices.size);
+    diagnostics.outOfPlanIndices += run.indices.size - answered;
     exclude(answeredReason, answered);
     exclude('UNANSWERED', Math.max(0, entry.total - answered));
   };
