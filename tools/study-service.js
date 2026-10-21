@@ -780,7 +780,8 @@ async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
       coldDeadline = platformNow() + COLD_START_MS;
       extendPlatformDeadline(coldDeadline);
     }
-    assertContext(ctx);
+    // A read like the first, before the store's training directory is created (#306 r2).
+    await readSettled(() => assertContext(ctx), coldDeadline);
     const created = context(storeDir, { create: true });
     if (created.root !== ctx.root || !sameInode(created.rootStat, ctx.rootStat)) fail();
     ctx = created;

@@ -1173,3 +1173,66 @@ test('#306: the trailing proof of a call that succeeded is read again past a pen
   await assert.rejects(failed.run(), { code: 'STUDY_IDENTITY_MISMATCH' });
   assert.equal(failed.proofs(), 1);
 });
+
+// #306 r2: the EPERM a pending name answers, for the first lstat whose call stack holds every frame
+// in `within` and none in `outside` — one named read-only step of a client call, in this process
+// only (the service child is untouched). It stands in, deterministically, for a release that begins
+// between two reads of the same call. `onFail` sees the moment it fires.
+function failOnePendingRead({ within, outside = [], onFail = () => {} }) {
+  const original = fs.lstatSync;
+  const has = (stack, frame) => stack.includes(`at ${frame} (`) || stack.includes(`at async ${frame} (`);
+  let failed = 0;
+  fs.lstatSync = function lstatSync(file, ...rest) {
+    if (failed === 0) {
+      const limit = Error.stackTraceLimit;
+      Error.stackTraceLimit = 200;
+      const { stack } = new Error();
+      Error.stackTraceLimit = limit;
+      if (within.every((frame) => has(stack, frame)) && !outside.some((frame) => has(stack, frame))) {
+        failed += 1;
+        onFail(String(file));
+        throw Object.assign(new Error(`EPERM: operation not permitted, lstat '${file}'`), { code: 'EPERM', syscall: 'lstat', path: String(file) });
+      }
+    }
+    return original.call(this, file, ...rest);
+  };
+  return { restore() { fs.lstatSync = original; }, failed: () => failed };
+}
+// The reads that hold `assertContext` themselves, so a step's own check is told from them.
+const READ_FRAMES = ['context', 'readContextOwnership', 'readLock', 'readDescriptor', 'readPrivate', 'validateParent'];
+
+// #306 r2: the check right before an ensure spawns its service child (after its first read
+// succeeded), and the check before a cold ensure creates the store's training directory. Each is
+// failed once as pending; the one ensure call still succeeds with one child. Windows only: elsewhere
+// an EPERM is never a pending name. (Without that step's readSettled, the ensure fails.)
+for (const step of ['pre-spawn', 'cold-create']) {
+  test(`#306: an ensure whose ${step === 'pre-spawn' ? 'check right before it spawns' : 'check before it creates a cold store'} meets a pending name reads it again`, {
+    skip: WIN32 ? false : 'an EPERM is a pending name only on Windows', timeout: STOP_BUDGET,
+  }, async (t) => {
+    const api = await service();
+    let storeDir;
+    if (step === 'pre-spawn') {
+      const first = await launch(t);
+      await api.stopStudyService(first.storeDir, { expectedInstanceId: first.handle.instanceId });
+      storeDir = first.storeDir;
+    } else {
+      storeDir = createOwnedTempDir('holdem-306-cold-create');
+    }
+    const children = [];
+    let childrenAtFailure = null;
+    const injected = failOnePendingRead(step === 'pre-spawn'
+      ? { within: ['assertContext', 'ensureOwned'], outside: READ_FRAMES, onFail: () => { childrenAtFailure = children.length; } }
+      : { within: ['assertContext', 'ensureStudyServiceWithinBudget'], outside: [...READ_FRAMES, 'ensureOwned'], onFail: () => { childrenAtFailure = children.length; } });
+    let handle;
+    try {
+      handle = await api.ensureStudyService(storeDir, {
+        onChild(child) { child.ref(); children.push(registerOwnedProcess(child, 'study service')); },
+      });
+    } finally { injected.restore(); }
+    t.after(() => api.stopStudyService(storeDir, { expectedInstanceId: handle.instanceId }).catch(() => {}));
+    assert.equal(injected.failed(), 1, 'the step met the pending name');
+    assert.equal(childrenAtFailure, 0, 'it did before the spawn');
+    assert.equal(children.length, 1, 'one service child');
+    assert.equal((await api.inspectStudyService(storeDir)).instanceId, handle.instanceId);
+  });
+}
