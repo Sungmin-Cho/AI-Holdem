@@ -943,8 +943,8 @@ for (const name of ['SIGINT', 'SIGTERM']) {
 // warmup(create) 입력만 페르소나 이름을 싣는다 — probe(카나리)·decide(스냅샷) 입력에는 없다.
 const solWarmup = (extra) => ({ includes: '비교용', argvIncludes: SOL, reply: reply('ready'), ...extra });
 
+// #311: Windows에서는 그룹 신호 대신 Node 런처(libuv)의 kill-on-close Job이 손자를 함께 끝낸다.
 test('#297 실행: 래퍼 CLI의 warmup 타임아웃은 그룹째 끝나 close가 확인되고, 타임라인이 신호·exit·close를 나눠 보인다', async (t) => {
-  if (skipOnWin32(t, 'POSIX process groups; win32 keeps direct-child termination')) return;
   const spots = buildComparisonSpots(2);
   const f = fixture(t, { script: { wrapper: true, matchers: [solWarmup({ delayMs: 30_000 }), ...decisionMatchers(spots)] } });
   const report = await runComparison({ samples: 2, timeoutMs: 20_000, warmupTimeoutMs: 1500, budgetMs: 120_000 }, f.deps);
@@ -969,7 +969,7 @@ test('#297 실행: 래퍼 CLI의 warmup 타임아웃은 그룹째 끝나 close�
   for (const sample of sol.samples) {
     const [timeline] = sample.timelines.warmup;
     assert.deepEqual(timeline.kills.map(({ signal, delivered }) => [signal, delivered]), [['SIGKILL', true]]);
-    assert.equal(timeline.closed, true, '그룹 신호로 손자까지 끝나 close가 왔다');
+    assert.equal(timeline.closed, true, '손자까지 끝나 close가 왔다(POSIX 그룹 신호, Windows 런처의 Job)');
     assert.ok(timeline.derived.signalToCloseMs !== null && timeline.derived.signalToCloseMs < 300,
       `close는 어댑터의 확인 대기(300ms) 안에 왔다: ${timeline.derived.signalToCloseMs}`);
     assert.ok(timeline.derived.signalToExitMs <= timeline.derived.signalToCloseMs);

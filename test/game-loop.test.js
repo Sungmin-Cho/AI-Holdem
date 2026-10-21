@@ -9007,8 +9007,9 @@ test('interruptDecision is identity-bound and waits for confirmed attempt outcom
 // #297: codex의 npm 런처는 실제 바이너리를 상속 stdio의 자식으로 돌린다. 직계 pid만 SIGKILL하면 그 손자가 stdio를
 // 쥔 채 남아 close가 오지 않고, 사용자의 "AI 취소"가 CHILD_CLOSE_UNCONFIRMED(unsafe)로 끝났다. 실제 어댑터에 그 모양의
 // 가짜 CLI(`wrapper: true`)를 물려 중단이 확인된 INTERRUPTED로 끝나는지 본다.
+// #311: Windows에는 그룹 신호가 없지만, Node 런처(libuv)는 자식을 kill-on-close Job에 넣는다 — 런처가 끝나면 손자도
+// 함께 끝나 close가 온다. 같은 테스트가 Windows에서도 그 계약을 지킨다.
 test('#297 interruptDecision through the real codex adapter ends the launcher grandchild and records a confirmed INTERRUPTED', {timeout:30000*WIN32_SCALE},async t=>{
-  if (skipOnWin32(t,'POSIX process groups; win32 keeps direct-child termination')) return;
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'holdem-297-wrapper-'));
   t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   const scriptPath=path.join(dir,'script.json'),logPath=path.join(dir,'calls.jsonl');
