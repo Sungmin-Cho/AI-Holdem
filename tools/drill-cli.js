@@ -27,6 +27,7 @@ import { ensureDir, openContained, writeContained } from './training-store.js';
 import { evaluationIdOf, coded } from '../training/contracts.js';
 import { withNamedLock } from '../engine/state.js';
 import { studyHistory, retestEligibility } from '../training/study-history.js';
+import { appendLedgerRow, appendLedgerRows, MEASUREMENT_MODES, readRecentViewSeed } from './learning-ledgers.js';
 
 const DRILL_LOCK = 'drill.lock.d';
 const SESSION_SEGMENTS = ['drill-session.json'];
@@ -61,7 +62,7 @@ function trainingRoot(storeDir) {
   return path.join(storeDir, '.training');
 }
 
-async function withDrillLock(storeDir, fn) {
+export async function withDrillLock(storeDir, fn) {
   const root = trainingRoot(storeDir);
   ensureDir(root);
   return withNamedLock(root, DRILL_LOCK, fn);
@@ -645,6 +646,7 @@ function exposedPairsFor(storeDir, source, now) {
   return [...new Set(recent.map((row) => row.spotKey))].flatMap((spotKey) => hands.map((hand) => `${spotKey}:${hand}`));
 }
 const RANKS = 'AKQJT98765432';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function allHandClassesOrder() {
   const out = [];
   for (let row = 0; row < 13; row += 1) {
@@ -684,6 +686,11 @@ export async function readSpotChart(storeDir, { spotKey, source: requested } = {
       if (!prior || Date.parse(row.at) >= Date.parse(prior.at)) latest.set(key, row);
     }
     const rows = [...latest.values()].sort((left, right) => left.at.localeCompare(right.at));
+    // #298: 덧붙이기 전용 노출 원장을 먼저 쓴다. 실패하면 차트를 돌려주지 않는다(노출 없음). 원장만 쓰고 아래 쓰기가
+    // 실패하면 원장이 열람을 과대 기록한다 — 평가 쪽에는 보수적인 방향이다.
+    appendLedgerRow(trainingRoot(storeDir), 'exposure', { at, sourceIdentity: { ...source }, spotKey }, {
+      at, seedRows: () => readRecentViewSeed(trainingRoot(storeDir)),
+    });
     writeContained(trainingRoot(storeDir), EXPOSURE_SEGMENTS, JSON.stringify(rows), { mode: 'replace' });
     return { ok: true, source, spotKey, cells };
   });
@@ -826,6 +833,21 @@ export async function startDrill(storeDir, {
       pending: null,
       notices: noticesForRun,
     };
+    // #298: 측정 실행(assessment·retest)의 시작 의도와, 이 시작이 미완료 측정 실행을 교체한다는 사실을 세션보다 먼저
+    // 덧붙이기 전용 원장에 한 번에 남긴다. 응답이 0건이거나 교체돼도 분모에서 사라지지 않게 하려는 것이다. idempotent
+    // 재생과 모든 거부는 여기 오기 전에 끝났다. 원장 쓰기가 실패하면 시작도 실패한다(세션은 그대로다).
+    const startId = randomUUID();
+    const replaced = existing && MEASUREMENT_MODES.has(existing.mode) && UUID_RE.test(existing.studyRun?.id ?? '')
+      && !runProvenFinished(existing) ? existing.studyRun.id : null;
+    const ledgerRows = [
+      ...(replaced ? [{ type: 'replace', startId, at: serverNow, mode, replacedRunId: replaced }] : []),
+      ...(MEASUREMENT_MODES.has(mode) ? [{
+        type: 'start', startId, runId: studyRun?.id ?? null, mode, total: queue.length, startedAt: serverNow,
+        ...(mode === 'retest' && studyRun ? { assessmentId: studyRun.assessmentId } : {}),
+        sourceIdentity: { ...sourceIdentity },
+      }] : []),
+    ];
+    if (ledgerRows.length) appendLedgerRows(trainingRoot(storeDir), 'run', ledgerRows, { at: serverNow });
     persistSession(storeDir, session);
     return session;
   });

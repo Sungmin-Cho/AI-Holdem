@@ -5,7 +5,8 @@ export const ARCHETYPES = ['TAG', 'LAG', 'Nit', 'CallingStation', 'Maniac', 'Tri
 
 const NAMES = PERSONA_NAMES;
 
-const PROFILES = {
+// 측정 도구(tools/measure-codex-warmup.js)가 운영과 같은 페르소나 문면을 고정 순서로 쓰도록 공개한다.
+export const PERSONA_PROFILES = Object.freeze({
   TAG: {
     speech: '좋은 패만으로 차분하게 압박할게요.',
     personality: '신중하고 공격적인 정석파',
@@ -30,7 +31,8 @@ const PROFILES = {
     speech: '겉으로 보이는 게 전부는 아니랍니다.',
     personality: '상대를 읽고 함정을 파는 책략가',
   },
-};
+});
+const PROFILES = PERSONA_PROFILES;
 
 function shuffledNames(count, excludeNames = []) {
   const excluded = new Set(

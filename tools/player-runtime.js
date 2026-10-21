@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 // #255: coach handles carry `linux-v1` on Linux (tools/coach-evidence.js); elsewhere the owned value.
 import { coachProcessStartTime as defaultProcessStartTime, coachReadingFor } from './coach-evidence.js';
 import { personaGuidance } from './persona-guidance.js';
+import { createPhaseTiming, withTiming } from './cli-phase-timing.js';
 import {
   grokSessionDir,
   provisionRuntimeHome,
@@ -151,7 +152,8 @@ const PROMPT_FILE = fileURLToPath(new URL('./player-prompt.md', import.meta.url)
 
 const PROBE_TIMEOUT_MS = 120_000;
 const CATALOG_TIMEOUT_MS = 15_000;
-const WARMUP_TIMEOUT_MS = 120_000;
+// 게임 루프가 시작·재개 warmup에 같은 값을 명시해 기록한다(#312).
+export const WARMUP_TIMEOUT_MS = 120_000;
 const ONESHOT_TIMEOUT_MS = 120_000;
 const TERMINATE_GRACE_MS = 5_000;
 const TERMINATE_KILL_WAIT_MS = 2_000;
@@ -1007,7 +1009,7 @@ export function createPlayerRuntime(kind, opts = {}) {
     if (!verification.inspect || verification[tier] !== true) grokFail('RUNTIME_NOT_VERIFIED');
   }
 
-  function start({ purpose, model, sessionId = null, input, modelArgs = [], catalogHome = null }) {
+  function start({ purpose, model, sessionId = null, input, modelArgs = [], catalogHome = null, observe = null }) {
     if (disposed) {
       throw runtimeError('RUNTIME_CLOSED', `RUNTIME_CLOSED: ${kind} runtime은 이미 영구 종료됐습니다.`);
     }
@@ -1050,7 +1052,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       if (createForm && fs.existsSync(dir)) grokFail('GROK_SESSION_ID_REUSED');
       if (purpose === 'resume' && !fs.existsSync(dir)) grokFail('GROK_SESSION_RECORD_MISSING');
     }
-    const spawned = exec({ command, args, cwd: ensureCwd(), env: buildEnv(catalogHome), input });
+    const spawned = exec({ command, args, cwd: ensureCwd(), env: buildEnv(catalogHome), input, ...(observe ? { observe } : {}) });
     const entry = { handle: null, closed: false, error: null, purpose, model, termination: null, signalDelivered: false };
     const done = Promise.resolve(spawned.done).then(
       (result) => {
@@ -1144,7 +1146,9 @@ export function createPlayerRuntime(kind, opts = {}) {
   async function runOnce({ purpose, model, sessionId = null, input, timeoutMs, modelArgs = [], signal, catalogHome = null }) {
     if(signal?.aborted)throw runtimeError('INTERRUPTED','INTERRUPTED: 사용자가 결정을 중단했습니다.');
     const started = Date.now();
-    const { handle, format, args, entry } = start({ purpose, model, sessionId, input, modelArgs, catalogHome });
+    // #312: 구간 시각(이벤트 이름·exit·close)만 본다. 결과와 오류에 그대로 붙어 게임 루프 기록으로 간다.
+    const timing = createPhaseTiming();
+    const { handle, format, args, entry } = start({ purpose, model, sessionId, input, modelArgs, catalogHome, observe: timing.observe });
     const timer = timeoutIn(timeoutMs);
     let abort;
     const interrupted=new Promise((_,reject)=>{
@@ -1154,14 +1158,19 @@ export function createPlayerRuntime(kind, opts = {}) {
     });
     try {
       const result = await Promise.race([handle.done, timer.promise, interrupted]);
-      return { ...result, format, args, elapsedMs: Date.now() - started };
+      return { ...result, format, args, elapsedMs: Date.now() - started, timing: timing.view() };
     } catch (error) {
       if (!entry.closed) {
         // T2가 같은 세션에 오버랩되지 않도록 SIGKILL 전송만이 아니라
         // child `close`(전 stdio 종료)까지 확인한 뒤에만 TIMEOUT을 반환한다.
-        await killAndConfirmClose(entry, 'SIGKILL');
+        timing.markSignal();
+        try {
+          await killAndConfirmClose(entry, 'SIGKILL');
+        } catch (closeError) {
+          throw withTiming(closeError, timing.view());
+        }
       }
-      throw error;
+      throw withTiming(error, timing.view());
     } finally {
       timer.cancel();
       signal?.removeEventListener('abort',abort);
@@ -1633,21 +1642,22 @@ export function createPlayerRuntime(kind, opts = {}) {
       }
       const sessionId = runtime.newSessionId();
       const result = await runOnce({ purpose: 'create', model: models.player, modelArgs: playerArgs, sessionId, input: prompt, timeoutMs, signal });
+      const { timing } = result;
       if (result.code !== 0) {
-        throw runtimeError('CLI_FAILED', `CLI_FAILED: ${kind} 세션 생성이 실패했습니다.`, { playerId, exitCode: result.code, signal: result.signal });
+        throw runtimeError('CLI_FAILED', `CLI_FAILED: ${kind} 세션 생성이 실패했습니다.`, { playerId, exitCode: result.code, signal: result.signal, timing });
       }
       const captured = runtime.captureSession ? runtime.captureSession(result.stdout) : sessionId;
       if (!captured) {
-        throw runtimeError('NO_SESSION', `NO_SESSION: ${kind} 세션 id를 캡처하지 못했습니다.`, { playerId });
+        throw runtimeError('NO_SESSION', `NO_SESSION: ${kind} 세션 id를 캡처하지 못했습니다.`, { playerId, timing });
       }
       if (!isArgvSafeSessionId(captured)) {
-        throw runtimeError('INVALID_SESSION_ID', `INVALID_SESSION_ID: ${kind} 세션 id 형식이 안전하지 않습니다.`, { playerId });
+        throw runtimeError('INVALID_SESSION_ID', `INVALID_SESSION_ID: ${kind} 세션 id 형식이 안전하지 않습니다.`, { playerId, timing });
       }
       const raw = parseResponse(result.format, result.stdout);
       if (raw !== 'ready') {
-        throw runtimeError('NOT_READY', `NOT_READY: ${kind} 워밍업 응답이 정확한 ready가 아닙니다.`, { playerId });
+        throw runtimeError('NOT_READY', `NOT_READY: ${kind} 워밍업 응답이 정확한 ready가 아닙니다.`, { playerId, timing });
       }
-      return { sessionId: captured, raw, runtimeHomeId: kind === 'grok' ? grokHomeId : null };
+      return { sessionId: captured, raw, runtimeHomeId: kind === 'grok' ? grokHomeId : null, timing };
     },
 
     // 결정 1회. 요약은 stdin으로만 가고, 타임아웃은 자식을 죽인 뒤 TIMEOUT을 던진다.
@@ -1665,9 +1675,9 @@ export function createPlayerRuntime(kind, opts = {}) {
       const result = await runOnce({ purpose: 'resume', model: models.player, modelArgs: playerArgs, sessionId, input: message, timeoutMs, signal });
       const raw = parseResponse(result.format, result.stdout);
       if (result.code !== 0 || !raw) {
-        throw runtimeError('CLI_FAILED', `CLI_FAILED: ${kind} 결정 호출이 실패했습니다.`, { playerId, exitCode: result.code, signal: result.signal });
+        throw runtimeError('CLI_FAILED', `CLI_FAILED: ${kind} 결정 호출이 실패했습니다.`, { playerId, exitCode: result.code, signal: result.signal, timing: result.timing });
       }
-      return { raw };
+      return { raw, timing: result.timing };
     },
 
     /**

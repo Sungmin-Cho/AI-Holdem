@@ -206,7 +206,7 @@ export function comparisonPlan(options) {
 
 // ── 관측 ─────────────────────────────────────────────────────────────────────
 
-function observeArgv(args) {
+export function observeArgv(args) {
   const models = [], efforts = [];
   const valueOf = (raw) => {
     const value = String(raw ?? '').trim();
@@ -233,7 +233,7 @@ function observeArgv(args) {
 }
 
 /** `from` 이후 argvLog에 쌓인 실제 자식 argv를 요청한 모델/effort와 대조한다. */
-function observeCalls(argvLog, from, variant) {
+export function observeCalls(argvLog, from, variant) {
   const calls = argvLog.slice(from).map(observeArgv);
   const last = calls.at(-1) ?? null;
   return {
@@ -245,7 +245,7 @@ function observeCalls(argvLog, from, variant) {
   };
 }
 
-function mismatchRecord(variant, adapterModel, observed) {
+export function mismatchRecord(variant, adapterModel, observed) {
   return {
     requestedModel: variant.model, requestedEffort: variant.effort,
     adapterModel, argvModels: observed.argvModels, argvEfforts: observed.argvEfforts,
@@ -254,7 +254,7 @@ function mismatchRecord(variant, adapterModel, observed) {
 }
 
 /** probe를 돌지 않았거나 아직 돌기 전의 상태. */
-function probeNotRun(notice) {
+export function probeNotRun(notice) {
   return {
     attempted: false, ok: false, containment: false, elapsedMs: 0, notice,
     observedCalls: 0, argvModel: null, argvEffort: null, mismatch: null, verified: false, unverified: 'NOT_RUN',
@@ -263,7 +263,7 @@ function probeNotRun(notice) {
 
 const SAMPLE_PHASES = Object.freeze(['warmup', 'decide']);
 
-function median(values) {
+export function median(values) {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
   const mid = sorted.length >> 1;
@@ -271,7 +271,7 @@ function median(values) {
 }
 
 const UNSAFE_NOTICE = /CHILD_(?:SIGNAL_FAILED|CLOSE_UNCONFIRMED)/;
-const isUnsafeTermination = (code) => code === 'CHILD_SIGNAL_FAILED' || code === 'CHILD_CLOSE_UNCONFIRMED';
+export const isUnsafeTermination = (code) => code === 'CHILD_SIGNAL_FAILED' || code === 'CHILD_CLOSE_UNCONFIRMED';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const ORIGINAL_CALL_CAP_MS = 60_000;
 
@@ -415,6 +415,15 @@ function createCallRecord(phase, mono) {
 
 const since = (later, earlier) => (later === null || earlier === null ? null : later - earlier);
 
+export function chainObservers(...observers) {
+  const active = observers.filter((observe) => typeof observe === 'function');
+  return (event) => {
+    for (const observe of active) {
+      try { observe(event); } catch { /* 계측은 자식 수명에 관여하지 않는다 */ }
+    }
+  };
+}
+
 /** 보고서용 타임라인. 시각은 모두 이 호출 spawn 기준 ms이고 `spawnAtMs`만 실행 시작 기준이다. */
 // 지표는 모두 CLI가 낸 이벤트 사이의 관측값이다(provider 내부 시각이 아니다). 관측되지 않은 값은 0이 아니라 null이다.
 //   bootMs        spawn → thread.started
@@ -424,7 +433,7 @@ const since = (later, earlier) => (later === null || earlier === null ? null : l
 //                 turn 시작을 그 경계 뒤에야 처음 봤다면 관측한 구간이 없으므로 null이다(0으로 보정하지 않는다)
 //   lastEventToSignalMs 첫 신호 직전의 마지막 JSONL 줄 → 첫 신호(신호 직전 얼마나 조용했나, 신호 뒤 출력은 제외)
 // 기준 시각(thread·turn 시작·끝)은 이벤트 목록 상한과 무관하게 고정 필드에서 읽는다.
-function timelineView(record, runStartedAt) {
+export function timelineView(record, runStartedAt) {
   const signalMs = record.kills[0]?.ms ?? null;
   const { threadStarted: threadStart, turnStarted: turnStart, turnEnded: turnEnd } = record.milestones;
   const exitMs = record.exit?.ms ?? null;
@@ -455,10 +464,91 @@ function timelineView(record, runStartedAt) {
 }
 
 const DETAIL_KEYS = ['purpose', 'signal', 'waitBudgetMs', 'waitedMs', 'closeConfirmed'];
-function errorDetails(error) {
+export function errorDetails(error) {
   const details = error?.details;
   if (!details || typeof details !== 'object') return null;
   return Object.fromEntries(DETAIL_KEYS.filter((key) => Object.hasOwn(details, key)).map((key) => [key, details[key]]));
+}
+
+// ── 변형 실행기(비교·warmup 동시성 측정 공용) ─────────────────────────────────
+
+/**
+ * 변형 하나의 어댑터와 관측 기록. exec 래퍼는 argv를 **기록만** 하고 원본 exec에 그대로 넘긴다.
+ * argvLog와 callLog는 같은 조건(실제 pid가 있는 자식)에서 함께 쌓인다 — 같은 순번이 같은 자식이다.
+ * `tagOf`(선택)는 spawn 순간의 꼬리표(예: 동시 측정의 호출 번호)를 그 자식 기록에 붙인다.
+ */
+export function createVariantRun(variant, { createRuntime = createPlayerRuntime, baseExec = spawnCli, mono, cwdRoot, runtimeOpts, tagOf = null }) {
+  const argvLog = [];
+  const callLog = [];
+  const run = { variant, adapter: null, argvLog, callLog, phase: 'probe', halted: false, warmups: 0,
+    probe: probeNotRun('probe를 돌지 않았습니다.'), probeCalls: [], samples: [] };
+  const pin = benchmarkPlayerPin('codex', { model: variant.model, effort: variant.effort });
+  run.adapter = createRuntime('codex', {
+    ...(runtimeOpts ?? {}),
+    cwdRoot,
+    benchmarkPin: pin,
+    exec: (spec) => {
+      const record = createCallRecord(run.phase, mono);
+      record.tag = tagOf ? tagOf() : null;
+      // 어댑터도 같은 자식의 구간 시각을 관측한다(#312) — 둘 다 부른다. 계측끼리도 서로의 실패에 관여하지 않는다.
+      const child = baseExec({ ...spec, observe: chainObservers(record.observe, spec.observe) });
+      if (!(Number.isInteger(child?.pid) && child.pid > 0)) return child;
+      argvLog.push([...spec.args]);
+      callLog.push(record);
+      return {
+        ...child,
+        kill: (signal) => {
+          let delivered;
+          try {
+            delivered = child.kill(signal);
+          } catch (error) {
+            record.recordKill(signal, 'threw');
+            throw error;
+          }
+          record.recordKill(signal, delivered);
+          return delivered;
+        },
+      };
+    },
+  });
+  return run;
+}
+
+/**
+ * 실제 no-tool probe. 어댑터의 통과 주장은 실제 probe 자식 argv가 관측되고 요청한 모델/effort와 일치할 때만
+ * `verified`다. 종료를 확인하지 못했으면 중단 기록을 돌려준다(아니면 null).
+ */
+export async function probeVariant(run, { canaryAbsPath, timeoutMs, now }) {
+  let unsafe = null;
+  const argvFrom = run.argvLog.length;
+  run.phase = 'probe';
+  let claim;
+  // probe 소요도 러너의 단조 시계로 잰다(어댑터의 elapsedMs는 벽시계 차이다).
+  const probeBegan = now();
+  try {
+    const result = await run.adapter.probe({ canaryAbsPath, timeoutMs });
+    claim = {
+      ok: result.ok === true, containment: result.containment === true, elapsedMs: Math.round(now() - probeBegan),
+      ...(result.notice ? { notice: String(result.notice) } : {}),
+    };
+    if (claim.notice && UNSAFE_NOTICE.test(claim.notice)) unsafe = { code: 'TERMINATION_UNCONFIRMED', variant: run.variant.id, phase: 'probe' };
+  } catch (error) {
+    claim = { ok: false, containment: false, elapsedMs: Math.round(now() - probeBegan), notice: `probe 오류: ${error.code ?? 'ERROR'}` };
+    if (isUnsafeTermination(error.code)) unsafe = { code: 'TERMINATION_UNCONFIRMED', variant: run.variant.id, phase: 'probe' };
+  }
+  const observed = observeCalls(run.argvLog, argvFrom, run.variant);
+  const adapterModel = run.adapter.models?.player ?? null;
+  const mismatch = observed.wrong > 0 ? mismatchRecord(run.variant, adapterModel, observed) : null;
+  const unverified = !(claim.ok && claim.containment) ? 'PROBE_FAILED'
+    : observed.count === 0 ? 'NO_CHILD_OBSERVED'
+      : mismatch ? 'MODEL_MISMATCH' : null;
+  run.probe = {
+    attempted: true, ...claim,
+    observedCalls: observed.count, argvModel: observed.argvModel, argvEffort: observed.argvEffort, mismatch,
+    verified: unverified === null, unverified,
+  };
+  run.probeCalls = run.callLog.slice(argvFrom);
+  return unsafe;
 }
 
 // ── 실행 ─────────────────────────────────────────────────────────────────────
@@ -507,73 +597,16 @@ export async function runComparison(rawOptions = {}, deps = {}) {
 
   try {
     for (const variant of COMPARISON_VARIANTS) {
-      // argvLog와 callLog는 같은 조건(실제 pid가 있는 자식)에서 함께 쌓인다 — 같은 순번이 같은 자식이다.
-      const argvLog = [];
-      const callLog = [];
-      const run = { variant, adapter: null, argvLog, callLog, phase: 'probe', halted: false, warmups: 0,
-        probe: probeNotRun('probe를 돌지 않았습니다.'), probeCalls: [], samples: [] };
-      const pin = benchmarkPlayerPin('codex', { model: variant.model, effort: variant.effort });
-      run.adapter = createRuntime('codex', {
-        ...(deps.runtimeOpts ?? {}),
-        cwdRoot,
-        benchmarkPin: pin,
-        exec: (spec) => {
-          const record = createCallRecord(run.phase, mono);
-          const child = baseExec({ ...spec, observe: record.observe });
-          if (!(Number.isInteger(child?.pid) && child.pid > 0)) return child;
-          argvLog.push([...spec.args]);
-          callLog.push(record);
-          return {
-            ...child,
-            kill: (signal) => {
-              let delivered;
-              try {
-                delivered = child.kill(signal);
-              } catch (error) {
-                record.recordKill(signal, 'threw');
-                throw error;
-              }
-              record.recordKill(signal, delivered);
-              return delivered;
-            },
-          };
-        },
-      });
-      runs.push(run);
+      // 어댑터가 둘째 생성에서 던져도 첫째는 finally에서 dispose되도록, 만들어지는 대로 runs에 넣는다.
+      runs.push(createVariantRun(variant, { createRuntime, baseExec, mono, cwdRoot, runtimeOpts: deps.runtimeOpts }));
     }
     // 1) 실제 no-tool probe. 어댑터의 통과 주장은 실제 probe 자식 argv가 관측되고 요청한 모델/effort와 일치할 때만
     //    `verified`다. 통과(verified)하지 못한 설정은 표본을 돌지 않거나(실패·미관측) 불합격으로 보고된다(불일치).
     for (const run of runs) {
       if (stopAt({ phase: 'probe' })) break;
       if (deadline - now() < options.timeoutMs) { run.probe = probeNotRun('예산 소진으로 probe를 건너뜁니다.'); continue; }
-      const argvFrom = run.argvLog.length;
-      run.phase = 'probe';
-      let claim;
-      // probe 소요도 러너의 단조 시계로 잰다(어댑터의 elapsedMs는 벽시계 차이다).
-      const probeBegan = now();
-      try {
-        const result = await run.adapter.probe({ canaryAbsPath, timeoutMs: options.timeoutMs });
-        claim = {
-          ok: result.ok === true, containment: result.containment === true, elapsedMs: Math.round(now() - probeBegan),
-          ...(result.notice ? { notice: String(result.notice) } : {}),
-        };
-        if (claim.notice && UNSAFE_NOTICE.test(claim.notice)) aborted = { code: 'TERMINATION_UNCONFIRMED', variant: run.variant.id, phase: 'probe' };
-      } catch (error) {
-        claim = { ok: false, containment: false, elapsedMs: Math.round(now() - probeBegan), notice: `probe 오류: ${error.code ?? 'ERROR'}` };
-        if (isUnsafeTermination(error.code)) aborted = { code: 'TERMINATION_UNCONFIRMED', variant: run.variant.id, phase: 'probe' };
-      }
-      const observed = observeCalls(run.argvLog, argvFrom, run.variant);
-      const adapterModel = run.adapter.models?.player ?? null;
-      const mismatch = observed.wrong > 0 ? mismatchRecord(run.variant, adapterModel, observed) : null;
-      const unverified = !(claim.ok && claim.containment) ? 'PROBE_FAILED'
-        : observed.count === 0 ? 'NO_CHILD_OBSERVED'
-          : mismatch ? 'MODEL_MISMATCH' : null;
-      run.probe = {
-        attempted: true, ...claim,
-        observedCalls: observed.count, argvModel: observed.argvModel, argvEffort: observed.argvEffort, mismatch,
-        verified: unverified === null, unverified,
-      };
-      run.probeCalls = run.callLog.slice(argvFrom);
+      const unsafe = await probeVariant(run, { canaryAbsPath, timeoutMs: options.timeoutMs, now });
+      if (unsafe && !aborted) aborted = unsafe;
       stopAt({ phase: 'probe' });
     }
 
@@ -836,7 +869,7 @@ async function runSample({ run, entry, position, prompt, options, deadline, now,
   return finish();
 }
 
-async function disposeAll(runs, tmp, { mono, monoStartedAt }) {
+export async function disposeAll(runs, tmp, { mono, monoStartedAt }) {
   const outcome = { disposed: true, removed: false, tmp: null, errors: [], attempts: [] };
   const attempt = async () => {
     // 시도마다 시작 시각·소요·그 시점에 아직 close되지 않은 실제 자식 수를 남긴다 — 종료 미확인 뒤 늦은 close가

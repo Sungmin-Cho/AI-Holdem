@@ -24,6 +24,7 @@ test('size-matching reference comparisons are only the v1/v2 paths', () => {
     'server/drill-public/study-format.js': 1,
     'training/drill-evaluator.js': 1,
     'training/goal.js': 1,                   // the shared practice goal
+    'training/learning-effect.js': 1,        // #298 evaluation items, same per-source rule as study-history's run questions
     'training/profile-aggregator.js': 2,
     'training/study-history.js': 2,          // run questions and game trends
   });
