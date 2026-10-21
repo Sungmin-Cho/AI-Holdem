@@ -8,6 +8,7 @@ import { readPrivateJson } from '../tools/app-files.js';
 import { openContained } from '../tools/training-store.js';
 import { createRelayRootOwner } from '../server/action-receipts.js';
 import { readRejectionRecords, REJECTION_LOG } from '../tools/rejection-audit.js';
+import { readLoopRecords } from '../tools/player-latency-report.js';
 
 // #308: each check that a path still names the file it inspected compares exact IDs. Here the
 // path and the open descriptor (or a later look at the path) name two files whose IDs differ only
@@ -57,4 +58,13 @@ test('#308 the rejection audit refuses a log whose descriptor ID differs from it
   assert.deepEqual(underCollision(file, { pathIno: () => FAR }, () => readRejectionRecords(root)), []);
   assert.throws(() => underCollision(file, { pathIno: () => FAR, fdIno: () => NEAR }, () => readRejectionRecords(root)),
     { code: 'REJECTION_AUDIT_UNSAFE' });
+});
+
+test('#308 the latency report refuses a loop log whose descriptor ID differs from its path only past 2^53', () => {
+  const root = createOwnedTempDir('holdem-collide-latency');
+  const file = path.join(root, 'loop.log');
+  fs.writeFileSync(file, '', { mode: 0o600 });
+  assert.doesNotThrow(() => underCollision(file, { pathIno: () => FAR }, () => readLoopRecords(file)));
+  assert.throws(() => underCollision(file, { pathIno: () => FAR, fdIno: () => NEAR }, () => readLoopRecords(file)),
+    { code: 'UNSAFE_PATH' });
 });

@@ -22,6 +22,7 @@ import { withDrillLock } from './drill-cli.js';
 import { LEDGERS, appendLedgerRows, parseLedger, readRecentViewSeed } from './learning-ledgers.js';
 import { loadReferenceDataset } from './preflop-dataset.js';
 import { openContained, writeContained } from './training-store.js';
+import { lstatExact } from '../shared/exact-stat.js';
 import { strataForSpot } from '../training/drill-strata.js';
 import { lookup } from '../training/providers/preflop-json.js';
 import { CANONICAL_REFERENCE_SOURCE, referenceSchemaOf } from '../shared/reference.js';
@@ -125,9 +126,10 @@ export async function withdraw(storeDir, { id = null, now = () => new Date().toI
 
 // ── 읽기 전용 snapshot ───────────────────────────────────────────────────────
 
+// 정확한 ino(#308): Windows의 파일 ID는 2^53을 넘어 Number로는 교체본과 같은 값이 될 수 있다.
 function statOf(file) {
   try {
-    const stat = fs.lstatSync(file);
+    const stat = lstatExact(file);
     return [stat.size, stat.mtimeMs, stat.ino, stat.isFile()].join(':');
   } catch (error) {
     if (error.code === 'ENOENT') return 'absent';
