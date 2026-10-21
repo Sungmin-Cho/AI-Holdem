@@ -897,6 +897,14 @@ test('#306: hasLiveLockHolder retries only a Windows EPERM read of the pid file,
   const busy = reads(coded('EBUSY'));
   assert.throws(() => hasLiveLockHolder(gameDir, { platform: 'win32', readFile: busy, sleep, now }), { code: 'EBUSY' });
   assert.equal(busy.calls.n, 1);
+  // A live process this user may not signal (kill(0) EPERM) is held at once: read once, no wait.
+  if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+    clock = 0;
+    const init = reads('1\n');
+    assert.equal(hasLiveLockHolder(gameDir, { platform: 'win32', readFile: init, sleep, now }), true);
+    assert.equal(init.calls.n, 1);
+    assert.equal(clock, 0);
+  }
   // Unchanged: no pid file and an unparsable one are no holder.
   assert.equal(hasLiveLockHolder(gameDir), false);
   assert.equal(hasLiveLockHolder(gameDir, { readFile: reads('not-a-pid\n') }), false);
