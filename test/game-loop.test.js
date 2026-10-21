@@ -8692,7 +8692,8 @@ test('#194 rejection diagnostics never persist raw reply or damaged call number'
   await assert.rejects(setup.loop.run(),{code:'PLAYER_RECOVERY_REQUIRED'});
   assert.equal(setup.loop.pendingDecision.diagnostics.detail,'no_json');
   for(const filename of ['loop.log','loop-state.json']) assert.doesNotMatch(fs.readFileSync(path.join(gameDir,filename),'utf8'),/As Ad|PRIVATE_SENTINEL/);
-  assert.ok(readLoopLog(gameDir).filter(x=>x.event==='player-call').every(x=>Number.isInteger(x.callNo)));
+  // #312: warmup도 player-call을 남긴다(callNo 없음) — callNo 계약은 결정 호출의 것이다.
+  assert.ok(readLoopLog(gameDir).filter(x=>x.event==='player-call'&&x.purpose==='decision').every(x=>Number.isInteger(x.callNo)));
 });
 
 test('#194 quarantined bundles stay removed across resume and retry authorization', {timeout:60000 * WIN32_SCALE}, async t => {
@@ -8777,7 +8778,7 @@ test('#194 repeated invalid responses inherit exactly one correction block in a 
   assert.equal(loop.pendingDecision.generation,p.generation+1);
   assert.equal(adapter.decideCalls.length,4);
   assert.deepEqual(adapter.decideCalls.map(x=>(x.message.match(/\[교정\]/g)||[]).length),[0,1,1,1]);
-  assert.deepEqual(readLoopLog(gameDir).filter(x=>x.event==='player-call').map(x=>x.callNo),[1,2,1,2]);
+  assert.deepEqual(readLoopLog(gameDir).filter(x=>x.event==='player-call'&&x.purpose==='decision').map(x=>x.callNo),[1,2,1,2]);
 });
 
 test('#194 engine rejection corrects once and drops the rejected proposed action', {timeout:20000 * WIN32_SCALE},async t=>{

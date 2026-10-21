@@ -45,6 +45,7 @@ import {
   extractJsonLine,
   isArgvSafeSessionId,
   RUNTIME_TABLE,
+  WARMUP_TIMEOUT_MS,
 } from './player-runtime.js';
 import {
   assertHostText,
@@ -2384,29 +2385,34 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     throw codedError('NO_PLAYER_RUNTIME', '적격 플레이어 런타임이 없습니다.');
   };
 
+  // #312: 모든 warmup이 호출별 기록을 남긴다. 시작·재개 warmup(deadline 없음)은 어댑터 기본 상한을 명시해 넘기고,
+  // 같이 띄운 묶음을 `batch`로 싣는다. `timing`은 어댑터가 관측한 구간 시각(이벤트 이름·exit·close의 ms)뿐이다.
   const createPlayerSession = async (persona, createdAt, {
     deadlineAt = null,
     purpose = 'repair-warmup',
     onWarmupClosed = null,
     signal,
+    batch = null,
   } = {}) => {
     const prompt = buildPlayerPrompt({ persona });
-    const timeoutMs = deadlineAt === null ? null : Math.ceil(deadlineAt - monotonicNow());
-    if (timeoutMs !== null && timeoutMs <= 0) {
+    const timeoutMs = deadlineAt === null ? WARMUP_TIMEOUT_MS : Math.ceil(deadlineAt - monotonicNow());
+    if (deadlineAt !== null && timeoutMs <= 0) {
       throw codedError('TIMEOUT', `플레이어 ${persona.playerId} 세션 복구 예산이 만료됐습니다.`);
     }
-    let result, code='RESPONSE_RECEIVED';
+    let result, code='RESPONSE_RECEIVED', timing=null;
     const started=monotonicNow();
     try { result = await playerAdapter.warmup({
-      playerId: persona.playerId, prompt, signal, ...(timeoutMs === null ? {} : { timeoutMs }),
-    }); } catch(error) {code=error.code??'CLI_FAILED';throw error;}
+      playerId: persona.playerId, prompt, signal, timeoutMs,
+    }); timing=result?.timing??null; } catch(error) {code=error.code??'CLI_FAILED';timing=error?.timing??null;throw error;}
     finally {
-      if(deadlineAt!==null) log('player-call',{purpose,
-        decisionId:readLoopState()?.pendingDecision?.decisionId??null,
-        generation:readLoopState()?.pendingDecision?.generation??null,
+      const pending = deadlineAt === null ? null : readLoopState()?.pendingDecision;
+      log('player-call',{purpose,
+        decisionId:pending?.decisionId??null,
+        generation:pending?.generation??null,
         runtime:playerAdapter.kind,model:adapterModel(playerAdapter),
         timeoutMs,elapsedMs:Math.max(0,monotonicNow()-started),code,
-        category:code==='RESPONSE_RECEIVED'?'response':playerFailureCategory(code),censored:code==='TIMEOUT'});
+        category:code==='RESPONSE_RECEIVED'?'response':playerFailureCategory(code),censored:code==='TIMEOUT',
+        ...(batch ? { batch } : {}), timing});
     }
     if (!result || typeof result.sessionId !== 'string' || result.sessionId === '') {
       throw codedError('NO_SESSION', `플레이어 ${persona.playerId} 세션이 없습니다.`);
@@ -2442,19 +2448,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
     }
     restoredPlayerSessions.clear();
+    const reusable = (prior) => reuseExisting
+      && prior
+      && typeof prior === 'object'
+      && !Array.isArray(prior)
+      && prior.runtime === playerAdapter.kind
+      && isArgvSafeSessionId(prior.sessionId)
+      && typeof prior.createdAt === 'string'
+      && prior.createdAt !== ''
+      && (prior.runtimeHomeId ?? null) === (playerAdapter.runtimeHomeId ?? null);
+    // #312: 이번에 실제로 같이 띄우는 warmup만 한 묶음이다(재사용한 좌석은 빠진다).
+    const purpose = reuseExisting ? 'restore-warmup' : 'start-warmup';
+    const fresh = aiPlayers.filter((persona) => !reusable(existing[persona.playerId]));
+    const batchId = randomUUID();
+    const batchStarted = monotonicNow();
     const settled = await Promise.allSettled(aiPlayers.map(async (persona) => {
       const prior = existing[persona.playerId];
-      if (
-        reuseExisting
-        && prior
-        && typeof prior === 'object'
-        && !Array.isArray(prior)
-        && prior.runtime === playerAdapter.kind
-        && isArgvSafeSessionId(prior.sessionId)
-        && typeof prior.createdAt === 'string'
-        && prior.createdAt !== ''
-        && (prior.runtimeHomeId ?? null) === (playerAdapter.runtimeHomeId ?? null)
-      ) {
+      if (reusable(prior)) {
         restoredPlayerSessions.add(persona.playerId);
         return [persona.playerId, {
           runtime: prior.runtime,
@@ -2464,8 +2474,24 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         }];
       }
       restoredPlayerSessions.delete(persona.playerId);
-      return [persona.playerId, await createPlayerSession(persona, createdAt)];
+      return [persona.playerId, await createPlayerSession(persona, createdAt, {
+        purpose, batch: { id: batchId, size: fresh.length, index: fresh.indexOf(persona) },
+      })];
     }));
+    if (fresh.length > 0) {
+      const codes = {};
+      let answered = 0;
+      for (const [index, result] of settled.entries()) {
+        if (!fresh.includes(aiPlayers[index])) continue;
+        if (result.status === 'fulfilled') answered += 1;
+        else {
+          const failure = typeof result.reason?.code === 'string' ? result.reason.code : 'CLI_FAILED';
+          codes[failure] = (codes[failure] ?? 0) + 1;
+        }
+      }
+      log('player-warmup-batch', { purpose, batchId, size: fresh.length, answered, failed: fresh.length - answered, codes,
+        wallMs: Math.max(0, monotonicNow() - batchStarted) });
+    }
     const failed = settled.find((result) => result.status === 'rejected');
     if (failed) throw failed.reason;
     const rows = settled.map((result) => result.value);
@@ -2682,14 +2708,17 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const decideOnce = async (input, timeoutMs, { callNo }) => {
     const started = monotonicNow();
     let code = 'RESPONSE_RECEIVED';
+    let timing = null;
     try {
       // Task 4 adapter owns the child timeout contract: it kills and rejects before
       // this promise settles. Starting a second request before that settlement would
       // let two resume calls race on one persistent player session.
       const result = await playerAdapter.decide({ ...input, timeoutMs });
+      timing = result?.timing ?? null;
       return { ok: true, raw: result?.raw, modelMs: Math.max(0, monotonicNow() - started) };
     } catch (error) {
       code = error.code ?? 'CLI_FAILED';
+      timing = error?.timing ?? null;
       return { ok: false, error, modelMs: Math.max(0, monotonicNow() - started) };
     } finally {
       log('player-call', { purpose:'decision', decisionId: readLoopState()?.pendingDecision?.decisionId ?? null,
@@ -2697,7 +2726,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         runtime: playerAdapter.kind, model: adapterModel(playerAdapter),
         callNo, timeoutMs, elapsedMs: Math.max(0, monotonicNow() - started), code,
         category: code === 'RESPONSE_RECEIVED' ? 'response' : playerFailureCategory(code),
-        censored: code === 'TIMEOUT' });
+        censored: code === 'TIMEOUT', timing });
     }
   };
 

@@ -1513,3 +1513,16 @@ test('스팟 라벨: 실제 카드가 뒷받침하는 드로 주장만 하고, �
   const turn = cardFacts(byId['turn-facing-bet-btn']);
   assert.equal(turn.madeFlushDrawCards, true, '턴 AcXc는 실제로 너츠 클럽 드로다');
 });
+
+test('#312 observer chain: each observer is isolated, the recording one runs first, and none can break the child', async () => {
+  const { chainObservers } = await import('../tools/compare-codex-players.js');
+  const seen = [];
+  const chained = chainObservers(
+    (event) => { seen.push(['record', event.type]); throw new Error('record failed'); },
+    null,
+    (event) => { seen.push(['adapter', event.type]); throw new Error('adapter failed'); },
+  );
+  assert.doesNotThrow(() => chained({ type: 'stdout', chunk: 'x' }));
+  assert.doesNotThrow(() => chained({ type: 'close' }));
+  assert.deepEqual(seen, [['record', 'stdout'], ['adapter', 'stdout'], ['record', 'close'], ['adapter', 'close']]);
+});
