@@ -952,7 +952,8 @@ test('#306: an inspect that meets a lock whose pid file is pending deletion stil
   await api.stopStudyService(first.storeDir, { expectedInstanceId: first.handle.instanceId });
   await deadOwnedLock(path.join(first.storeDir, '.training'), 'study.lock.d');
   const pidFile = path.join(lockPath(first.storeDir), 'pid');
-  const holder = holdOpen(pidFile, { pendingLingerMs: 5000 });
+  // Past the client's own bound on reading a pending lock again (twice DELETE_PENDING_WAIT_MS).
+  const holder = holdOpen(pidFile, { pendingLingerMs: 2 * DELETE_PENDING_WAIT_MS + 3000 });
   await holder.held;
   fs.unlinkSync(pidFile);
   if (failureCode(() => fs.lstatSync(pidFile)) !== 'EPERM') {
@@ -965,4 +966,42 @@ test('#306: an inspect that meets a lock whose pid file is pending deletion stil
   await assert.rejects(api.inspectStudyService(first.storeDir), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
   assert.equal((await holder.closed).code, 0);
   fs.rmdirSync(lockPath(first.storeDir));
+});
+
+test('#306: only a Windows EPERM read failure of a study lock is read again', async () => {
+  const { isPendingReadFailure } = await service();
+  const failure = (fields) => Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT'), { code: 'STUDY_DESCRIPTOR_CORRUPT', ...fields });
+  assert.equal(isPendingReadFailure(failure({ fsCode: 'EPERM' }), 'win32'), true);
+  assert.equal(isPendingReadFailure(failure({ fsCode: 'EPERM' }), 'linux'), false);
+  assert.equal(isPendingReadFailure(failure({ fsCode: 'EBUSY' }), 'win32'), false);
+  assert.equal(isPendingReadFailure(failure({}), 'win32'), false);
+  assert.equal(isPendingReadFailure(Object.assign(new Error('x'), { code: 'STUDY_IDENTITY_MISMATCH', fsCode: 'EPERM' }), 'win32'), false);
+});
+
+test('#306: a batch proof that fails leaves no proved set for the next transaction of its scope', async () => {
+  const { withClientAclScope, aclTransaction } = await service();
+  const root = createOwnedTempDir('holdem-306-batch-proof');
+  const training = path.join(root, '.training');
+  fs.mkdirSync(training);
+  const ctx = { root, training };
+  let proofs = 0;
+  let refuse = false;
+  const prove = (entries, { onUnproven }) => {
+    proofs += 1;
+    if (!refuse) return true;
+    onUnproven('error:EPERM');
+    return false;
+  };
+  withClientAclScope(() => {
+    assert.equal(aclTransaction(ctx, () => 'first', { platform: 'win32' }), 'first');
+    // The listing changes, and the proof of the new one fails (a path pending deletion, say).
+    fs.writeFileSync(path.join(training, 'study-service.json'), '{}');
+    refuse = true;
+    assert.throws(() => aclTransaction(ctx, () => 'second', { platform: 'win32' }), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EPERM' });
+    refuse = false;
+    const before = proofs;
+    // Same listing as the failed proof saw: only a new proof may vouch for it.
+    assert.equal(aclTransaction(ctx, () => 'third', { platform: 'win32' }), 'third');
+    assert.ok(proofs > before, 'the transaction ran on the set proved for an older listing');
+  }, { platform: 'win32', prove });
 });
