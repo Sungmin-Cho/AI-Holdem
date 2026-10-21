@@ -14,6 +14,7 @@ import { RelayDenied } from "./relay-access.js";
 import { readHud, readReport, readReveal } from "./host-insights.js";
 import { rankPlayers } from "../server/public/final-summary.js";
 import { HOST_ID } from "../shared/seat-roles.js";
+import { statExact } from "../shared/exact-stat.js";
 import { SPECTATOR_ID, viewerRole } from "../shared/viewer-access.js";
 const PUBLIC = fileURLToPath(new URL("../server/public/", import.meta.url));
 const SHARED = fileURLToPath(new URL("../shared/", import.meta.url));
@@ -257,9 +258,10 @@ export async function startAppServer({
         try {phase=readCommitFile('loop-state.json').phase;} catch {committedCache.clear();}
         body=readReveal(current.sessionDir,phase);
       } else {
-        // One build per committed state file; the report reads every archived hand.
-        const stat=fs.statSync(path.join(current.sessionDir,'state.json'));
-        const key=JSON.stringify([kind,gameId,stat.ino,stat.size,stat.mtimeMs]);
+        // One build per committed state file; the report reads every archived hand. The identity is
+        // exact (#308): a Number-valued ino past 2^53 (Windows) can match a replacement.
+        const stat=statExact(path.join(current.sessionDir,'state.json'));
+        const key=JSON.stringify([kind,gameId,String(stat.dev),String(stat.ino),stat.size,stat.mtimeMs,stat.ctimeMs]);
         body=insightCache.get(kind)?.key===key?insightCache.get(kind).body:null;
         if(!body){body=kind==='hud'?readHud(current.sessionDir):readReport(current.sessionDir);insightCache.set(kind,{key,body});}
       }
@@ -273,8 +275,9 @@ export async function startAppServer({
   const committedCache = new Map();
   const readCommitFile = name => {
     const file = path.join(manager.current.sessionDir, name);
-    const stat = fs.statSync(file);
-    const key = JSON.stringify([file,stat.dev,stat.ino,stat.size,stat.mtimeMs,stat.ctimeMs]);
+    // Exact identity (#308): the committed view decides role changes and token revocation.
+    const stat = statExact(file);
+    const key = JSON.stringify([file,String(stat.dev),String(stat.ino),stat.size,stat.mtimeMs,stat.ctimeMs]);
     if (committedCache.get(name)?.key === key) return committedCache.get(name).data;
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     committedCache.set(name,{key,data});

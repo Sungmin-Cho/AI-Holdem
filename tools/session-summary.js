@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {openContained} from './training-store.js';
 import {isHumanSeat} from '../shared/seat-roles.js';
+import {lstatExact} from '../shared/exact-stat.js';
 
 const MAX_BYTES=256*1024,MAX_HANDS=1000,BATCH=25;
 const integer=value=>Number.isSafeInteger(value);
@@ -32,7 +33,8 @@ function archiveIdentity(sessionDir,name) {
   for(const directory of [sessionDir,path.join(sessionDir,'hands')]) {
     const dir=fs.lstatSync(directory);if(!dir.isDirectory()||dir.isSymbolicLink())throw Error('UNSAFE_ARCHIVE');
   }
-  const stat=fs.lstatSync(path.join(sessionDir,'hands',name));
+  // Exact identity (#308): a Number-valued ino past 2^53 (Windows) can match a replacement.
+  const stat=lstatExact(path.join(sessionDir,'hands',name));
   if(!stat.isFile() || stat.isSymbolicLink() || stat.nlink!==1 || stat.size>MAX_BYTES)throw Error('UNSAFE_ARCHIVE');
   return [stat.dev,stat.ino,stat.size,stat.mtimeMs,stat.ctimeMs].join(':');
 }
