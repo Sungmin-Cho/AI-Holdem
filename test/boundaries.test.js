@@ -499,7 +499,9 @@ test('the tools injector supplies every helper the training stores require', asy
 
 test('study service reaches engine only through named ownership primitives', () => {
   const edges = staticGraph().edges.filter(edge => edge.from === 'tools/study-service.js' && layerOf(edge.to) === 'engine');
-  const allowed = new Set(['acquireOwnedLock', 'releaseOwnedLock', 'ownedIdentityStatus', 'ownedProcessStartTime', 'parseOwnedLockIdentity']);
+  // DELETE_PENDING_WAIT_MS: the owner's own bound on a pending lock name, which the client's read of one
+  // is measured against (#306).
+  const allowed = new Set(['acquireOwnedLock', 'releaseOwnedLock', 'ownedIdentityStatus', 'ownedProcessStartTime', 'parseOwnedLockIdentity', 'DELETE_PENDING_WAIT_MS']);
   assert.ok(edges.length > 0);
   for (const edge of edges) {
     assert.equal(edge.to, 'engine/state.js');
