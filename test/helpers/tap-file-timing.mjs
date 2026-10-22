@@ -82,6 +82,13 @@ let idx = -1; const spans = []; let cur = null; let unmatched = 0; let prev = nu
 for (const e of events) {
   const since = prev ?? e.ts;
   prev = e.ts;
+  // A step boundary ends the current file at its last event, even when the next step runs the
+  // same file again; the time between steps belongs to no file.
+  if (e.kind === 'step') {
+    if (cur) cur.end = since;
+    cur = null; idx = -1;
+    continue;
+  }
   if (e.kind === 'start') {
     const scores = files.map((f) => score(f, e.name));
     const best = Math.max(...scores);
@@ -101,8 +108,7 @@ for (const e of events) {
   else if (cur && e.kind === 'skip') cur.skips += 1;
   else if (cur && e.kind === 'end') { cur.end = e.ts; cur.cancelled = true; }
 }
-// Later steps (proof report, upload) are not part of the last file.
-if (cur && !cur.end) cur.end = events.filter((e) => e.kind !== 'step').at(-1).ts;
+if (cur && !cur.end) cur.end = events.at(-1).ts;
 const rows = spans.map((s) => ({ ...s, min: (s.end - s.start) / 60000 }));
 const total = rows.reduce((a, r) => a + r.min, 0);
 console.log(`files seen: ${rows.length}/${files.length}  total: ${total.toFixed(1)} min  unmatched subtests: ${unmatched}`);
