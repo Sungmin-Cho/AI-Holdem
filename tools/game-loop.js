@@ -931,6 +931,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // needing a second checked-out worktree.
   const coachCliPath = opts.coachCliPath ?? COACH_CLI;
   const forceStopMs = opts.forceStopMs ?? 5_000;
+  // #319 F3·F5: on Windows an exiting process still answers kill(pid, 0) for a moment after its
+  // start time can no longer be read. PR #322's receipt caught a resume meeting the previous relay so
+  // (`reuse-start-time`, pidAfter `gone`). An unreadable start time of a recorded relay is read again
+  // for this long — patience, not a latency budget: a pid that stops answering is gone, a start time
+  // that reads again is the relay's, and one still unknown at the end stays unavailable.
+  const serverExitTransitionMs = opts.serverExitTransitionMs ?? 5_000;
   const forceKillMs = opts.forceKillMs ?? 200;
   const trainingOn = isTrainingEnabled(opts);
   const storeDir = opts.storeDir ?? null;
@@ -2053,6 +2059,23 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // #265 B: a lock's pid is its recorded relay unless a start time fixed at creation proves
   // the pid reused (`relayMayBeAlive`); then the lock is stale and no signal goes to that pid.
   const recordedRelayAlive = (lock) => relayMayBeAlive(lock, { alive: processAlive, startTimeOf: serverStartTimeOf });
+  // The start time of a recorded relay, or null once the pid stops answering (it is gone). `unknown`
+  // means it still answered with no readable start time when the re-check ran out.
+  // A stop or an expired finalization deadline ends it before every read (a Windows read is a
+  // synchronous child, and relayMayBeAlive may just have made one); the callers check both again
+  // before they retire or adopt anything.
+  const recordedRelayStartTime = async (pid, { recovery = false, stopAware = true } = {}) => {
+    const deadline = Date.now() + serverExitTransitionMs;
+    for (;;) {
+      if (recovery) d9Checkpoint('relay-identity-transition');
+      else if (stopAware) assertNotStopping();
+      const startTime = serverStartTimeOf(pid);
+      if (startTime !== null) return { startTime };
+      if (!processAlive(pid)) return { gone: true };
+      if (Date.now() >= deadline) return { unknown: true };
+      await sleep(recovery ? assertAndBoundFinalizationMs(pollMs) : pollMs);
+    }
+  };
   const removeStoppedForceServerLock = (expected, pin) => {
     const current = assertPinnedServerLock(pin);
     if (
@@ -2145,11 +2168,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         if (existing.sessionToken !== sessionToken || (existing.controlProtocolVersion ?? null) !== (managed ? 1 : null)) {
           throw codedError('SERVER_LOCK_MISMATCH', '기존 server lock의 sessionToken이 현재 게임과 다릅니다.');
         }
-        if (recordedRelayAlive(existing)) {
-          const startTime = serverStartTimeOf(existing.serverPid);
-          if (startTime === null) {
-            throw serverIdentityUnavailable('reuse-start-time', '재사용 서버 startTime을 확인할 수 없습니다.', existing.serverPid);
-          }
+        const recorded = recordedRelayAlive(existing)
+          ? await recordedRelayStartTime(existing.serverPid, { recovery, stopAware })
+          : { gone: true };
+        if (recorded.unknown) {
+          throw serverIdentityUnavailable('reuse-start-time', '재사용 서버 startTime을 확인할 수 없습니다.', existing.serverPid);
+        }
+        if (!recorded.gone) {
+          const { startTime } = recorded;
           await assertServerBinding(existing, { stopAware });
           if (stopAware) assertNotStopping();
           const confirmed = assertPinnedServerLock(pin);
