@@ -214,7 +214,12 @@ test('same-decision null status cannot downgrade an observed acceptance', async 
   assert.equal(f.controller.state.canRetry, false);
 });
 
-test('reconciliation while POST is in flight keeps its immutable request', async () => {
+// #319: the POST stays in flight across a reconcile — that is this test's premise, not the fixture's
+// 15 ms bound (production waits 8 s). A runner stall past 15 ms let the bound win, so `pending` settled
+// as unreceived before the late success was applied. setTimeout is mocked: the bound cannot fire unless
+// a test moves the clock, which "timeout plus unreceived receipt…" covers.
+test('reconciliation while POST is in flight keeps its immutable request', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   let finish;
   const f = fixture({ post: () => new Promise((resolve) => { finish = resolve; }) });
   await f.controller.connect(f.snapshot); const pending = f.controller.send('call');
