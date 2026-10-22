@@ -19,7 +19,7 @@ function payload(m,kind,extra={}){const s=m.snapshot();return {requestId:randomU
 // the median on this test. The same bound now runs from the last time the game moved (its loop log
 // grew, its loop or engine state was written, or the manager's state changed), so a stall still
 // fails, and says what it was waiting for.
-async function waitMoving(fn,moved,label){const quiet=process.platform==='win32'?120000:15000;let mark=moved(),since=Date.now();for(;;){const r=await fn();if(r)return r;const now=moved();if(now!==mark){mark=now;since=Date.now();}if(Date.now()-since>quiet)throw new Error(`wait timeout: ${label} (nothing moved for ${quiet} ms)`);await new Promise(r=>setTimeout(r,20));}}
+async function waitMoving(fn,moved,label,quiet=process.platform==='win32'?120000:15000){let mark=moved(),since=Date.now();for(;;){const r=await fn();if(r)return r;const now=moved();if(now!==mark){mark=now;since=Date.now();}if(Date.now()-since>quiet)throw new Error(`wait timeout: ${label} (nothing moved for ${quiet} ms)`);await new Promise(r=>setTimeout(r,20));}}
 async function command(m,kind,extra){const row=m.command(payload(m,kind,extra));return wait(()=>{const r=m.receipt(row.requestId);return r.status!=='accepted'?r:null;});}
 test('app journals pinned JEV, pauses, ends without key and restarts with same descriptor', {timeout:process.platform==='win32'?180000:30000},async t=>{
  const oldKey=process.env.TYPESAFE_API_KEY,oldFetch=globalThis.fetch;process.env.TYPESAFE_API_KEY='synthetic';
@@ -242,4 +242,13 @@ test('private JEV values never reach host, participant, spectator, summary, expo
  const privateText=fs.readFileSync(path.join(dir,'loop-state.json'),'utf8');for(const pattern of FORBIDDEN)assert.match(privateText,pattern);
  for(const [name,text] of Object.entries({...live,...done}))for(const pattern of FORBIDDEN)assert.doesNotMatch(text,pattern,`${name} leaks ${pattern}`);
  const log=fs.readFileSync(path.join(dir,'loop.log'),'utf8');for(const pattern of FORBIDDEN)assert.doesNotMatch(log,pattern,`loop.log leaks ${pattern}`);
+});
+
+test('#320 D2: the JEV game wait fails only when nothing moved for its quiet period', async () => {
+ let ticks=0;
+ // Moving on every check, it waits past several quiet periods until the condition holds.
+ const started=Date.now();
+ assert.equal(await waitMoving(()=>Date.now()-started>400?'done':null,()=>ticks++,'moving',100),'done');
+ // Nothing moving, it fails after one quiet period and names what it waited for.
+ await assert.rejects(waitMoving(()=>null,()=>'still','the stalled step',100),/wait timeout: the stalled step \(nothing moved for 100 ms\)/);
 });
