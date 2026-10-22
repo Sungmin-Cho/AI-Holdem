@@ -2,15 +2,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { GATE, NAMED, repoRootFrom } from './ci-shards.mjs';
+import { PRE_RUN, NAMED, repoRootFrom } from './ci-shards.mjs';
 
 // CI-only Linux split. Each Linux Node job runs one of two complete partitions
 // so that neither exceeds the 40-minute job cap. The inventory is what plain
 // `node --test` auto-discovery executed under test/: every .js/.mjs/.cjs module,
 // recursively, not only top-level *.test.js. That keeps helper, browser and
 // fixture module executions that the old `npm run test:ci` performed (the real
-// browser journeys still run in their own job). GATE is excluded from both
-// partitions because the workflow runs it before each partition.
+// browser journeys still run in their own job). PRE_RUN is excluded from both
+// partitions because the workflow runs those tests before each partition.
 export const LINUX_PARTITION_NAMES = ['services', 'rest'];
 export const LINUX_FILE_TIMEOUT_MS = 900_000;
 const MODULE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs']);
@@ -37,7 +37,7 @@ export function linuxPartition(files, name) {
   const services = Object.values(NAMED).flat();
   if (name === 'rest') {
     const named = new Set(services);
-    return files.filter((file) => file !== GATE && !named.has(file)).sort();
+    return files.filter((file) => !PRE_RUN.includes(file) && !named.has(file)).sort();
   }
   const missing = services.filter((file) => !inventory.has(file));
   if (missing.length) throw new Error(`named test file missing: ${missing.join(', ')}`);

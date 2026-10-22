@@ -15,37 +15,60 @@ concurrency:
   group: test-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Windows baseline: main 8ca254b, run 36356028579, Node 20.x run-tests minutes:
-#   study-a    study-service + app-command-store + policy-loop + participant-api 24.4
-#   study-b    study-service-recovery + room-manager + session-summary* + final-summary 10.3
-#   learning-a learning-integration + mistake-bank + publish + multi-human-engine 8.4
-#   learning-b learning-integration-session + action-receipts + drill-*       9.7
-#   loop       game-loop 34.0 before the #210 split; about 25 after (estimate)
-#   loop-b     game-loop-multiplayer + pace + JEV 13.1, plus game-loop-finalize
-#              about 9 (estimate, before #213 re-enables its Windows skips)
-#   recovery   app-recovery-exit 25.3 + release-verifier + server-security-gates
-#              + relay-seat-scoping 32.4
-#   rest       remaining files + GATE                                    36.6
+# Windows shards (test/helpers/ci-shards.mjs). NAMED pins the heavy files; every
+# other top-level *.test.js goes to learning-a, study-b, learning-b or rest by the
+# SHA-256 of its basename, weighted 3:2:2:3 (SPREAD), so a new file never moves
+# another and new files no longer all land in rest (#317). GATE and the three
+# relay tests run only in their own steps (rest, every Linux partition).
+# Job minutes, Node 20.x / 22.x, projected from per-file minutes of runs
+# 39588219828 and 39554481231 (setup included; other shards unchanged):
+#   learning-a 21.9-22.4 / 17.7-20.6    study-b 21.3-23.9 / 18.3-18.9
+#   learning-b 16.6-18.7 / 16.5-16.7    rest    18.8-19.1 / 14.2-17.8
+#   rest runs 74 files; before #317 it ran 231 (Node 20.x tests 46-50 min).
 # Targets: jobs <= 40 min, files <= 36 min; caps remain 60 and 45 min.
+# A shard whose tests run over 35 min writes a ::warning:: annotation. Remeasure
+# from attempt 1 of a run (the API returns CRLF logs; tap-file-timing accepts them):
+#   gh api "repos/{owner}/{repo}/actions/runs/<run>/attempts/1/jobs?per_page=100" \
+#     --jq '.jobs[] | [.id, .name, .started_at, .completed_at] | @tsv'
+#   gh api repos/{owner}/{repo}/actions/jobs/<job>/logs > job.log
+#   node test/helpers/tap-file-timing.mjs job.log test
+#   node test/helpers/ci-shards.mjs list <shard>
+# Then pin a heavy file in NAMED or change the SPREAD weights.
 # #210 split game-loop.test.js by topic: persisted coach recovery/finalize
 # moved to game-loop-finalize.test.js (loop-b), shared fixtures to
 # test/helpers/game-loop-fixtures.mjs. If either file exceeds 36 min on Windows,
-# split it again by topic. A test file missing from NAMED in
-# test/helpers/ci-shards.mjs lands in rest, which has no room for a large file.
+# split it again by topic.
 # Track app-recovery-exit against its 22.1 min baseline separately (#211).
 # Eight shards x Node 20/22 include the multiplayer loop partition.
+# npm ci skips the audit request: on main ae74aaa a stalled bulk advisory call
+# held every install for up to 5 min (npm's fetch-timeout) and cancelled two jobs.
 jobs:
   ui-browser:
     name: UI browser
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 35 successful runs (10-16..10-22) took 12.3-19.8 min: presentation
+    # 5.5-8.7, the other journeys 5.9-11.1, installs under 0.5. The registry
+    # stall on ae74aaa added 12.3 min of installs and cancelled the job at 20.
+    timeout-minutes: 30
+    # Every step and journey reaches agent-browser through npx, which otherwise
+    # revalidates its registry manifest on each call; with the cache below these
+    # calls need no registry. The env is job-level so the Node 26 steps keep it.
+    env:
+      npm_config_audit: 'false'
+      npm_config_fund: 'false'
+      npm_config_prefer_offline: 'true'
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22.x
+      - name: Restore npm and agent-browser package cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.npm
+          key: ui-browser-npm-${{ runner.os }}-agent-browser-0.36.0-${{ hashFiles('package-lock.json') }}
       - name: Install project dependencies
-        run: npm ci
+        run: npm ci --no-audit --no-fund
       - name: Install pinned browser and dependencies
         run: npx --yes agent-browser@0.36.0 install --with-deps
       - name: Prepare protected default game store
@@ -70,7 +93,7 @@ jobs:
         with:
           node-version: 26.0.0
       - name: Install project dependencies
-        run: npm ci
+        run: npm ci --no-audit --no-fund
       - name: Learning browser journey
         run: node test/browser/learning-journey.mjs --out-dir output/playwright/ui-journey/learning --user-store-dir "$GITHUB_WORKSPACE/game"
       - name: Replay library browser journey
@@ -92,7 +115,7 @@ jobs:
         with:
           node-version: 24.12.0
       - name: Install project dependencies
-        run: npm ci
+        run: npm ci --no-audit --no-fund
       - name: Prepare cold Windows privacy dependencies
         timeout-minutes: 3
         run: node test/helpers/windows-privacy-probe.mjs --cold-start
@@ -128,7 +151,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - name: Install project dependencies
-        run: npm ci
+        run: npm ci --no-audit --no-fund
       - name: Verify learning runtime on the runner platform
         run: node --test --test-concurrency=1 test/platform-learning-runtime.test.js
       - name: Verify relay proxy ownership and transport
@@ -182,7 +205,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - name: Install project dependencies
-        run: npm ci
+        run: npm ci --no-audit --no-fund
       - name: Prepare Windows diagnostics directory
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'holdem-diag'

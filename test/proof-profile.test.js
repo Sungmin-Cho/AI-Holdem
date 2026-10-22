@@ -297,6 +297,23 @@ test('tap-file-timing maps a step-6 then alphabet-restart log back onto two file
   assert.match(result.stdout, /zeta\.test\.js[\s\S]*zeta one|zeta one/);
 });
 
+test('tap-file-timing parses CRLF Actions logs', () => {
+  const dir = diagDir();
+  const tests = path.join(dir, 'test');
+  fs.mkdirSync(tests);
+  fs.writeFileSync(path.join(tests, 'alpha.test.js'), "test('alpha one', () => {});\n");
+  const log = path.join(dir, 'job.log');
+  fs.writeFileSync(log, [
+    'run\t2026-09-07T10:00:00.0000000Z # Subtest: alpha one',
+    'run\t2026-09-07T10:01:00.0000000Z ok 1 - alpha one',
+  ].join('\r\n') + '\r\n');
+  const helper = path.join(HERE, 'helpers', 'tap-file-timing.mjs');
+  const result = spawnSync(process.execPath, [helper, log, tests], { encoding: 'utf8', env: cliEnv() });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /files seen: 1\/1/);
+  assert.match(result.stdout, /alpha\.test\.js/);
+});
+
 // #212: node's TAP reporter prints `#` as `\#` and doubles backslashes, and a template name such
 // as `${phase}-${gameOver}` matches almost any hyphenated name. Neither may move a test to the
 // alphabetically earlier file.

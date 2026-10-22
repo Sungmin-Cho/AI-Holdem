@@ -62,7 +62,8 @@ for (const f of files) {
 }
 // Best score a file reaches for this TAP name; -1 when none of its names match.
 const score = (f, name) => patterns.get(f).reduce((best, p) => (p.test(name) && p.score > best ? p.score : best), -1);
-const lines = fs.readFileSync(logPath, 'utf8').split('\n');
+// Actions API logs use CRLF.
+const lines = fs.readFileSync(logPath, 'utf8').split(/\r?\n/);
 const tsRe = /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z) (.*)$/;
 const events = [];
 for (const line of lines) {
