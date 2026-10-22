@@ -24,6 +24,17 @@ const payload = (manager, kind = "start") => {
     kind,
   };
 };
+// #319 F3: what a failed or unsettled command left behind — the receipt's code, its result's code
+// and detail, and the manager's state — so a failure that does not reproduce still names its cause.
+const commandState = (manager, id) => {
+  const row = manager.receipt(id);
+  const snap = manager.snapshot();
+  return JSON.stringify({
+    requestId: id, kind: row?.kind, status: row?.status, error: row?.error,
+    diagnostic: row?.diagnostic, resultError: row?.result?.error, resultDetail: row?.result?.errorDetail,
+    state: snap.state, managerError: snap.error, managerDetail: snap.errorDetail,
+  });
+};
 const settle = async (manager, id) => {
   const deadline = Date.now() + (process.platform === "win32" ? 240000 : 15000);
   while (Date.now() < deadline) {
@@ -31,7 +42,12 @@ const settle = async (manager, id) => {
     if (row.status !== "accepted") return row;
     await new Promise((r) => setTimeout(r, 20));
   }
-  throw new Error("receipt timeout");
+  throw new Error(`receipt timeout ${commandState(manager, id)}`);
+};
+const succeeded = async (manager, id) => {
+  const row = await settle(manager, id);
+  assert.equal(row.status, "succeeded", commandState(manager, id));
+  return row;
 };
 test(
   "request identity survives stale CAS and reordered JSON; new requests cannot race",
@@ -324,22 +340,22 @@ test('managed favorable deal survives app restart and restart-game setup', {time
   t.after(()=>manager.close());
   await manager.initialize();
   const start={...payload(manager),setup:{aiCount:1,dealBias:'strong'}};
-  manager.command(start);assert.equal((await settle(manager,start.requestId)).status,'succeeded');
-  const pause=payload(manager,'pause');manager.command(pause);assert.equal((await settle(manager,pause.requestId)).status,'succeeded');
+  manager.command(start);await succeeded(manager,start.requestId);
+  const pause=payload(manager,'pause');manager.command(pause);await succeeded(manager,pause.requestId);
   const gameId=manager.snapshot().gameId;
   assert.equal(manager.snapshot().setup.dealBias,'strong');
   await manager.close();
   manager=createSessionManager({storeDir:root,resolver});await manager.initialize();
   assert.equal(manager.snapshot().setup.dealBias,'strong');
-  const resume=payload(manager,'resume');manager.command(resume);assert.equal((await settle(manager,resume.requestId)).status,'succeeded');
-  const repause=payload(manager,'pause');manager.command(repause);assert.equal((await settle(manager,repause.requestId)).status,'succeeded');
-  const restart=payload(manager,'restart');manager.command(restart);assert.equal((await settle(manager,restart.requestId)).status,'succeeded');
+  const resume=payload(manager,'resume');manager.command(resume);await succeeded(manager,resume.requestId);
+  const repause=payload(manager,'pause');manager.command(repause);await succeeded(manager,repause.requestId);
+  const restart=payload(manager,'restart');manager.command(restart);await succeeded(manager,restart.requestId);
   assert.notEqual(manager.snapshot().gameId,gameId);
   assert.equal(manager.snapshot().setup.dealBias,'strong');
   const state=JSON.parse(fs.readFileSync(path.join(resolveCurrentSession(root).sessionDir,'state.json')));
   assert.equal(state.config.dealBias,'strong');
   const paused=payload(manager,'pause');manager.command(paused);await settle(manager,paused.requestId);
-  const end=payload(manager,'end');manager.command(end);assert.equal((await settle(manager,end.requestId)).status,'succeeded');
+  const end=payload(manager,'end');manager.command(end);await succeeded(manager,end.requestId);
 });
 
 test("reserved initialization proof rejects partial state and permits sealed commit recovery", async () => {
@@ -562,7 +578,7 @@ test("lobby notices an external loop owner has exited", async () => {
 
 for (const pace of [undefined, 'normal']) {
   test(`pace ${pace ?? 'legacy'} survives app restart and same-settings restart`, {timeout:process.platform==='win32'?300000:60000}, async t => {
-    const expectSuccess=async requestId=>{const receipt=await settle(manager,requestId);assert.equal(receipt.status,'succeeded',JSON.stringify({requestId,status:receipt.status,error:receipt.error}));};
+    const expectSuccess=requestId=>succeeded(manager,requestId);
     const root=createOwnedTempDir('lobby-pace');
     let manager=createSessionManager({storeDir:root,resolver});
     t.after(()=>manager.close());
