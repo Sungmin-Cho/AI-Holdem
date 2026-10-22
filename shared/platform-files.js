@@ -73,6 +73,17 @@ export function recordProofEvent({ kind, paths = 0, ms, status, timedOut, self }
   } catch { /* Diagnostics must never change a privacy verdict. */ }
 }
 
+// #319: a diagnostic event whose fields the caller keeps to closed tokens (no path, pid of another
+// process, or message). It goes beside the proof profile, not into it: proofs.jsonl rows are proof
+// calls. The Windows CI job prints the file after its tests, so the job log keeps it.
+export function recordDiagnosticEvent(kind, fields = {}) {
+  const dir = process.env.AI_HOLDEM_PLATFORM_DIAGNOSTICS;
+  if (!dir) return;
+  try {
+    fs.appendFileSync(path.join(dir, 'events.jsonl'), `${JSON.stringify({ t: Date.now(), pid: process.pid, kind, phase: currentPhase, ...fields })}\n`);
+  } catch { /* Diagnostics must never change a verdict. */ }
+}
+
 function powershell(script, spawn = spawnSync, { kind = 'acl', paths = 0 } = {}) {
   const started = performance.now();
   let result;

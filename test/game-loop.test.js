@@ -2298,14 +2298,16 @@ test('requestStop fails closed without signalling an adopted server when identit
   await loop.resume();
 
   startTimeOf.set(() => null);
+  // #319 F5: the failure names the check (a closed site) and that the pid still answered.
   await assert.rejects(
     loop.requestStop(),
-    (error) => error.code === 'SERVER_IDENTITY_UNAVAILABLE',
+    (error) => error.code === 'SERVER_IDENTITY_UNAVAILABLE' && error.site === 'adopted-start-time' && error.pidAfter === 'alive',
   );
   startTimeOf.reset();
   assert.doesNotThrow(() => process.kill(external.child.pid, 0));
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), true);
-  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).cleanupError.code, 'SERVER_IDENTITY_UNAVAILABLE');
+  const { cleanupError } = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.deepEqual([cleanupError.code, cleanupError.site, cleanupError.pidAfter], ['SERVER_IDENTITY_UNAVAILABLE', 'adopted-start-time', 'alive']);
   await loop.requestStop();
   await waitUntilDead(external.child.pid);
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
@@ -6494,7 +6496,7 @@ test('initial server startTime failure retains ownership after a failed kill and
   try {
     await assert.rejects(
       loop.bootstrap({ ai: 1, stack: 100 }),
-      (error) => error.code === 'SERVER_IDENTITY_UNAVAILABLE',
+      (error) => error.code === 'SERVER_IDENTITY_UNAVAILABLE' && error.site === 'spawn-start-time' && error.pidAfter === 'alive',
     );
 
     assert.equal(killAttempts.length, 2, 'requestStop did not retry the failed startup SIGKILL');

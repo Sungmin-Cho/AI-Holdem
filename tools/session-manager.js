@@ -25,7 +25,7 @@ import { createRoomManager } from "./room-manager.js";
 import { projectNotices } from "./notice-projection.js";
 import { validateParticipantName } from "../shared/seat-roles.js";
 import { sanitizeRejectionFields } from "../publish-contract.js";
-import { projectDiagnosticCode, projectPublicCode } from "./diagnostic-codes.js";
+import { failureDiagnostic, projectDiagnosticCode, projectPublicCode } from "./diagnostic-codes.js";
 const read = readPrivateJson;
 const stable = (value) =>
   value && typeof value === "object"
@@ -248,6 +248,13 @@ export function createSessionManager({
   // `pendingDecision.code`. The journal row itself is never rewritten and never returned
   // directly, so its bytes (and the payload the request-id conflict check compares) stay as
   // recorded. Returns a deep copy.
+  // #319 F5: a failure's closed diagnostic (SERVER_IDENTITY_SITES) on its journal row and so on
+  // receipt(); the HTTP receipt (app-server) never carries it.
+  const recordFailureDiagnostic = (row, err) => {
+    const diagnostic = failureDiagnostic(err);
+    if (diagnostic) row.diagnostic = diagnostic;
+    else delete row.diagnostic;
+  };
   const publicReceipt = (row) => {
     if (!row || typeof row !== "object") return row;
     const out = structuredClone(row);
@@ -756,6 +763,7 @@ export function createSessionManager({
       settleRoomAfterFailure(row, { bindWhen: row.roomLocked });
       row.status = "failed";
       row.error = projectPublicCode(err.code ?? "COMMAND_FAILED");
+      recordFailureDiagnostic(row, err);
       reconcileFailure(row.error, err.errorDetail ?? retainedLaunchDetail(err));
     } finally {
       row.completedAt = new Date().toISOString();
@@ -928,6 +936,7 @@ export function createSessionManager({
           settleRoomAfterFailure(row, { bindWhen: row.roomLocked || setupHasParticipants(row.setup) });
           row.status = "failed";
           row.error = projectPublicCode(err.code ?? "RECOVERY_REQUIRED");
+          recordFailureDiagnostic(row, err);
           reconcileFailure(row.error, err.errorDetail ?? retainedLaunchDetail(err));
         } finally {
           row.completedAt = new Date().toISOString();

@@ -815,7 +815,7 @@ test('combined acceptance: explanation refusal -> applied AI action publication 
   const resume = cas(manager, 'resume');
   manager.command(resume);
   const row = await settle(manager, resume.requestId);
-  assert.equal(row.status, 'succeeded', row.error);
+  assert.equal(row.status, 'succeeded', JSON.stringify({ error: row.error, diagnostic: row.diagnostic }));
   assert.deepEqual([row.result.gameId, row.result.error, row.result.errorDetail], [gameId, null, null]);
   assert.ok(['playing', 'paused'].includes(row.result.state), row.result.state);
   assert.equal(resolves, resolvesBefore + 1, 'one replacement loop, after the confirmed close');

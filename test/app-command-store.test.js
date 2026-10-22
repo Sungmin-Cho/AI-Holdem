@@ -601,3 +601,57 @@ for (const pace of [undefined, 'normal']) {
     assert.equal(manager.snapshot().setup.pace,pace);
   });
 }
+
+// #319 F5: SERVER_IDENTITY_UNAVAILABLE now names the check that threw it. The closed site (and,
+// where a start time could not be read, whether the pid still answered just after) is copied onto
+// the journal row and receipt(), so the next failure says where it came from. The HTTP receipt,
+// narrowed by app-server, never carries it, and nothing outside the closed set is copied.
+test("#319 F5: a failure's closed site reaches receipt() but never the HTTP receipt", { timeout: process.platform === "win32" ? 300000 : 30000 }, async (t) => {
+  const { SERVER_IDENTITY_SITES } = await import("../tools/diagnostic-codes.js");
+  let thrown = null;
+  const root = createOwnedTempDir("lobby-identity-site");
+  const manager = createSessionManager({ storeDir: root, resolver: async () => { throw thrown; } });
+  t.after(() => manager.close());
+  await manager.initialize();
+  const { startAppServer } = await import("../tools/app-server.js");
+  const app = await startAppServer({ manager, token: "identity-site", storeDir: root, publicPort: 0 });
+  t.after(() => app.close());
+  const run = async (error) => {
+    thrown = error;
+    const kind = manager.snapshot().allowedCommands.includes("start") ? "start" : "resume";
+    const body = { ...payload(manager, kind), ...(kind === "start" ? { setup: { aiCount: 1, opponentRuntime: "llm" } } : {}) };
+    manager.command(body);
+    const row = await settle(manager, body.requestId);
+    assert.equal(row.status, "failed", commandState(manager, body.requestId));
+    const http = await (await fetch(`${app.origin}/api/commands/${body.requestId}`, { headers: { authorization: "Bearer identity-site" } })).json();
+    assert.deepEqual([http.requestId, http.status, http.error], [body.requestId, "failed", row.error]);
+    assert.ok(Object.keys(http).every((key) => ["error", "requestId", "result", "status"].includes(key)), JSON.stringify(http));
+    assert.equal(JSON.stringify(http).includes("diagnostic"), false);
+    return row;
+  };
+  const coded = (code, extra) => Object.assign(new Error(`${code} /private/store pid 4242`), { code, ...extra });
+  const site = SERVER_IDENTITY_SITES[4];
+  let row = await run(coded("SERVER_IDENTITY_UNAVAILABLE", { site, pidAfter: "gone" }));
+  assert.deepEqual([row.error, row.diagnostic], ["SERVER_IDENTITY_UNAVAILABLE", { site, pidAfter: "gone" }]);
+  row = await run(coded("SERVER_IDENTITY_UNAVAILABLE", { site, pidAfter: "/private/store" }));
+  assert.deepEqual(row.diagnostic, { site }, "only alive or gone is copied");
+  for (const error of [coded("SERVER_IDENTITY_UNAVAILABLE", { site: "/private/store" }),
+    coded("SERVER_IDENTITY_UNAVAILABLE", {}), coded("SERVER_ALIVE", { site })]) {
+    row = await run(error);
+    assert.equal("diagnostic" in row, false, JSON.stringify(row));
+  }
+});
+
+// Every throw of SERVER_IDENTITY_UNAVAILABLE in the loop names a site of the closed set, and no two
+// checks share one: otherwise the next failure could not be traced back to a single check.
+test("#319 F5: every SERVER_IDENTITY_UNAVAILABLE in the loop names one site of the closed set, once", async () => {
+  const { SERVER_IDENTITY_SITES } = await import("../tools/diagnostic-codes.js");
+  const source = fs.readFileSync(new URL("../tools/game-loop.js", import.meta.url), "utf8");
+  assert.equal(Object.isFrozen(SERVER_IDENTITY_SITES), true);
+  assert.equal(/codedError\(\s*['"]SERVER_IDENTITY_UNAVAILABLE['"]/.test(source.replace(/function serverIdentityUnavailable[\s\S]*?\n}\n/, "")), false,
+    "a bare throw names no site");
+  const named = [...source.matchAll(/serverIdentityUnavailable\(\s*'([^']+)'/g), ...source.matchAll(/unavailableSite: '([^']+)'/g)].map((m) => m[1]);
+  assert.equal(source.match(/unavailableCode: 'SERVER_IDENTITY_UNAVAILABLE'/g).length, source.match(/unavailableSite: '/g).length,
+    "each wait for the server's death names its own site");
+  assert.deepEqual([...named].sort(), [...SERVER_IDENTITY_SITES].sort());
+});
