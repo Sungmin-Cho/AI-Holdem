@@ -2061,15 +2061,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const recordedRelayAlive = (lock) => relayMayBeAlive(lock, { alive: processAlive, startTimeOf: serverStartTimeOf });
   // The start time of a recorded relay, or null once the pid stops answering (it is gone). `unknown`
   // means it still answered with no readable start time when the re-check ran out.
+  // A stop or an expired finalization deadline ends it before the next read (a Windows read is a
+  // synchronous child); the callers check both again before they retire or adopt anything.
   const recordedRelayStartTime = async (pid, { recovery = false, stopAware = true } = {}) => {
     const deadline = Date.now() + serverExitTransitionMs;
-    for (;;) {
+    for (let attempt = 0; ; attempt += 1) {
+      if (attempt > 0) {
+        if (recovery) d9Checkpoint('relay-identity-transition');
+        else if (stopAware) assertNotStopping();
+      }
       const startTime = serverStartTimeOf(pid);
       if (startTime !== null) return { startTime };
       if (!processAlive(pid)) return { gone: true };
       if (Date.now() >= deadline) return { unknown: true };
-      if (recovery) d9Checkpoint('relay-identity-transition');
-      else if (stopAware) assertNotStopping();
       await sleep(recovery ? assertAndBoundFinalizationMs(pollMs) : pollMs);
     }
   };
