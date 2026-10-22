@@ -454,3 +454,14 @@ test('an action refused by a control lock still held after the minimum attempts 
   assert.equal(await run.exited, 0, io.err);
   assert.equal(fs.existsSync(path.join(run.f.dir, 'ui-action-receipt.json')), false, 'the refused action was not received');
 });
+
+test('#320 D1: the action retry clock takes optional now and sleep functions only, refused before the relay starts', async (t) => {
+  const dir = createOwnedTempDir('holdem-relay-clock');
+  for (const clock of [null, 'clock', { now: 5 }, { sleep: 'later' }, { now: () => 0, sleep: null }]) {
+    assert.throws(() => startServer({ gameDir: dir, port: 0, token: TOKEN, actionControlRetryClock: clock }), /actionControlRetryClock/, JSON.stringify(clock));
+  }
+  for (const clock of [undefined, {}, { now: () => 0 }, { sleep: async () => {} }]) {
+    const f = await multiRelay(t, { actionControlRetryClock: clock });
+    assert.equal((await f.http('/api/health')).status, 200, JSON.stringify(clock));
+  }
+});
