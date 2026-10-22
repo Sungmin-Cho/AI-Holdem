@@ -35,6 +35,10 @@ import { projectPublicCode } from '../tools/diagnostic-codes.js';
 const TIMEOUT = process.platform === 'win32' ? 300000 : 40000;
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// The fixture child's pid 4242 can only reach a snapshot with its label: its `details` serialize as
+// `"pid":4242` and a formatted message reads `pid: 4242`. A bare `4242` also turns up inside the
+// snapshot's random hex identifiers (gameEpoch, UUIDs), which made the whole-snapshot check flaky (#319).
+const PID_LEAK = /"pid":4242|pid: 4242/;
 
 const cas = (manager, kind) => {
   const s = manager.snapshot();
@@ -135,7 +139,7 @@ test('a retained failed session keeps both failures, offers 불러오기, and re
   const persisted = readJson(path.join(dir, 'loop-state.json')).cleanupError;
   assert.equal(persisted.code, 'CHILD_CLOSE_UNCONFIRMED');
   assert.deepEqual(persisted.runError, { code: 'CHILD_SIGNAL_FAILED' }, 'the persisted diagnostics keep the original run failure');
-  assert.equal(JSON.stringify(snapshot).includes('4242'), false, 'no pid or message reaches the host snapshot');
+  assert.equal(PID_LEAK.test(JSON.stringify(snapshot)), false, 'no pid or message reaches the host snapshot');
   const resolvesBefore = f.resolves();
 
   const resume = cas(f.manager, 'resume');
@@ -969,4 +973,31 @@ test('#273/#274 a launch error carrying hostile errorDetail: the whole public sn
   }
   assert.equal(f.manager.session, null, 'retained launch');
   assert.equal(fs.existsSync(f.lock), true);
+});
+
+test('the pid leak matcher finds the fixture pid with its label but never inside a random identifier (#319)', () => {
+  // Seeded, so the corpus (and the control count below) is the same on every run (as #304).
+  let seed = 319;
+  const next = () => {
+    seed = (seed + 0x6D2B79F5) >>> 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return (t ^ (t >>> 14)) >>> 0;
+  };
+  const hex = (chars) => Array.from({ length: chars / 8 }, () => next().toString(16).padStart(8, '0')).join('');
+  const uuid = () => {
+    const h = hex(32);
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${'89ab'[next() % 4]}${h.slice(17, 20)}-${h.slice(20)}`;
+  };
+  const rows = Array.from({ length: 20_000 }, () => JSON.stringify({
+    instanceId: uuid(), gameId: uuid(), gameEpoch: hex(64), appRevision: next() % 100_000,
+    stateSince: new Date(Date.UTC(2020, 0, 1) + next() * 100).toISOString(),
+    error: 'CHILD_CLOSE_UNCONFIRMED', errorDetail: { run: 'CHILD_SIGNAL_FAILED', cleanup: 'CHILD_CLOSE_UNCONFIRMED', rejection: null },
+  }));
+  assert.equal(rows.filter((row) => PID_LEAK.test(row)).length, 0);
+  // The fixture's two ways out: its error `details`, and a message that formats them.
+  assert.match(JSON.stringify({ errorDetail: { details: { pid: 4242, closeConfirmed: false } } }), PID_LEAK);
+  assert.match(JSON.stringify({ error: 'close failed (pid: 4242)' }), PID_LEAK);
+  // Control: the bare number the snapshot check used before does hit the same corpus.
+  assert.ok(rows.filter((row) => row.includes('4242')).length > 0, 'the corpus can produce the old false positive');
 });
