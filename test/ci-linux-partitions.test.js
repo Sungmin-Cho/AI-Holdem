@@ -6,7 +6,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { GATE, NAMED, partition, repoRootFrom } from './helpers/ci-shards.mjs';
+import { GATE, PRE_RUN, NAMED, unnamedFiles, repoRootFrom } from './helpers/ci-shards.mjs';
 import {
   LINUX_FILE_TIMEOUT_MS, LINUX_PARTITION_NAMES, linuxFiles, linuxPartition, linuxRunArgv, main, testInventory,
 } from './helpers/ci-linux-partitions.mjs';
@@ -75,13 +75,13 @@ function linuxJob() {
   return body;
 }
 
-test('linux partitions cover the full recursive inventory exactly once with GATE outside them', () => {
+test('linux partitions cover the full recursive inventory exactly once with PRE_RUN outside them', () => {
   const files = realInventory();
   const services = linuxPartition(files, 'services');
   const rest = linuxPartition(files, 'rest');
   assert.equal(new Set([...services, ...rest]).size, services.length + rest.length, 'duplicate across partitions');
-  assert.deepEqual([...services, ...rest, GATE].sort(), files);
-  assert.equal(services.includes(GATE) || rest.includes(GATE), false);
+  assert.deepEqual([...services, ...rest, ...PRE_RUN].sort(), files);
+  assert.equal(PRE_RUN.some((name) => services.includes(name) || rest.includes(name)), false);
   assert.deepEqual(testInventory(TEST_DIR), files);
 });
 
@@ -97,13 +97,13 @@ test('the inventory keeps helper, browser and fixture modules that auto-discover
   for (const name of topNonTests) assert.ok(rest.includes(name), name);
 });
 
-test('services is every NAMED group in order and rest is everything else except GATE', () => {
+test('services is every NAMED group in order and rest is everything else except PRE_RUN', () => {
   const files = realInventory();
   assert.deepEqual(linuxPartition(files, 'services'), NAMED_FILES);
-  const expectedRest = files.filter((name) => name !== GATE && !NAMED_FILES.includes(name));
+  const expectedRest = files.filter((name) => !PRE_RUN.includes(name) && !NAMED_FILES.includes(name));
   assert.deepEqual(linuxPartition(files, 'rest'), expectedRest);
-  // Windows rest is the top-level *.test.js subset of Linux rest.
-  assert.deepEqual(partition(files.filter((name) => !name.includes('/'))).rest,
+  // The files Windows spreads over its shards are exactly Linux rest's top-level *.test.js.
+  assert.deepEqual(unnamedFiles(files.filter((name) => !name.includes('/'))),
     linuxPartition(files, 'rest').filter((name) => !name.includes('/') && name.endsWith('.test.js')));
   for (const name of NAMED_FILES) assert.equal(linuxPartition(files, 'rest').includes(name), false, name);
 });
@@ -121,7 +121,7 @@ test('future, unknown and nested modules are assigned to rest', () => {
     assert.equal(services.includes(name), false, name);
   }
   assert.deepEqual(services, NAMED_FILES);
-  assert.deepEqual([...services, ...rest, GATE].sort(), files);
+  assert.deepEqual([...services, ...rest, ...PRE_RUN].sort(), files);
 });
 
 test('testInventory walks recursively, skips symlinks and node_modules, and keeps only js/mjs/cjs', (t) => {

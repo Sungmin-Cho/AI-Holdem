@@ -1,5 +1,7 @@
 // Map flat TAP output (node --test, files run one at a time) back to files by test name,
-// then report per-file wall time from the log timestamps.
+// then report per-file wall time from the log timestamps. node --test prints `# Subtest:` when a
+// test finishes, so a file's time runs from the previous event (or the step's `##[group]Run`
+// line) to its last test, and the wait for its first test is the file's own (#317).
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -62,20 +64,31 @@ for (const f of files) {
 }
 // Best score a file reaches for this TAP name; -1 when none of its names match.
 const score = (f, name) => patterns.get(f).reduce((best, p) => (p.test(name) && p.score > best ? p.score : best), -1);
-const lines = fs.readFileSync(logPath, 'utf8').split('\n');
+// Actions API logs use CRLF.
+const lines = fs.readFileSync(logPath, 'utf8').split(/\r?\n/);
 const tsRe = /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z) (.*)$/;
 const events = [];
 for (const line of lines) {
   const m = line.match(tsRe); if (!m) continue;
   const [, ts, body] = m;
-  if (body.startsWith('# Subtest: ')) events.push({ ts: Date.parse(ts), kind: 'start', name: body.slice(11) });
+  if (body.startsWith('##[group]Run ')) events.push({ ts: Date.parse(ts), kind: 'step' });
+  else if (body.startsWith('# Subtest: ')) events.push({ ts: Date.parse(ts), kind: 'start', name: body.slice(11) });
   else if (/^not ok \d+ - /.test(body)) events.push({ ts: Date.parse(ts), kind: 'fail', name: body.replace(/^not ok \d+ - /, '') });
   else if (/^ok \d+ - .*# SKIP/.test(body)) events.push({ ts: Date.parse(ts), kind: 'skip' });
   else if (/^ok \d+ - /.test(body)) events.push({ ts: Date.parse(ts), kind: 'pass' });
   else if (body.includes('The operation was canceled') || body.includes('##[error]Process completed')) events.push({ ts: Date.parse(ts), kind: 'end' });
 }
-let idx = -1; const spans = []; let cur = null; let unmatched = 0;
+let idx = -1; const spans = []; let cur = null; let unmatched = 0; let prev = null;
 for (const e of events) {
+  const since = prev ?? e.ts;
+  prev = e.ts;
+  // A step boundary ends the current file at its last event, even when the next step runs the
+  // same file again; the time between steps belongs to no file.
+  if (e.kind === 'step') {
+    if (cur) cur.end = since;
+    cur = null; idx = -1;
+    continue;
+  }
   if (e.kind === 'start') {
     const scores = files.map((f) => score(f, e.name));
     const best = Math.max(...scores);
@@ -86,8 +99,8 @@ for (const e of events) {
       if (next === -1) next = scores.indexOf(best); // a new step restarts the alphabet
     }
     if (next !== idx) {
-      if (cur) cur.end = e.ts;
-      idx = next; cur = { file: files[idx], start: e.ts, end: null, tests: 0, fails: [], skips: 0 }; spans.push(cur);
+      if (cur) cur.end = since;
+      idx = next; cur = { file: files[idx], start: since, end: null, tests: 0, fails: [], skips: 0 }; spans.push(cur);
     }
     cur.tests += 1;
   } else if (cur && e.kind === 'fail' && !/\.m?js$/.test(e.name)) cur.fails.push(tapUnescape(e.name));

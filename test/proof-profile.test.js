@@ -297,6 +297,70 @@ test('tap-file-timing maps a step-6 then alphabet-restart log back onto two file
   assert.match(result.stdout, /zeta\.test\.js[\s\S]*zeta one|zeta one/);
 });
 
+test('tap-file-timing parses CRLF Actions logs', () => {
+  const dir = diagDir();
+  const tests = path.join(dir, 'test');
+  fs.mkdirSync(tests);
+  fs.writeFileSync(path.join(tests, 'alpha.test.js'), "test('alpha one', () => {});\n");
+  const log = path.join(dir, 'job.log');
+  fs.writeFileSync(log, [
+    'run\t2026-09-07T10:00:00.0000000Z # Subtest: alpha one',
+    'run\t2026-09-07T10:01:00.0000000Z ok 1 - alpha one',
+  ].join('\r\n') + '\r\n');
+  const helper = path.join(HERE, 'helpers', 'tap-file-timing.mjs');
+  const result = spawnSync(process.execPath, [helper, log, tests], { encoding: 'utf8', env: cliEnv() });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /files seen: 1\/1/);
+  assert.match(result.stdout, /alpha\.test\.js/);
+});
+
+// #317: node --test prints `# Subtest:` when a test finishes, so the time before a file's first
+// reported test, from the step start or the previous test, belongs to that file and not the one before.
+test('tap-file-timing gives the time before a file\'s first reported test to that file', () => {
+  const dir = diagDir();
+  const tests = path.join(dir, 'test');
+  fs.mkdirSync(tests);
+  fs.writeFileSync(path.join(tests, 'alpha.test.js'), "test('alpha one', () => {});\n");
+  fs.writeFileSync(path.join(tests, 'beta.test.js'), "test('beta slow', () => {});\ntest('beta two', () => {});\n");
+  const log = path.join(dir, 'job.log');
+  fs.writeFileSync(log, [
+    'run\t2026-09-07T10:00:00.0000000Z ##[group]Run npm run test:ci:windows -- rest',
+    'run\t2026-09-07T10:01:00.0000000Z # Subtest: alpha one',
+    'run\t2026-09-07T10:01:00.0000000Z ok 1 - alpha one',
+    'run\t2026-09-07T10:05:00.0000000Z # Subtest: beta slow',
+    'run\t2026-09-07T10:05:00.0000000Z ok 2 - beta slow',
+    'run\t2026-09-07T10:05:30.0000000Z # Subtest: beta two',
+    'run\t2026-09-07T10:05:30.0000000Z ok 3 - beta two',
+  ].join('\n') + '\n');
+  const helper = path.join(HERE, 'helpers', 'tap-file-timing.mjs');
+  const result = spawnSync(process.execPath, [helper, log, tests], { encoding: 'utf8', env: cliEnv() });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /files seen: 2\/2 {2}total: 5\.5 min/);
+  assert.match(result.stdout, /4\.50 min {2}beta\.test\.js +tests= {2}2/);
+  assert.match(result.stdout, /1\.00 min {2}alpha\.test\.js +tests= {2}1/);
+});
+
+test('tap-file-timing does not count the time between two steps against a file that spans both', () => {
+  const dir = diagDir();
+  const tests = path.join(dir, 'test');
+  fs.mkdirSync(tests);
+  fs.writeFileSync(path.join(tests, 'alpha.test.js'), "test('alpha one', () => {});\ntest('alpha two', () => {});\n");
+  const log = path.join(dir, 'job.log');
+  fs.writeFileSync(log, [
+    'pre\t2026-09-07T10:00:00.0000000Z ##[group]Run node --test --test-name-pattern="alpha one" test/alpha.test.js',
+    'pre\t2026-09-07T10:01:00.0000000Z # Subtest: alpha one',
+    'pre\t2026-09-07T10:01:00.0000000Z ok 1 - alpha one',
+    'run\t2026-09-07T10:05:00.0000000Z ##[group]Run npm run test:ci:windows -- study-a',
+    'run\t2026-09-07T10:06:00.0000000Z # Subtest: alpha two',
+    'run\t2026-09-07T10:06:00.0000000Z ok 1 - alpha two',
+  ].join('\n') + '\n');
+  const helper = path.join(HERE, 'helpers', 'tap-file-timing.mjs');
+  const result = spawnSync(process.execPath, [helper, log, tests], { encoding: 'utf8', env: cliEnv() });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /total: 2\.0 min/);
+  assert.equal(result.stdout.match(/1\.00 min {2}alpha\.test\.js/g)?.length, 2);
+});
+
 // #212: node's TAP reporter prints `#` as `\#` and doubles backslashes, and a template name such
 // as `${phase}-${gameOver}` matches almost any hyphenated name. Neither may move a test to the
 // alphabetically earlier file.
