@@ -7,8 +7,9 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, ownedProcessStartTime, parseOwnedLockIdentity } from '../engine/state.js';
+import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, ownedProcessStartTime, parseOwnedLockIdentity, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
 import { startDrillServer } from './drill-server.js';
+import { lstatExact, fstatExact, plainIdOf } from '../shared/exact-stat.js';
 
 const SELF = fileURLToPath(import.meta.url);
 const LOCK = 'study.lock.d';
@@ -50,9 +51,13 @@ const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 const NONBLOCK = fs.constants.O_NONBLOCK ?? 0;
 const inFlight = new Map();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Stats here are exact (#308): dev and ino are bigint, as a Number-valued ino past 2^53 (Windows) can
+// match a replacement. The two identities a store hands on — in its descriptor and to its child —
+// keep the Number values they were always computed from (`plainIdOf`, as a plain stat gives them).
 const sameInode = (a, b) => a && b && a.dev === b.dev && a.ino === b.ino;
+const plainId = plainIdOf;
 const trainingIdentity = (ctx) => createHash('sha256').update(JSON.stringify([
-  ctx.training, ctx.trainingStat?.dev, ctx.trainingStat?.ino,
+  ctx.training, plainId(ctx.trainingStat?.dev), plainId(ctx.trainingStat?.ino),
 ])).digest('hex');
 function fail(code = 'STUDY_DESCRIPTOR_CORRUPT', detail, fsCode) {
   // The code is the contract; the detail only ever reaches logs and stderr.
@@ -118,7 +123,7 @@ export function memoizedStartTimeOf(memo, startTimeOf) {
 }
 function statOrNull(file) {
   platformTimeout(WAIT_MS);
-  try { return fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; failFs(error); }
+  try { return lstatExact(file); } catch (error) { if (error.code === 'ENOENT') return null; failFs(error); }
 }
 // Windows ACL proof is a PowerShell child. A client call (ensure/inspect/stop)
 // opens one AsyncLocalStorage scope: one before proof, nested and sequential
@@ -231,6 +236,10 @@ function needsRefresh(batch, ctx) {
 }
 function openBatchProof(batch, ctx, proveFn) {
   const candidates = aclCandidates(ctx);
+  // A proof that fails leaves no proved set behind (#306). A caller that reads again in the same
+  // scope — a pending lock read, the stop poll — would otherwise meet the listing recorded below
+  // with the set proved for the one before it, and take a path it never proved for private.
+  batch.files = null;
   batch.candidates = candidates;
   batch.listing = presentListing(candidates);
   batch.identityMemo = new Map();
@@ -245,10 +254,18 @@ export function withClientAclScope(fn, { platform = process.platform, prove } = 
     files: null, dirty: false, opened: false, prove,
     candidates: null, listing: null, identityMemo: null,
   };
+  const proveAfter = () => proveEntries(batch.candidates, 'after', prove ?? arePrivatePaths);
   const finish = () => {
     if (!batch.opened || !batch.candidates) return;
-    const proveFn = prove ?? arePrivatePaths;
-    try { proveEntries(batch.candidates, 'after', proveFn); }
+    try { proveAfter(); }
+    finally { batch.files = null; batch.opened = false; }
+  };
+  // #306: the trailing proof of a call that succeeded lists its lock and descriptor names once more,
+  // and meets a release in progress like any other read. It is read again within the same bound; a
+  // call that already failed keeps its own error and proves once.
+  const finishSettled = async () => {
+    if (!batch.opened || !batch.candidates) return;
+    try { await readSettled(proveAfter, Infinity, { platform }); }
     finally { batch.files = null; batch.opened = false; }
   };
   return clientAcl.run(batch, () => {
@@ -260,7 +277,7 @@ export function withClientAclScope(fn, { platform = process.platform, prove } = 
     }
     if (result && typeof result.then === 'function') {
       return Promise.resolve(result).then(
-        (value) => { finish(); return value; },
+        async (value) => { await finishSettled(); return value; },
         (error) => { try { finish(); } catch { /* keep the caller's error code */ } throw error; },
       );
     }
@@ -332,7 +349,7 @@ function context(storeDir, { create = false } = {}) {
     stat = statOrNull(training);
   }
   if (stat) ctx.trainingStat = directory(training, { privateMode: true });
-  ctx.storeIdentity = createHash('sha256').update(JSON.stringify([root, original.dev, original.ino])).digest('hex');
+  ctx.storeIdentity = createHash('sha256').update(JSON.stringify([root, plainId(original.dev), plainId(original.ino)])).digest('hex');
   assertContext(ctx);
   return ctx;
 }
@@ -353,7 +370,7 @@ function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized =
   let fd;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW | NONBLOCK);
-    const opened = fs.fstatSync(fd);
+    const opened = fstatExact(fd);
     if (!sameInode(before, opened) || !safeFile(opened, privateMode, file) || (!allowOversized && opened.size > maxBytes)) {
       if (missing()) return null;
       fail();
@@ -362,7 +379,7 @@ function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized =
     if (allowOversized && opened.size > maxBytes) return { text: null, stat: opened };
     const bytes = Buffer.alloc(opened.size);
     const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
-    const after = fs.fstatSync(fd);
+    const after = fstatExact(fd);
     if (!sameInode(opened, statOrNull(file)) || after.size > maxBytes || !safeFile(after, privateMode, file)) {
       if (missing()) return null;
       fail();
@@ -539,7 +556,7 @@ async function verified(ctx, descriptor, owner, deadline) {
     fail('STUDY_DESCRIPTOR_CORRUPT', `health answer denied=${denied.status} status=${health.status} ok=${health.body?.ok}`
       + ` identity=${['pid','startTime','instanceId','storeIdentity','port'].filter((key) => health.body?.[key] !== value[key]).join(',') || 'match'}`);
   }
-  const { after, lock } = aclTransaction(ctx, () => ({ after: readDescriptor(ctx), lock: readLock(ctx) }));
+  const { after, lock } = await readSettled(() => aclTransaction(ctx, () => ({ after: readDescriptor(ctx), lock: readLock(ctx) })), deadline);
   if (after.state !== 'valid' || JSON.stringify(after.value) !== JSON.stringify(value)
     || !sameLock(owner, lock) || !descriptorMatches(value, ctx, lock)) fail();
   return value;
@@ -549,7 +566,7 @@ async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, st
   // Only the already observed live owner may repair this descriptor. None of
   // these reads grants permission to start a process or reclaim its metadata.
   while (platformNow() < deadline) {
-    const { currentOwner, descriptor, awaitingFirstCheckpoint } = aclTransaction(ctx, () => {
+    const { currentOwner, descriptor, awaitingFirstCheckpoint } = await readSettled(() => aclTransaction(ctx, () => {
       const currentOwner = readLock(ctx);
       if (currentOwner?.status !== 'alive' || !sameLock(owner, currentOwner)) {
         const observed = currentOwner
@@ -562,7 +579,7 @@ async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, st
         && JSON.stringify(descriptor.value) === JSON.stringify(staleDescriptor)
         && identityStatus(staleDescriptor.pid, staleDescriptor.startTime, staleEvidence) === 'dead';
       return { currentOwner, descriptor, awaitingFirstCheckpoint };
-    });
+    }), deadline);
     if (descriptor.state === 'valid' && !awaitingFirstCheckpoint) {
       if (expectedInstanceId !== undefined && descriptor.value.instanceId !== expectedInstanceId) {
         fail('STUDY_IDENTITY_MISMATCH');
@@ -574,10 +591,10 @@ async function waitForLiveService(ctx, owner, deadline, { expectedInstanceId, st
         // also a transport reset while the same owner is still alive — a blocked
         // spawnSync on win32 can reset the socket without unlinking the descriptor.
         // A wrong health *answer* with a valid descriptor stays closed.
-        const afterOwner = readLock(ctx);
+        const { afterOwner, descriptorState } = await readSettled(
+          () => ({ afterOwner: readLock(ctx), descriptorState: readDescriptor(ctx).state }), deadline);
         if (!shouldRetryLiveWait(error, {
-          afterOwner, owner, descriptorState: readDescriptor(ctx).state,
-          sameOwner: sameLock(owner, afterOwner),
+          afterOwner, owner, descriptorState, sameOwner: sameLock(owner, afterOwner),
         })) throw error;
       }
     }
@@ -593,16 +610,16 @@ function validateParent(ctx, identity) {
   return actual;
 }
 async function attachParent(ctx, value, identity, deadline) {
-  validateParent(ctx, identity);
+  await readSettled(() => validateParent(ctx, identity), deadline);
   while (platformNow() < deadline) {
     try {
       const response = await httpJson(value, '/internal/parent-attach', { control: true, body: identity, deadline });
       if (response.status !== 200 || response.body.ok !== true) fail('PARENT_IDENTITY_MISMATCH');
-      validateParent(ctx, identity);
+      await readSettled(() => validateParent(ctx, identity), deadline);
       return;
     } catch (error) {
       if (error?.code === 'PARENT_IDENTITY_MISMATCH') throw error;
-      const after = readLock(ctx, true);
+      const after = await readSettled(() => readLock(ctx, true), deadline);
       if (!isStudyTransportFailure(error) || after?.status !== 'alive'
         || after.pid !== identity.pid || after.startTime !== identity.startTime) {
         fail('STUDY_DESCRIPTOR_CORRUPT', transportDetail(error));
@@ -628,10 +645,46 @@ function optionsForChild(options) {
   return publishDelayMs === 0 ? { idleTimeoutMs, checkpointMs } : { idleTimeoutMs, checkpointMs, publishDelayMs };
 }
 
+// #306: on Windows a name deleted while another process reads it stays pending — before libuv 1.49
+// for as long as that reader holds it, after it for the instant before the remover closes its own
+// handle — and every read of it answers EPERM: a lock or descriptor read, and the ACL listing and
+// proof of the same path. That is a release or reclaim in progress, not a verdict. Every read-only
+// step of a client call (ensure, attach, inspect, stop) goes through `readSettled`: a read failing
+// only that way is read again, never anything that writes, spawns or signals. The first failure
+// fixes a bound — PENDING_READ_WAIT_MS from then (the remover's own wait for that reader is
+// DELETE_PENDING_WAIT_MS), never past the call's deadline or the platform budget in force — that no
+// read starts after, and that each read again runs inside (its ACL proof included). A read still
+// failing then is thrown as it always was: the last pending EPERM, also when the budget ran out
+// during the read again (`budgetSpent` — the bound is a fraction of a millisecond away when the
+// budget's whole milliseconds are gone). Any other failure of a read again is thrown at once.
+// Nothing is decided from a failed read, so no pending name is taken for alive, dead or absent. The
+// bound is a wait policy, not a promise that a release ends inside it.
+const PENDING_READ_WAIT_MS = 2 * DELETE_PENDING_WAIT_MS;
+export function isPendingReadFailure(error, platform = process.platform) {
+  return platform === 'win32' && error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && error.fsCode === 'EPERM';
+}
+export async function readSettled(read, deadline, { platform = process.platform } = {}) {
+  let bound = null;
+  let pending = null;
+  for (;;) {
+    let failure;
+    try { return bound === null ? read() : withPlatformDeadline(bound, read); }
+    catch (error) { failure = error; }
+    if (!isPendingReadFailure(failure, platform)) throw pending && failure?.budgetSpent === true ? pending : failure;
+    pending = failure;
+    if (bound === null) {
+      try { bound = Math.min(deadline, platformNow() + platformTimeout(PENDING_READ_WAIT_MS)); }
+      catch { throw pending; }
+    }
+    if (platformNow() >= bound) throw pending;
+    await sleep(Math.max(1, Math.min(25, bound - platformNow())));
+    if (platformNow() >= bound) throw pending;
+  }
+}
+
 async function ensureOwned(ctx, options, deadline, coldDeadline) {
   const config = optionsForChild(options);
-  let owner = readLock(ctx);
-  let descriptor = readDescriptor(ctx);
+  let { owner, descriptor } = await readSettled(() => ({ owner: readLock(ctx), descriptor: readDescriptor(ctx) }), deadline);
   const staleEvidence = descriptor.state === 'valid' ? lockEvidenceFor(descriptor.value, owner) : null;
   const staleDescriptor = descriptor.state === 'valid' && descriptor.value.storeIdentity === ctx.storeIdentity
     && identityStatus(descriptor.value.pid, descriptor.value.startTime, staleEvidence) === 'dead' ? descriptor.value : undefined;
@@ -646,7 +699,8 @@ async function ensureOwned(ctx, options, deadline, coldDeadline) {
         || descriptorIdentityStatus(descriptor.value, owner) !== 'dead') fail();
       if (owner && (owner.pid !== descriptor.value.pid || owner.startTime !== descriptor.value.startTime)) fail();
     }
-    assertContext(ctx);
+    // A read like the first: on Windows it lists the lock and descriptor names again (#306 r1).
+    await readSettled(() => assertContext(ctx), deadline);
     // Only the detached service child acquires/reclaims its lifetime lock. Clients
     // never remove a lock or send process signals, including failed startup paths.
     deadline = coldDeadline ?? platformNow() + COLD_START_MS;
@@ -669,8 +723,8 @@ async function ensureOwned(ctx, options, deadline, coldDeadline) {
     if (spawnError) fail();
   }
   while (platformNow() < deadline) {
-    assertContext(ctx);
-    owner = readLock(ctx);
+    // The child this ensure started may be reclaiming a dead owner's lock right now (#306).
+    owner = await readSettled(() => { assertContext(ctx); return readLock(ctx); }, deadline);
     if (owner?.status === 'alive') {
       deadline = Math.min(deadline, platformNow() + platformTimeout(WAIT_MS));
       extendPlatformDeadline(deadline);
@@ -690,15 +744,15 @@ async function ensureOwned(ctx, options, deadline, coldDeadline) {
 // here, before the commit, instead of after it.
 async function attachExistingWithinBudget(storeDir, options) {
   const deadline = platformNow() + platformTimeout(WAIT_MS);
-  let { ctx, owner } = readContextOwnership(storeDir);
+  let { ctx, owner } = await readSettled(() => readContextOwnership(storeDir), deadline);
   if (!ctx.trainingStat) return null;
   while (owner && owner.status !== 'alive' && owner.status !== 'dead') {
     if (platformNow() >= deadline) fail('STUDY_DESCRIPTOR_CORRUPT', `owner ${owner.status} pid=${owner.pid ?? 'none'}`);
     await sleep(Math.max(1, Math.min(50, deadline - platformNow())));
-    owner = aclTransaction(ctx, () => { assertContext(ctx); return readLock(ctx); });
+    owner = await readSettled(() => aclTransaction(ctx, () => { assertContext(ctx); return readLock(ctx); }), deadline);
   }
   if (owner?.status !== 'alive') return null;
-  validateParent(ctx, options.parentIdentity);
+  await readSettled(() => validateParent(ctx, options.parentIdentity), deadline);
   const value = await waitForLiveService(ctx, owner, deadline);
   await attachParent(ctx, value, options.parentIdentity, deadline);
   return publicHandle(value);
@@ -718,7 +772,7 @@ async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
     coldDeadline = platformNow() + COLD_START_MS;
     extendPlatformDeadline(coldDeadline);
   }
-  let ctx = context(storeDir);
+  let ctx = await readSettled(() => context(storeDir), deadline);
   if (!ctx.trainingStat) {
     // Safe root identity plus positively absent training metadata authorizes
     // cold directory creation. This does not authorize a raced-in live owner.
@@ -726,14 +780,15 @@ async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
       coldDeadline = platformNow() + COLD_START_MS;
       extendPlatformDeadline(coldDeadline);
     }
-    assertContext(ctx);
+    // A read like the first, before the store's training directory is created (#306 r2).
+    await readSettled(() => assertContext(ctx), coldDeadline);
     const created = context(storeDir, { create: true });
     if (created.root !== ctx.root || !sameInode(created.rootStat, ctx.rootStat)) fail();
     ctx = created;
     deadline = Math.min(coldDeadline, platformNow() + platformTimeout(WAIT_MS));
     extendPlatformDeadline(deadline);
   }
-  if (options.parentIdentity !== undefined) validateParent(ctx, options.parentIdentity);
+  if (options.parentIdentity !== undefined) await readSettled(() => validateParent(ctx, options.parentIdentity), deadline);
   let pending = inFlight.get(ctx.storeIdentity);
   if (!pending) {
     pending = ensureOwned(ctx, options, deadline, coldDeadline);
@@ -746,7 +801,7 @@ async function ensureStudyServiceWithinBudget(storeDir, options = {}) {
   })]).finally(() => clearTimeout(timer));
   deadline = platformNow() + platformTimeout(WAIT_MS);
   // Revalidate the caller's own context after awaiting another concurrent ensure.
-  const { current, owner } = aclTransaction(ctx, () => ({ current: readDescriptor(ctx), owner: readLock(ctx) }));
+  const { current, owner } = await readSettled(() => aclTransaction(ctx, () => ({ current: readDescriptor(ctx), owner: readLock(ctx) })), deadline);
   const restored = current.state === 'valid' ? current.value
     : await waitForLiveService(ctx, owner, deadline, { expectedInstanceId: value.instanceId });
   if (JSON.stringify(restored) !== JSON.stringify(value) || !descriptorMatches(value, ctx, owner)) fail();
@@ -772,7 +827,7 @@ function readContextOwnership(storeDir) {
 }
 async function inspectStudyServiceWithinBudget(storeDir) {
   const deadline = platformNow() + platformTimeout(WAIT_MS);
-  const { ctx, descriptor, owner } = readContextOwnership(storeDir);
+  const { ctx, descriptor, owner } = await readSettled(() => readContextOwnership(storeDir), deadline);
   // A service runs only while its lock proves it alive. No descriptor and no owner, or one proved
   // dead (a service that died before releasing its lock, #265 A), is a stopped service; the next
   // ensure reclaims that lock. An owner that cannot be identified still fails closed.
@@ -786,7 +841,7 @@ async function inspectStudyServiceWithinBudget(storeDir) {
 async function stopStudyServiceWithinBudget(storeDir, { expectedInstanceId } = {}) {
   const deadline = platformNow() + platformTimeout(WAIT_MS);
   if (!UUID.test(expectedInstanceId)) fail('STUDY_IDENTITY_MISMATCH');
-  const { ctx, descriptor, owner } = readContextOwnership(storeDir);
+  const { ctx, descriptor, owner } = await readSettled(() => readContextOwnership(storeDir), deadline);
   if ((!owner || owner.status === 'dead') && descriptor.state === 'missing') return { stopped: true, alreadyStopped: true };
   if (descriptor.state === 'valid' && descriptor.value.instanceId === expectedInstanceId
     && descriptor.value.storeIdentity === ctx.storeIdentity && owner?.status === 'dead'
@@ -914,7 +969,7 @@ function publish(ctx, own, value) {
     assertOwnLock(ctx, own);
     fd = fs.openSync(file, fs.constants.O_WRONLY | NOFOLLOW | NONBLOCK
       | (before ? 0 : fs.constants.O_CREAT | fs.constants.O_EXCL), 0o600);
-    const opened = fs.fstatSync(fd);
+    const opened = fstatExact(fd);
     if (!safeFile(opened, true, file) || (before && !sameInode(before.stat, opened))) fail();
     assertContext(ctx);
     if (!sameInode(opened, statOrNull(file))) fail();

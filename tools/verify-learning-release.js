@@ -2,6 +2,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
+import { lstatExact, fstatExact } from '../shared/exact-stat.js';
 import fs from 'node:fs';
 import { stopOwnedProcessTree, spawnOwnedCommand } from '../test/helpers/platform.js';
 import os from 'node:os';
@@ -136,17 +137,18 @@ export function assertEvidenceDestination(outDir, { protectedRoot = defaultProte
 
 function readRegular(file, maxBytes = MAX_JSON_BYTES) {
   const resolved = path.resolve(file);
-  const before = fs.lstatSync(resolved);
+  // Exact identities (#308): a Number-valued ino past 2^53 (Windows) can match a replacement.
+  const before = lstatExact(resolved);
   if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > maxBytes) {
     throw coded('UNSAFE_EVIDENCE_FILE');
   }
   const fd = fs.openSync(resolved, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   try {
-    const opened = fs.fstatSync(fd);
+    const opened = fstatExact(fd);
     if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino
       || opened.nlink !== 1 || opened.size > maxBytes) throw coded('UNSAFE_EVIDENCE_FILE');
     const bytes = fs.readFileSync(fd);
-    const after = fs.fstatSync(fd);
+    const after = fstatExact(fd);
     if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== bytes.length) {
       throw coded('UNSAFE_EVIDENCE_FILE');
     }
@@ -1040,7 +1042,7 @@ function bundleArtifact(bundleRoot, relative, expectedSha256, code) {
       || path.posix.normalize(relative) !== relative || relative.startsWith('../')
       || !SHA256.test(expectedSha256 ?? '')) throw coded(code);
     const requestedRoot = path.resolve(bundleRoot);
-    const rootStat = fs.lstatSync(requestedRoot);
+    const rootStat = lstatExact(requestedRoot);
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw coded(code);
     const root = fs.realpathSync(requestedRoot);
     const resolved = path.resolve(root, relative);
@@ -1049,13 +1051,13 @@ function bundleArtifact(bundleRoot, relative, expectedSha256, code) {
     let current = root;
     for (const segment of relative.split('/').slice(0, -1)) {
       current = path.join(current, segment);
-      const stat = fs.lstatSync(current);
+      const stat = lstatExact(current);
       if (!stat.isDirectory() || stat.isSymbolicLink()) throw coded(code);
       ancestors.push({ path: current, stat });
     }
     const bytes = readRegular(resolved, 8 * 1024 * 1024);
     for (const ancestor of ancestors) {
-      const after = fs.lstatSync(ancestor.path);
+      const after = lstatExact(ancestor.path);
       if (!after.isDirectory() || after.isSymbolicLink()
         || after.dev !== ancestor.stat.dev || after.ino !== ancestor.stat.ino) throw coded(code);
     }
@@ -1167,7 +1169,7 @@ export function validateFinalReviewInput(input, { bundleRoot, sourcePin } = {}) 
 function cleanupReceipt(tempRoot, tempIdentity, sourcePin, outDir) {
   let removed = false;
   try {
-    const stat = fs.lstatSync(tempRoot);
+    const stat = lstatExact(tempRoot);
     if (!stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== tempIdentity.dev || stat.ino !== tempIdentity.ino) {
       throw coded('RELEASE_TEMP_REPLACED');
     }
@@ -1234,7 +1236,7 @@ export async function runReleaseVerification({ baseline, beforeManifest, outDir 
     assertBrowserSources(ROOT);
     tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-learning-release-'));
     fs.chmodSync(tempRoot, 0o700);
-    tempIdentity = fs.lstatSync(tempRoot);
+    tempIdentity = lstatExact(tempRoot);
     commandTmp = path.join(tempRoot, 'command-tmp');
     fs.mkdirSync(commandTmp, { mode: 0o700 });
     await gitText(['cat-file', '-e', `${baseline}^{commit}`], { tmpDir: commandTmp });

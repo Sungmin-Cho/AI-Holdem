@@ -18,12 +18,14 @@ export function createBrowserWorkspace() {
   const root = process.platform === 'win32' ? path.join(os.tmpdir(), `holdem-learning-browser-${randomUUID()}`)
     : fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-learning-browser-'));
   if (process.platform === 'win32') createPrivateDirectory(root);
-  const identity = fs.lstatSync(root);
+  // #308: Windows file IDs run past 2^53, where a Number-valued ino rounds, so two directories can
+  // read as the same one. The identity is compared exactly.
+  const identity = fs.lstatSync(root, { bigint: true });
   assert.equal(path.dirname(fs.realpathSync(root)), fs.realpathSync(os.tmpdir()));
   let closed = false;
   return { root, close() {
     if (closed) return;
-    const current = fs.lstatSync(root);
+    const current = fs.lstatSync(root, { bigint: true });
     assert.ok(current.isDirectory() && current.ino === identity.ino && current.dev === identity.dev, 'refuse replacement workspace cleanup');
     fs.rmSync(root, { recursive: true }); closed = true;
     assert.equal(fs.existsSync(root), false);

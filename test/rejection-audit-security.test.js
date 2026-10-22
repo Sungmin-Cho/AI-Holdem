@@ -196,7 +196,7 @@ test('audit reads: only a missing log is empty — every other failure throws an
   const eacces = Object.assign(new Error('denied'), { code: 'EACCES' });
   for (const [label, fsImpl] of [
     ['read EIO', fsWith({ readSync() { throw eio; } })],
-    ['lstat EACCES', fsWith({ lstatSync(file) { if (String(file).endsWith(REJECTION_LOG)) throw eacces; return fs.lstatSync(file); } })],
+    ['lstat EACCES', fsWith({ lstatSync(file, options) { if (String(file).endsWith(REJECTION_LOG)) throw eacces; return fs.lstatSync(file, options); } })],
     ['open EACCES', fsWith({ openSync(file, ...rest) { if (String(file).endsWith(REJECTION_LOG)) throw eacces; return fs.openSync(file, ...rest); } })],
     ['short read', fsWith({ readSync() { return 0; } })],
   ]) {

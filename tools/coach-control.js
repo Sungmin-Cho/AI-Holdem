@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import { withNamedLock, writeJsonAtomic, ownedProcessStartTime as defaultOwnedProcessStartTime } from '../engine/state.js';
+import { withNamedLock, writeJsonAtomic, ownedProcessStartTime as defaultOwnedProcessStartTime, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
 import { processStartTime as defaultProcessStartTime } from '../engine/process-identity.js';
 import {
   createCoachEvidenceReader, sidecarTupleMismatch, rowIdentities, observeRecordedIdentity,
@@ -134,17 +134,43 @@ export async function terminateProcessGroup(pid, { confirmMs = 800 } = {}) {
     : { confirmed: true };
 }
 
-export function hasLiveLockHolder(gameDir) {
+const HOLDER_PENDING_RETRY_MS = 20;
+// #306: on Windows a pid file deleted while another process reads it stays pending — before libuv
+// 1.49 for as long as that reader holds it, after it for the instant before the remover closes its
+// own handle — and opening it answers EPERM. That is the lock's release in progress, not a holder,
+// so the read is retried within DELETE_PENDING_WAIT_MS; a pid file still unreadable at the end is
+// reported held, as before (fail-closed). A kill(0) EPERM is a live process this user may not
+// signal, and stays held at once. The wait is synchronous: nothing else in the calling process runs
+// during it (its own timers and close callbacks included). The product calls this from the
+// finalize-cutoff CLI child, whose parent bounds that child by the finalization budget left. The
+// seams are for the decision tests only.
+export function hasLiveLockHolder(gameDir, {
+  platform = process.platform, waitMs = DELETE_PENDING_WAIT_MS, readFile = fs.readFileSync,
+  sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms), now = () => performance.now(),
+} = {}) {
   const pidPath = path.join(gameDir, LOCK_NAME, 'pid');
-  try {
-    const pid = Number(fs.readFileSync(pidPath, 'utf8').trim());
+  const deadline = now() + Math.max(0, Math.min(DELETE_PENDING_WAIT_MS, waitMs));
+  for (;;) {
+    let raw;
+    try {
+      raw = readFile(pidPath, 'utf8');
+    } catch (error) {
+      if (error.code === 'ENOENT') return false;
+      if (error.code !== 'EPERM') throw error;
+      if (platform !== 'win32' || now() >= deadline) return true;
+      sleep(HOLDER_PENDING_RETRY_MS);
+      continue;
+    }
+    const pid = Number(raw.trim());
     if (!Number.isInteger(pid) || pid <= 0) return false;
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error.code === 'ENOENT' || error.code === 'ESRCH') return false;
-    if (error.code === 'EPERM') return true;
-    throw error;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      if (error.code === 'ESRCH') return false;
+      if (error.code === 'EPERM') return true;
+      throw error;
+    }
   }
 }
 

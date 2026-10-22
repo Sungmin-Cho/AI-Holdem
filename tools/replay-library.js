@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { canonicalHandReplayJson, HAND_REPLAY_SCHEMA_VERSION, replayRecord } from '../shared/hand-replay.js';
 import { openContained } from './training-store.js';
+import { lstatExact } from '../shared/exact-stat.js';
 
 // Bounded, read-only view of the finished hands in .session-store/sessions/<gameId>
 // (design §5/§6). It never prepares, commits, resumes or rebuilds a session, never
@@ -406,7 +407,8 @@ export function createReplayLibrary(storeDir, options = {}) {
     handsRead: tighten('handsReadBytes', HANDS_READ_BYTES),
     response: tighten('responseBytes', RESPONSE_BYTES),
   };
-  const { lstatOrNull, inspectChain } = inspectors(options.lstat ?? fs.lstatSync);
+  // Exact identities by default (#308): a Number-valued ino past 2^53 (Windows) can match a replacement.
+  const { lstatOrNull, inspectChain } = inspectors(options.lstat ?? lstatExact);
   const inflight = new Map();
   let active = 0;
 

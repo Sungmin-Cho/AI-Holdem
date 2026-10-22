@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_PLAYER_BUDGET } from '../shared/player-budget.js';
+import { lstatExact, fstatExact } from '../shared/exact-stat.js';
 
 export const REPORT_SCHEMA = 'player-latency-report/1';
 export const REPORT_LIMITS = Object.freeze({ fileBytes: 64 * 1024 * 1024, lineBytes: 1024 * 1024, outliers: 20 });
@@ -47,8 +48,9 @@ function lstatKind(file) {
   }
 }
 
+// 동일성은 정확한 dev·ino(bigint)로 비교한다(#308): Windows의 파일 ID는 2^53을 넘어 Number로는 교체본과 같아질 수 있다.
 const identity = (dir) => {
-  const stat = fs.lstatSync(dir);
+  const stat = lstatExact(dir);
   return { path: dir, dev: stat.dev, ino: stat.ino };
 };
 
@@ -83,7 +85,7 @@ export function findLoopLogs(root) {
 // 발견 때 기록한 디렉터리가 아직 같은 실제 디렉터리인가(링크로 바뀌지 않았는가).
 function assertParents(parents, file) {
   for (const parent of parents ?? []) {
-    const stat = fs.lstatSync(parent.path);
+    const stat = lstatExact(parent.path);
     if (stat.isSymbolicLink() || !stat.isDirectory() || stat.dev !== parent.dev || stat.ino !== parent.ino) {
       throw reportError('UNSAFE_PATH', `UNSAFE_PATH: ${file}의 상위 디렉터리가 바뀌었습니다.`);
     }
@@ -94,10 +96,10 @@ function assertParents(parents, file) {
 // 발견 때와 같아야 한다(남는 경쟁: 열기 직전 바꿨다가 직후 되돌리는 교체는 막지 못한다).
 function readNoFollow(file, maxBytes, parents = null) {
   assertParents(parents, file);
-  const before = fs.lstatSync(file);
+  const before = lstatExact(file);
   const fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW);
   try {
-    const stat = fs.fstatSync(fd);
+    const stat = fstatExact(fd);
     if (!stat.isFile() || stat.ino !== before.ino || stat.dev !== before.dev) throw reportError('UNSAFE_PATH', `UNSAFE_PATH: ${file}`);
     assertParents(parents, file);
     if (stat.size > maxBytes) return null;

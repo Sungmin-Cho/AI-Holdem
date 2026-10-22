@@ -19,6 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { childSpawnOptions } from '../shared/child-spawn-options.js';
+import { statExact } from '../shared/exact-stat.js';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 // #255: coach handles carry `linux-v1` on Linux (tools/coach-evidence.js); elsewhere the owned value.
@@ -731,7 +732,8 @@ function defaultResolveCommandPath(commandName) {
 
 function statIdentity(filePath) {
   const real = fs.realpathSync(filePath);
-  const st = fs.statSync(real);
+  // Exact identity (#308): a Number-valued ino past 2^53 (Windows) can match a replacement.
+  const st = statExact(real);
   return { real, dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs };
 }
 

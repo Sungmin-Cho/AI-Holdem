@@ -7,6 +7,7 @@ import { observationHash, canonicalJson } from '../shared/decision-observation.j
 import { projectHint } from '../shared/hint-contract.js';
 import { isCoverageReferenceSource, sameReferenceSource } from '../shared/reference.js';
 import { gameEpochOf } from '../publish-contract.js';
+import { lstatExactAsync, handleStatExact } from '../shared/exact-stat.js';
 
 async function readBounded(root, name, maxBytes) {
   let timer;
@@ -19,11 +20,12 @@ async function readBounded(root, name, maxBytes) {
 }
 async function readEvidence(root, name, maxBytes) {
   const file = path.join(root,name);
-  const before = await fs.promises.lstat(file);
+  // Exact identities (#308): a Number-valued ino past 2^53 (Windows) can match a replacement.
+  const before = await lstatExactAsync(file);
   if (!before.isFile() || before.isSymbolicLink() || before.size > maxBytes) throw new Error('unsafe hint evidence');
   const handle = await fs.promises.open(file,fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   try {
-    const stat = await handle.stat();
+    const stat = await handleStatExact(handle);
     if (!stat.isFile() || stat.size > maxBytes || stat.dev !== before.dev || stat.ino !== before.ino) throw new Error('changed hint evidence');
     const bytes = Buffer.alloc(stat.size+1);
     let bytesRead = 0;
@@ -32,7 +34,7 @@ async function readEvidence(root, name, maxBytes) {
       if (!result.bytesRead) break;
       bytesRead += result.bytesRead;
     }
-    const after = await fs.promises.lstat(file);
+    const after = await lstatExactAsync(file);
     if (bytesRead !== stat.size || after.dev !== stat.dev || after.ino !== stat.ino || after.size !== stat.size) throw new Error('changed hint evidence');
     return { raw:bytes.subarray(0,bytesRead).toString('utf8'), dev:stat.dev, ino:stat.ino };
   } finally { await handle.close(); }

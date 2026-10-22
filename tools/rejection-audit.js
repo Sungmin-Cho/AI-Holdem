@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { MAX_PUBLISH_BODY_BYTES, MAX_PUBLISH_ID } from '../publish-contract.js';
+import { exactStat } from '../shared/exact-stat.js';
 
 export const REJECTION_LOG = '.publish-rejections.jsonl';
 export const REJECTION_LOG_MAX_LINES = 200;
@@ -55,6 +56,11 @@ function auditError(code, message, cause) {
   return error;
 }
 
+// Every stat here asks its fs for bigint and keeps dev and ino exact (#308): a Number-valued ino past
+// 2^53 (Windows) can match a replacement. The other fields stay the Numbers a plain stat gives.
+const lstatOf = (fsImpl, file) => exactStat(fsImpl.lstatSync(file, { bigint: true }));
+const fstatOf = (fsImpl, fd) => exactStat(fsImpl.fstatSync(fd, { bigint: true }));
+
 function sameFile(a, b) {
   return a.dev === b.dev && a.ino === b.ino;
 }
@@ -62,7 +68,7 @@ function sameFile(a, b) {
 function inspectDir(fsImpl, dir) {
   let st;
   try {
-    st = fsImpl.lstatSync(dir);
+    st = lstatOf(fsImpl, dir);
   } catch (error) {
     throw auditError('REJECTION_AUDIT_UNAVAILABLE', 'game 디렉터리를 확인할 수 없습니다.', error);
   }
@@ -93,7 +99,7 @@ function readLogPinned(fsImpl, dir, dirStat, name = REJECTION_LOG, maxBytes = RE
   const file = path.join(dir, name);
   let before;
   try {
-    before = fsImpl.lstatSync(file);
+    before = lstatOf(fsImpl, file);
   } catch (error) {
     if (error.code === 'ENOENT') return { raw: '', stat: null };
     throw auditError('REJECTION_AUDIT_UNAVAILABLE', '거절 감사 로그를 확인할 수 없습니다.', error);
@@ -110,7 +116,7 @@ function readLogPinned(fsImpl, dir, dirStat, name = REJECTION_LOG, maxBytes = RE
       // A log that vanished between lstat and open is a race, not an absence.
       throw auditError('REJECTION_AUDIT_UNAVAILABLE', '거절 감사 로그를 열 수 없습니다.', error);
     }
-    const st = fsImpl.fstatSync(fd);
+    const st = fstatOf(fsImpl, fd);
     assertSafeLogStat(st, maxBytes);
     if (!sameFile(st, before)) throw auditError('REJECTION_AUDIT_UNSAFE', '거절 감사 로그가 읽는 중 교체됐습니다.');
     const buf = Buffer.alloc(st.size);
@@ -187,7 +193,7 @@ function fsyncDir(fsImpl, dir, platform) {
 
 function unlinkTmpIfOurs(fsImpl, tmp, tmpStat) {
   try {
-    const st = fsImpl.lstatSync(tmp);
+    const st = lstatOf(fsImpl, tmp);
     if (!st.isSymbolicLink() && st.isFile() && sameFile(st, tmpStat)) fsImpl.unlinkSync(tmp);
   } catch { /* never unlink a path that is no longer ours */ }
 }
@@ -208,7 +214,7 @@ function installPinned(fsImpl, dir, dirStat, name, text, expected, { platform, o
     } catch (error) {
       throw auditError('REJECTION_AUDIT_UNAVAILABLE', '거절 감사 임시 파일을 만들 수 없습니다.', error);
     }
-    tmpStat = fsImpl.fstatSync(fd);
+    tmpStat = fstatOf(fsImpl, fd);
     if (!tmpStat.isFile() || tmpStat.nlink !== 1) {
       throw auditError('REJECTION_AUDIT_UNSAFE', '거절 감사 임시 파일이 안전하지 않습니다.');
     }
@@ -218,12 +224,12 @@ function installPinned(fsImpl, dir, dirStat, name, text, expected, { platform, o
     fd = undefined;
     onStep?.('tmp-synced');
     assertDirUnchanged(fsImpl, dir, dirStat);
-    const tmpNow = fsImpl.lstatSync(tmp);
+    const tmpNow = lstatOf(fsImpl, tmp);
     if (tmpNow.isSymbolicLink() || !tmpNow.isFile() || tmpNow.nlink !== 1 || !sameFile(tmpNow, tmpStat)) {
       throw auditError('REJECTION_AUDIT_UNSAFE', '거절 감사 임시 파일이 교체됐습니다.');
     }
     let current = null;
-    try { current = fsImpl.lstatSync(file); } catch (error) {
+    try { current = lstatOf(fsImpl, file); } catch (error) {
       if (error.code !== 'ENOENT') throw auditError('REJECTION_AUDIT_UNAVAILABLE', '거절 감사 파일을 확인할 수 없습니다.', error);
     }
     if ((expected === null) !== (current === null)
@@ -237,7 +243,7 @@ function installPinned(fsImpl, dir, dirStat, name, text, expected, { platform, o
     onStep?.('installed');
     fsyncDir(fsImpl, dir, platform);
     onStep?.('dir-synced');
-    const after = fsImpl.lstatSync(file);
+    const after = lstatOf(fsImpl, file);
     if (after.isSymbolicLink() || !after.isFile() || after.nlink !== 1 || !sameFile(after, tmpStat)) {
       throw auditError('REJECTION_AUDIT_CHANGED', '거절 감사 파일이 설치 직후 바뀌었습니다.');
     }
@@ -344,7 +350,7 @@ export function removeRetirementEvidence(dir, bodySha256, { fsImpl = fs, platfor
   try { previous = JSON.parse(raw); } catch { /* not ours to remove */ }
   if (previous?.bodySha256 !== bodySha256) return false;
   assertDirUnchanged(fsImpl, dir, dirStat);
-  const now = fsImpl.lstatSync(path.join(dir, RETIREMENT_EVIDENCE));
+  const now = lstatOf(fsImpl, path.join(dir, RETIREMENT_EVIDENCE));
   if (now.isSymbolicLink() || !now.isFile() || now.nlink !== 1 || !sameFile(now, stat)
     || now.size !== stat.size || now.mtimeMs !== stat.mtimeMs) {
     throw auditError('REJECTION_AUDIT_CHANGED', '비공개 폐기 증거가 지우는 중 바뀌었습니다.');
@@ -389,7 +395,7 @@ export function installAttemptDurably(dir, name, text, {
     } catch (error) {
       throw auditError('REJECTION_AUDIT_UNAVAILABLE', '기록된 시도를 열 수 없습니다.', error);
     }
-    const now = fsImpl.fstatSync(fd);
+    const now = fstatOf(fsImpl, fd);
     if (!now.isFile() || now.nlink !== 1 || !sameFile(now, stat) || now.size !== stat.size || now.mtimeMs !== stat.mtimeMs) {
       throw auditError('REJECTION_AUDIT_CHANGED', '기록된 시도가 동기화하는 중 바뀌었습니다.');
     }

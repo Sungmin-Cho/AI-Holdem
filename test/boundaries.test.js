@@ -152,8 +152,9 @@ test('server imports only contracts, named containment and pure viewer projectio
     if (edge.from === 'server/public/lobby.js' && edge.to === 'shared/game-setup.js'
       && !edge.dynamic && edge.bindings?.length === 1 && edge.bindings[0] === 'normalizeSetup') continue;
     if (edge.to === SERVER_ALLOWED_REFERENCE && !edge.dynamic && edge.bindings?.length) continue;
-    // PREFLOP_ORDERS is a frozen seat-order table (the study room's position diagram).
-    const referenceBindings = { 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/reference-coverage-v3.js': ['practiceKeyExactV3'], 'shared/preflop-key.js': ['parsePreflopKey', 'PREFLOP_ORDERS', 'parsePreflopKeyV3', 'PREFLOP_ORDERS_V3'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'shared/poker-eval.js': ['describeMadeHand', 'drawsOf', 'bestFiveOf', 'describeTiebreak'], 'shared/decision-facts.js': ['equityFacts', 'factsLineKo'], 'tools/hint-proof.js': ['verifyHintPublication'], 'tools/session-control.js': ['withActionGate', 'retryControlWrite', 'readActionGatePaused'] };
+    // PREFLOP_ORDERS is a frozen seat-order table (the study room's position diagram). The exact-stat
+    // readers are read-only stats that keep a file's identity exact (#308).
+    const referenceBindings = { 'shared/exact-stat.js': ['lstatExact', 'fstatExact'], 'shared/reference-coverage.js': ['referenceAssessmentEligibility'], 'shared/reference-coverage-v3.js': ['practiceKeyExactV3'], 'shared/preflop-key.js': ['parsePreflopKey', 'PREFLOP_ORDERS', 'parsePreflopKeyV3', 'PREFLOP_ORDERS_V3'], 'shared/assistance.js': ['independentAssessmentEligibility'], 'shared/poker-eval.js': ['describeMadeHand', 'drawsOf', 'bestFiveOf', 'describeTiebreak'], 'shared/decision-facts.js': ['equityFacts', 'factsLineKo'], 'tools/hint-proof.js': ['verifyHintPublication'], 'tools/session-control.js': ['withActionGate', 'retryControlWrite', 'readActionGatePaused'] };
     if (!edge.dynamic && edge.bindings?.length && referenceBindings[edge.to]
       && edge.bindings.every(name=>referenceBindings[edge.to].includes(name))) continue;
     if (edge.to !== CONTAINMENT_MODULE) {
@@ -499,7 +500,9 @@ test('the tools injector supplies every helper the training stores require', asy
 
 test('study service reaches engine only through named ownership primitives', () => {
   const edges = staticGraph().edges.filter(edge => edge.from === 'tools/study-service.js' && layerOf(edge.to) === 'engine');
-  const allowed = new Set(['acquireOwnedLock', 'releaseOwnedLock', 'ownedIdentityStatus', 'ownedProcessStartTime', 'parseOwnedLockIdentity']);
+  // DELETE_PENDING_WAIT_MS: the owner's own bound on a pending lock name, which the client's read of one
+  // is measured against (#306).
+  const allowed = new Set(['acquireOwnedLock', 'releaseOwnedLock', 'ownedIdentityStatus', 'ownedProcessStartTime', 'parseOwnedLockIdentity', 'DELETE_PENDING_WAIT_MS']);
   assert.ok(edges.length > 0);
   for (const edge of edges) {
     assert.equal(edge.to, 'engine/state.js');
@@ -528,6 +531,7 @@ test('hint proof façade has a closed named dependency surface and no writes or 
     'shared/hint-contract.js':['projectHint'],
     'shared/reference.js':['isCoverageReferenceSource','sameReferenceSource'],
     'publish-contract.js':['gameEpochOf'],
+    'shared/exact-stat.js':['lstatExactAsync','handleStatExact'],
   };
   for(const edge of staticGraph().edges.filter(edge=>edge.from==='tools/hint-proof.js')) {
     assert.ok(!edge.dynamic && allowed[edge.to] && edge.bindings.length && edge.bindings.every(name=>allowed[edge.to].includes(name)),JSON.stringify(edge));

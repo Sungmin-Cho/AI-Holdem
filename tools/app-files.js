@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { fstatExact, lstatExact } from "../shared/exact-stat.js";
 export function writePrivateJson(file, value) {
   const temp = path.join(
     path.dirname(file),
@@ -32,8 +33,9 @@ export function readPrivateJson(file, maxBytes = 2 * 1024 * 1024) {
       (fs.constants.O_NONBLOCK ?? 0),
   );
   try {
-    const stat = fs.fstatSync(fd),
-      current = fs.lstatSync(file);
+    // Exact identities (#308): a Number-valued ino past 2^53 (Windows) can match a replacement.
+    const stat = fstatExact(fd),
+      current = lstatExact(file);
     if (
       !stat.isFile() ||
       stat.nlink !== 1 ||

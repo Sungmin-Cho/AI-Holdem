@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { lstatExact, fstatExact } from '../shared/exact-stat.js';
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -228,8 +229,9 @@ function assertSafeSegment(segment) {
   }
 }
 
+// Identities are exact (#308): a Number-valued ino past 2^53 (Windows) can match a replacement.
 function inspectDirectory(dirPath) {
-  const st = fs.lstatSync(dirPath);
+  const st = lstatExact(dirPath);
   if (st.isSymbolicLink() || !st.isDirectory()) {
     throw coded('UNSAFE_PATH', `${dirPath}는 안전한 디렉터리가 아닙니다.`);
   }
@@ -248,7 +250,7 @@ function walkAncestors(root, dirSegments) {
 
 function reinspectAncestors(ancestors) {
   for (const ancestor of ancestors) {
-    const st = fs.lstatSync(ancestor.path);
+    const st = lstatExact(ancestor.path);
     if (st.isSymbolicLink() || !st.isDirectory()) {
       throw coded('UNSAFE_PATH', `${ancestor.path}는 안전한 디렉터리가 아닙니다.`);
     }
@@ -279,7 +281,7 @@ function uniqueTmpPath(dir, destName) {
 function unlinkTmpIfOurs(tmpPath, tmpId, ancestors) {
   try {
     reinspectAncestors(ancestors);
-    const st = fs.lstatSync(tmpPath);
+    const st = lstatExact(tmpPath);
     if (st.isSymbolicLink() || !st.isFile()) return;
     if (st.dev !== tmpId.dev || st.ino !== tmpId.ino) return;
     fs.unlinkSync(tmpPath);
@@ -311,7 +313,7 @@ export function openContained(root, segments, { maxBytes } = {}) {
   // its meaning for callers (absence), unchanged.
   let before;
   try {
-    before = fs.lstatSync(filePath);
+    before = lstatExact(filePath);
   } catch (error) {
     throw mapOpenError(error, filePath);
   }
@@ -329,7 +331,7 @@ export function openContained(root, segments, { maxBytes } = {}) {
     } catch (error) {
       throw mapOpenError(error, filePath);
     }
-    const st = fs.fstatSync(fd);
+    const st = fstatExact(fd);
     assertSafeRegularStat(st, filePath, maxBytes);
     if (st.dev !== before.dev || st.ino !== before.ino) {
       throw coded('UNSAFE_PATH', `${filePath}가 읽는 중 교체되었습니다.`);
@@ -392,7 +394,7 @@ export function writeContained(root, segments, bytes, { mode } = {}) {
     } catch (error) {
       throw mapOpenError(error, tmpPath);
     }
-    const opened = fs.fstatSync(fd);
+    const opened = fstatExact(fd);
     tmpId = { dev: opened.dev, ino: opened.ino };
     fs.writeFileSync(fd, buf);
     fs.fchmodSync(fd, FILE_MODE);

@@ -16,6 +16,7 @@ import { studyBudget } from './helpers/platform.js';
 import { descriptorPath, lockPath, launch, service, until } from './helpers/study-service-fixtures.mjs';
 import { acquireOwnedLock, releaseOwnedLock, readOwnedLock, removeDeletedLockDir, withNamedLock, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
 import { platformTimeout, platformNow, withPlatformDeadline } from '../shared/platform-files.js';
+import { hasLiveLockHolder, LOCK_NAME } from '../tools/coach-control.js';
 
 const [UV_MAJOR, UV_MINOR] = process.versions.uv.split('.').map(Number);
 // libuv 1.49.0 added POSIX delete semantics on Windows (ChangeLog: "win,fs: use posix
@@ -828,3 +829,421 @@ test('#265 short mutex: contending processes do not fail on each other\'s reads 
   }
   assert.equal(absent(path.join(root, 'busy.lock.d')), true);
 });
+
+// #306: two readers of a lock's pid file that took a name pending deletion for a verdict. The
+// pending name is a release (or a reclaim) in progress, not an owner: its owner is gone or going.
+// finalize-cutoff's check for a live publish.lock.d holder read it as one (lock_held), and a study
+// client failed an ensure whose own service child was reclaiming a dead owner's lock.
+test('#306: hasLiveLockHolder takes a pid file pending deletion behind another reader for the release it is', async (t) => {
+  const gameDir = createOwnedTempDir('holdem-306-holder-pending');
+  const pidFile = path.join(gameDir, LOCK_NAME, 'pid');
+  fs.mkdirSync(path.dirname(pidFile));
+  // A live pid: this owner is releasing, exactly as a publisher does when it leaves.
+  fs.writeFileSync(pidFile, `${process.pid}\n`);
+  const holder = holdOpen(pidFile, { lingerMs: 300, pendingLingerMs: 1000 });
+  await holder.held;
+  fs.unlinkSync(pidFile);
+  const pending = failureCode(() => fs.lstatSync(pidFile)) === 'EPERM';
+  const started = performance.now();
+  const held = hasLiveLockHolder(gameDir);
+  const elapsed = performance.now() - started;
+  const closed = await holder.closed;
+  t.diagnostic(`pending=${pending} elapsed=${Math.round(elapsed)} holder ${closed.out.trim().replace(/\n/g, ' | ')}`);
+  assert.equal(closed.code, 0, closed.err);
+  if (!pending) assert.equal(DELETE_PENDING, false, 'libuv 1.46 must keep the deleted name');
+  assert.equal(held, false, 'a pid file pending deletion was taken for a live lock holder');
+  // A lock the release left behind is still a holder's while its pid answers.
+  fs.writeFileSync(pidFile, `${process.pid}\n`);
+  assert.equal(hasLiveLockHolder(gameDir), true);
+});
+
+test('#306: hasLiveLockHolder retries only a Windows EPERM read of the pid file, within its bound', () => {
+  const gameDir = createOwnedTempDir('holdem-306-holder-decision');
+  const coded = (code) => () => Object.assign(new Error(code), { code });
+  let clock = 0;
+  const sleep = (ms) => { clock += ms; };
+  const now = () => clock;
+  const reads = (...steps) => {
+    const calls = { n: 0 };
+    const readFile = () => {
+      const step = steps[Math.min(calls.n, steps.length - 1)];
+      calls.n += 1;
+      if (typeof step === 'function') throw step();
+      return step;
+    };
+    return Object.assign(readFile, { calls });
+  };
+  // A release that finished, and a reclaim whose next owner is alive.
+  assert.equal(hasLiveLockHolder(gameDir, { platform: 'win32', readFile: reads(coded('EPERM'), coded('EPERM'), coded('ENOENT')), sleep, now }), false);
+  assert.equal(hasLiveLockHolder(gameDir, { platform: 'win32', readFile: reads(coded('EPERM'), `${process.pid}\n`), sleep, now }), true);
+  // Unreadable to the end of the bound: held, after waiting no longer than the bound.
+  clock = 0;
+  const stuck = reads(coded('EPERM'));
+  assert.equal(hasLiveLockHolder(gameDir, { platform: 'win32', readFile: stuck, sleep, now }), true);
+  assert.ok(clock >= DELETE_PENDING_WAIT_MS && clock < DELETE_PENDING_WAIT_MS + 100, `waited ${clock} ms`);
+  assert.ok(stuck.calls.n > 1);
+  // A shorter caller bound is kept; a longer one is capped.
+  clock = 0;
+  assert.equal(hasLiveLockHolder(gameDir, { platform: 'win32', readFile: reads(coded('EPERM')), sleep, now, waitMs: 100 }), true);
+  assert.ok(clock >= 100 && clock < 200, `waited ${clock} ms`);
+  clock = 0;
+  assert.equal(hasLiveLockHolder(gameDir, { platform: 'win32', readFile: reads(coded('EPERM')), sleep, now, waitMs: 60_000 }), true);
+  assert.ok(clock < DELETE_PENDING_WAIT_MS + 100, `waited ${clock} ms`);
+  // Elsewhere an EPERM read is no pending name: held at once, read once.
+  const posix = reads(coded('EPERM'));
+  assert.equal(hasLiveLockHolder(gameDir, { platform: 'linux', readFile: posix, sleep, now }), true);
+  assert.equal(posix.calls.n, 1);
+  // Any other failure is thrown, never retried.
+  const busy = reads(coded('EBUSY'));
+  assert.throws(() => hasLiveLockHolder(gameDir, { platform: 'win32', readFile: busy, sleep, now }), { code: 'EBUSY' });
+  assert.equal(busy.calls.n, 1);
+  // A live process this user may not signal (kill(0) EPERM) is held at once: read once, no wait.
+  if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+    clock = 0;
+    const init = reads('1\n');
+    assert.equal(hasLiveLockHolder(gameDir, { platform: 'win32', readFile: init, sleep, now }), true);
+    assert.equal(init.calls.n, 1);
+    assert.equal(clock, 0);
+  }
+  // Unchanged: no pid file and an unparsable one are no holder.
+  assert.equal(hasLiveLockHolder(gameDir), false);
+  assert.equal(hasLiveLockHolder(gameDir, { readFile: reads('not-a-pid\n') }), false);
+});
+
+test('#306: hasLiveLockHolder still answers held for a pid file that stays unreadable past its bound', {
+  skip: WIN32 ? false : 'only Windows keeps a deleted name behind its holder',
+}, async (t) => {
+  const gameDir = createOwnedTempDir('holdem-306-holder-bound');
+  const pidFile = path.join(gameDir, LOCK_NAME, 'pid');
+  fs.mkdirSync(path.dirname(pidFile));
+  fs.writeFileSync(pidFile, `${process.pid}\n`);
+  const holder = holdOpen(pidFile, { pendingLingerMs: DELETE_PENDING_WAIT_MS + 4000 });
+  await holder.held;
+  fs.unlinkSync(pidFile);
+  if (failureCode(() => fs.lstatSync(pidFile)) !== 'EPERM') {
+    await holder.closed;
+    assert.equal(DELETE_PENDING, false, 'libuv 1.46 must keep the deleted name');
+    t.skip('this file system deletes names at once');
+    return;
+  }
+  const started = performance.now();
+  const held = hasLiveLockHolder(gameDir);
+  const elapsed = performance.now() - started;
+  assert.equal((await holder.closed).code, 0);
+  // Unproven to the end: the lock is never taken for released.
+  assert.equal(held, true);
+  assert.ok(elapsed < DELETE_PENDING_WAIT_MS + 1500, `hasLiveLockHolder waited ${Math.round(elapsed)} ms`);
+});
+
+test('#306: an ensure whose service child reclaims a dead owner\'s lock past a reader of its pid file still gets that service', { timeout: STOP_BUDGET }, async (t) => {
+  const first = await launch(t);
+  const api = await service();
+  await api.stopStudyService(first.storeDir, { expectedInstanceId: first.handle.instanceId });
+  await deadOwnedLock(path.join(first.storeDir, '.training'), 'study.lock.d');
+  // The reader keeps the reclaimed pid name pending for 1.5 s (inside the child's own 2 s bound on
+  // removing the lock directory); the client polls the lock through all of it.
+  const holder = holdOpen(path.join(lockPath(first.storeDir), 'pid'), { pendingLingerMs: 1500 });
+  await holder.held;
+  // One call, made directly (r1): the launch helper would retry a failed ensure that spawned nothing.
+  const children = [];
+  const handle = await api.ensureStudyService(first.storeDir, {
+    onChild(child) { child.ref(); children.push(registerOwnedProcess(child, 'study service')); },
+  });
+  t.after(() => api.stopStudyService(first.storeDir, { expectedInstanceId: handle.instanceId }).catch(() => {}));
+  const closed = await holder.closed;
+  t.diagnostic(`holder ${closed.out.trim().replace(/\n/g, ' | ')}`);
+  assert.equal(closed.code, 0, closed.err);
+  assert.equal(children.length, 1, 'one service child');
+  assert.notEqual(handle.instanceId, first.handle.instanceId);
+  assert.equal((await api.inspectStudyService(first.storeDir)).instanceId, handle.instanceId);
+});
+
+test('#306: an inspect that meets a lock whose pid file is pending deletion still fails closed', {
+  skip: WIN32 ? false : 'only Windows keeps a deleted name behind its holder', timeout: STOP_BUDGET,
+}, async (t) => {
+  const first = await launch(t);
+  const api = await service();
+  await api.stopStudyService(first.storeDir, { expectedInstanceId: first.handle.instanceId });
+  await deadOwnedLock(path.join(first.storeDir, '.training'), 'study.lock.d');
+  const pidFile = path.join(lockPath(first.storeDir), 'pid');
+  // Past the client's own bound on reading a pending lock again (twice DELETE_PENDING_WAIT_MS).
+  const holder = holdOpen(pidFile, { pendingLingerMs: 2 * DELETE_PENDING_WAIT_MS + 3000 });
+  await holder.held;
+  fs.unlinkSync(pidFile);
+  if (failureCode(() => fs.lstatSync(pidFile)) !== 'EPERM') {
+    await holder.closed;
+    assert.equal(DELETE_PENDING, false, 'libuv 1.46 must keep the deleted name');
+    t.skip('this file system deletes names at once');
+    return;
+  }
+  // Neither stopped nor running: an owner that cannot be read is never reported either way.
+  await assert.rejects(api.inspectStudyService(first.storeDir), { code: 'STUDY_DESCRIPTOR_CORRUPT' });
+  assert.equal((await holder.closed).code, 0);
+  fs.rmdirSync(lockPath(first.storeDir));
+});
+
+test('#306: only a Windows EPERM read failure of a study lock is read again', async () => {
+  const { isPendingReadFailure } = await service();
+  const failure = (fields) => Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT'), { code: 'STUDY_DESCRIPTOR_CORRUPT', ...fields });
+  assert.equal(isPendingReadFailure(failure({ fsCode: 'EPERM' }), 'win32'), true);
+  assert.equal(isPendingReadFailure(failure({ fsCode: 'EPERM' }), 'linux'), false);
+  assert.equal(isPendingReadFailure(failure({ fsCode: 'EBUSY' }), 'win32'), false);
+  assert.equal(isPendingReadFailure(failure({}), 'win32'), false);
+  assert.equal(isPendingReadFailure(Object.assign(new Error('x'), { code: 'STUDY_IDENTITY_MISMATCH', fsCode: 'EPERM' }), 'win32'), false);
+});
+
+test('#306: a batch proof that fails leaves no proved set for the next transaction of its scope', async () => {
+  const { withClientAclScope, aclTransaction } = await service();
+  const root = createOwnedTempDir('holdem-306-batch-proof');
+  const training = path.join(root, '.training');
+  fs.mkdirSync(training);
+  const ctx = { root, training };
+  let proofs = 0;
+  let refuse = false;
+  const prove = (entries, { onUnproven }) => {
+    proofs += 1;
+    if (!refuse) return true;
+    onUnproven('error:EPERM');
+    return false;
+  };
+  withClientAclScope(() => {
+    assert.equal(aclTransaction(ctx, () => 'first', { platform: 'win32' }), 'first');
+    // The listing changes, and the proof of the new one fails (a path pending deletion, say).
+    fs.writeFileSync(path.join(training, 'study-service.json'), '{}');
+    refuse = true;
+    assert.throws(() => aclTransaction(ctx, () => 'second', { platform: 'win32' }), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EPERM' });
+    refuse = false;
+    const before = proofs;
+    // Same listing as the failed proof saw: only a new proof may vouch for it.
+    assert.equal(aclTransaction(ctx, () => 'third', { platform: 'win32' }), 'third');
+    assert.ok(proofs > before, 'the transaction ran on the set proved for an older listing');
+  }, { platform: 'win32', prove });
+});
+
+// #306 r1: every read-only step of a client call is read again the same way, within one bound. Here
+// the descriptor name, not the lock, is pending — a stopped service's descriptor behind a reader —
+// when the ensure takes its first look at the store (its context, before any lock read). The ensure
+// is called directly: the launch helper would retry a failed one and hide that.
+test('#306: an ensure whose first look at the store meets a descriptor name pending deletion waits it out', {
+  skip: WIN32 ? false : 'only Windows keeps a deleted name behind its holder', timeout: STOP_BUDGET,
+}, async (t) => {
+  const first = await launch(t);
+  const api = await service();
+  await api.stopStudyService(first.storeDir, { expectedInstanceId: first.handle.instanceId });
+  const descriptor = descriptorPath(first.storeDir);
+  fs.writeFileSync(descriptor, '{}', { mode: 0o600 });
+  const holder = holdOpen(descriptor, { pendingLingerMs: 1500 });
+  await holder.held;
+  fs.unlinkSync(descriptor);
+  if (failureCode(() => fs.lstatSync(descriptor)) !== 'EPERM') {
+    await holder.closed;
+    assert.equal(DELETE_PENDING, false, 'libuv 1.46 must keep the deleted name');
+    t.skip('this file system deletes names at once');
+    return;
+  }
+  const handle = await api.ensureStudyService(first.storeDir, {
+    onChild(child) { child.ref(); registerOwnedProcess(child, 'study service'); },
+  });
+  t.after(() => api.stopStudyService(first.storeDir, { expectedInstanceId: handle.instanceId }).catch(() => {}));
+  const closed = await holder.closed;
+  t.diagnostic(`holder ${closed.out.trim().replace(/\n/g, ' | ')}`);
+  assert.equal(closed.code, 0, closed.err);
+  assert.notEqual(handle.instanceId, first.handle.instanceId);
+});
+
+// #306 r1: the bound itself, on every platform through `platform`. Another failure, or one off
+// Windows, is thrown at once. A pending read that clears is returned. One that never clears is thrown
+// by the earliest of the call's deadline, the platform budget in force and PENDING_READ_WAIT_MS from
+// its first failure; no read starts past that, and each read again runs inside it.
+test('#306: a pending read is read again only within its bound, and never started past it', { timeout: 30_000 }, async () => {
+  const { readSettled } = await service();
+  const pending = () => Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT'), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EPERM' });
+  const win32 = { platform: 'win32' };
+  let reads = 0;
+  await assert.rejects(readSettled(() => {
+    reads += 1;
+    throw Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT'), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EACCES' });
+  }, platformNow() + 10_000, win32), { fsCode: 'EACCES' });
+  assert.equal(reads, 1);
+  reads = 0;
+  await assert.rejects(readSettled(() => { reads += 1; throw pending(); }, platformNow() + 10_000, { platform: 'linux' }), { fsCode: 'EPERM' });
+  assert.equal(reads, 1);
+  reads = 0;
+  assert.equal(await readSettled(() => { reads += 1; if (reads < 3) throw pending(); return 'read'; }, platformNow() + 10_000, win32), 'read');
+  assert.equal(reads, 3);
+
+  // The call's deadline.
+  const starts = [];
+  const budgets = [];
+  const deadline = platformNow() + 300;
+  await assert.rejects(readSettled(() => {
+    starts.push(platformNow());
+    if (starts.length > 1) budgets.push(platformTimeout(15_000));
+    throw pending();
+  }, deadline, win32), { fsCode: 'EPERM' });
+  assert.ok(starts.length > 2, `read ${starts.length} times`);
+  assert.ok(starts.every((at) => at < deadline), 'a read started past the deadline');
+  assert.ok(budgets.every((ms) => ms <= 300), `a read again ran with ${Math.max(...budgets)} ms`);
+
+  // A read again that runs out of the bound keeps the pending EPERM; any other failure is its own.
+  reads = 0;
+  await assert.rejects(readSettled(() => {
+    reads += 1;
+    if (reads === 1) throw pending();
+    platformTimeout(1);
+    throw Object.assign(new Error('STUDY_IDENTITY_MISMATCH'), { code: 'STUDY_IDENTITY_MISMATCH' });
+  }, platformNow() + 10_000, win32), { code: 'STUDY_IDENTITY_MISMATCH' });
+  let spent = 0;
+  await assert.rejects(readSettled(() => {
+    spent += 1;
+    if (spent === 1) throw pending();
+    const until = platformNow() + 400;
+    while (platformNow() < until) { /* the bound runs out during this read */ }
+    platformTimeout(1);
+    return 'late';
+  }, platformNow() + 200, win32), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EPERM' });
+  // The budget's whole milliseconds run out a fraction of one before the bound (r1): the read again
+  // fails as a spent budget while the clock is still short of the bound, and keeps the EPERM too.
+  let at = 0.25;
+  let fractional = 0;
+  await assert.rejects(withPlatformDeadline(10_000, () => readSettled(() => {
+    fractional += 1;
+    if (fractional === 1) throw pending();
+    at = 100;
+    platformTimeout(1);
+    return 'late';
+  }, 100.5, win32), { now: () => at }), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EPERM' });
+  assert.equal(fractional, 2);
+  // The bound is where reads stop being started (r3): a read again started inside it that returns
+  // after it is what it observed, and stands.
+  at = 0.25;
+  let late = 0;
+  assert.equal(await withPlatformDeadline(10_000, () => readSettled(() => {
+    late += 1;
+    if (late === 1) throw pending();
+    at = 500;
+    return 'late';
+  }, 100.5, win32), { now: () => at }), 'late');
+  assert.equal(late, 2);
+
+  // The platform budget in force.
+  let started = platformNow();
+  await assert.rejects(withPlatformDeadline(platformNow() + 300, () => readSettled(() => { throw pending(); }, platformNow() + 60_000, win32)),
+    { fsCode: 'EPERM' });
+  assert.ok(platformNow() - started < 1500, `waited ${Math.round(platformNow() - started)} ms past a 300 ms budget`);
+
+  // PENDING_READ_WAIT_MS from the first failure.
+  let first = null;
+  started = platformNow();
+  await assert.rejects(readSettled(() => {
+    if (first === null) { first = platformNow(); while (platformNow() - first < 200) { /* a slow first read */ } }
+    throw pending();
+  }, platformNow() + 60_000, win32), { fsCode: 'EPERM' });
+  const waited = platformNow() - first;
+  assert.ok(waited >= 2 * DELETE_PENDING_WAIT_MS && waited < 2 * DELETE_PENDING_WAIT_MS + 1500, `waited ${Math.round(waited)} ms`);
+});
+
+// #306 r1: the trailing ACL proof of a client call lists its names once more. For a call that
+// succeeded a pending name there is read again in the same bound; a call that failed keeps its own
+// error and is proved once.
+test('#306: the trailing proof of a call that succeeded is read again past a pending name', { timeout: 30_000 }, async () => {
+  const { withClientAclScope, aclTransaction } = await service();
+  const root = createOwnedTempDir('holdem-306-trailing-proof');
+  const training = path.join(root, '.training');
+  fs.mkdirSync(training);
+  const ctx = { root, training };
+  const scope = (body, failures) => {
+    let trailing = false;
+    let after = 0;
+    const prove = (entries, { onUnproven }) => {
+      if (!trailing) return true;
+      after += 1;
+      if (after > failures) return true;
+      onUnproven('error:EPERM');
+      return false;
+    };
+    const run = () => withClientAclScope(async () => {
+      assert.equal(aclTransaction(ctx, () => 'body', { platform: 'win32' }), 'body');
+      trailing = true;
+      return body();
+    }, { platform: 'win32', prove });
+    return { run, proofs: () => after };
+  };
+  const cleared = scope(() => 'done', 2);
+  assert.equal(await cleared.run(), 'done');
+  assert.equal(cleared.proofs(), 3);
+
+  // Within the platform budget the call runs in.
+  const held = scope(() => 'done', Infinity);
+  const started = platformNow();
+  await assert.rejects(withPlatformDeadline(platformNow() + 300, held.run), { code: 'STUDY_DESCRIPTOR_CORRUPT', fsCode: 'EPERM' });
+  assert.ok(platformNow() - started < 1500, `waited ${Math.round(platformNow() - started)} ms past a 300 ms budget`);
+  assert.ok(held.proofs() > 1);
+
+  const failed = scope(() => { throw Object.assign(new Error('mine'), { code: 'STUDY_IDENTITY_MISMATCH' }); }, Infinity);
+  await assert.rejects(failed.run(), { code: 'STUDY_IDENTITY_MISMATCH' });
+  assert.equal(failed.proofs(), 1);
+});
+
+// #306 r2: the EPERM a pending name answers, for the first lstat whose call stack holds every frame
+// in `within` and none in `outside` — one named read-only step of a client call, in this process
+// only (the service child is untouched). It stands in, deterministically, for a release that begins
+// between two reads of the same call. `onFail` sees the moment it fires.
+function failOnePendingRead({ within, outside = [], onFail = () => {} }) {
+  const original = fs.lstatSync;
+  const has = (stack, frame) => stack.includes(`at ${frame} (`) || stack.includes(`at async ${frame} (`);
+  let failed = 0;
+  fs.lstatSync = function lstatSync(file, ...rest) {
+    if (failed === 0) {
+      const limit = Error.stackTraceLimit;
+      Error.stackTraceLimit = 200;
+      const { stack } = new Error();
+      Error.stackTraceLimit = limit;
+      if (within.every((frame) => has(stack, frame)) && !outside.some((frame) => has(stack, frame))) {
+        failed += 1;
+        onFail(String(file));
+        throw Object.assign(new Error(`EPERM: operation not permitted, lstat '${file}'`), { code: 'EPERM', syscall: 'lstat', path: String(file) });
+      }
+    }
+    return original.call(this, file, ...rest);
+  };
+  return { restore() { fs.lstatSync = original; }, failed: () => failed };
+}
+// The reads that hold `assertContext` themselves, so a step's own check is told from them.
+const READ_FRAMES = ['context', 'readContextOwnership', 'readLock', 'readDescriptor', 'readPrivate', 'validateParent'];
+
+// #306 r2: the check right before an ensure spawns its service child (after its first read
+// succeeded), and the check before a cold ensure creates the store's training directory. Each is
+// failed once as pending; the one ensure call still succeeds with one child. Windows only: elsewhere
+// an EPERM is never a pending name. (Without that step's readSettled, the ensure fails.)
+for (const step of ['pre-spawn', 'cold-create']) {
+  test(`#306: an ensure whose ${step === 'pre-spawn' ? 'check right before it spawns' : 'check before it creates a cold store'} meets a pending name reads it again`, {
+    skip: WIN32 ? false : 'an EPERM is a pending name only on Windows', timeout: STOP_BUDGET,
+  }, async (t) => {
+    const api = await service();
+    let storeDir;
+    if (step === 'pre-spawn') {
+      const first = await launch(t);
+      await api.stopStudyService(first.storeDir, { expectedInstanceId: first.handle.instanceId });
+      storeDir = first.storeDir;
+    } else {
+      storeDir = createOwnedTempDir('holdem-306-cold-create');
+    }
+    const children = [];
+    let childrenAtFailure = null;
+    const injected = failOnePendingRead(step === 'pre-spawn'
+      ? { within: ['assertContext', 'ensureOwned'], outside: READ_FRAMES, onFail: () => { childrenAtFailure = children.length; } }
+      : { within: ['assertContext', 'ensureStudyServiceWithinBudget'], outside: [...READ_FRAMES, 'ensureOwned'], onFail: () => { childrenAtFailure = children.length; } });
+    let handle;
+    try {
+      handle = await api.ensureStudyService(storeDir, {
+        onChild(child) { child.ref(); children.push(registerOwnedProcess(child, 'study service')); },
+      });
+    } finally { injected.restore(); }
+    t.after(() => api.stopStudyService(storeDir, { expectedInstanceId: handle.instanceId }).catch(() => {}));
+    assert.equal(injected.failed(), 1, 'the step met the pending name');
+    assert.equal(childrenAtFailure, 0, 'it did before the spawn');
+    assert.equal(children.length, 1, 'one service child');
+    assert.equal((await api.inspectStudyService(storeDir)).instanceId, handle.instanceId);
+  });
+}
