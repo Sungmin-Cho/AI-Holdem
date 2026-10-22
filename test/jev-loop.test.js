@@ -347,12 +347,15 @@ test('#319 F5: a JEV loop cleanup failure keeps the closed identity site through
  await wait(()=>read(f.dir,'loop-state.json').metrics?.some(m=>m.outcome==='jev_accepted'));
  const serverPid=read(f.dir,'lock.json').serverPid;
  startTimeOf.set(pid=>pid===serverPid?null:real(pid));
- await assert.rejects(f.loop.requestStop(),error=>error.code==='SERVER_IDENTITY_UNAVAILABLE'&&error.site==='direct-signal-start-time'
-  &&error.pidAfter==='alive'&&Number.isInteger(error.details?.stopAttempt));
- const cleanup=read(f.dir,'loop-state.json').cleanupError;
- assert.deepEqual([cleanup.code,cleanup.site,cleanup.pidAfter],['SERVER_IDENTITY_UNAVAILABLE','direct-signal-start-time','alive']);
- assert.ok(Array.isArray(cleanup.details.stopFailures),'the JEV re-wrap ran');
- startTimeOf.reset();
+ // The real start time comes back whatever the assertions say, so the stop after them (and the
+ // fixture's own) can still end the relay and release the loop lock.
+ try{
+  await assert.rejects(f.loop.requestStop(),error=>error.code==='SERVER_IDENTITY_UNAVAILABLE'&&error.site==='direct-signal-start-time'
+   &&error.pidAfter==='alive'&&Number.isInteger(error.details?.stopAttempt));
+  const cleanup=read(f.dir,'loop-state.json').cleanupError;
+  assert.deepEqual([cleanup.code,cleanup.site,cleanup.pidAfter],['SERVER_IDENTITY_UNAVAILABLE','direct-signal-start-time','alive']);
+  assert.ok(Array.isArray(cleanup.details.stopFailures),'the JEV re-wrap ran');
+ }finally{startTimeOf.reset();}
  await f.loop.requestStop();
  await f.running.catch(e=>{if(!['STOPPING','CHILD_FAILED','SERVER_IDENTITY_UNAVAILABLE'].includes(e.code))throw e;});
 });
