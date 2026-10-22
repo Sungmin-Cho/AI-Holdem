@@ -51,6 +51,7 @@ function harness(t, scenario, extra = {}) {
   const log = path.join(dir, 'fake.log');
   const release = scenario.release === true ? path.join(dir, 'release') : null;
   const spawned = [];
+  let unrefs = 0;
   // 한 teardown이 순서대로 정리한다: release로 붙잡힌 가짜 loop를 풀고 끝을 확인한 뒤 디렉터리를 지운다(단언 실패와 무관).
   t.after(async () => {
     if (release) fs.writeFileSync(release, '');
@@ -66,6 +67,8 @@ function harness(t, scenario, extra = {}) {
         detached: true, stdio: ['ignore', stdout, stderr], env: { ...process.env, FAKE_LOOP_SCENARIO: JSON.stringify({ log, ...scenario, release }) },
       });
       if (child.pid) spawned.push(child.pid);
+      const unref = child.unref.bind(child);
+      child.unref = () => { unrefs += 1; unref(); };
       return child;
     },
     inspectStudy: async (store) => { studyCalls.push(['inspect', store]); return { status: 'running', instanceId: 'inst-1' }; },
@@ -85,7 +88,7 @@ function harness(t, scenario, extra = {}) {
     assert.ok(events().some((event) => event.ready), 'fake loop never became ready');
   };
   const signals = () => events().filter((event) => event.signal);
-  return { dir, targets, deps, studyCalls, listenerCalls, events, ready, signals };
+  return { dir, targets, deps, studyCalls, listenerCalls, events, ready, signals, unrefs: () => unrefs };
 }
 
 const base = { hands: 3, ai: 2, pace: 'instant', maxPlayerCalls: 400, budgetMs: 60_000, bootTimeoutMs: 30_000 };
@@ -451,6 +454,78 @@ test('observe: an error after spawn (a failed signal delivery) is not an exit �
   assert.deepEqual(report.run.childErrors, ['EPERM']);
   assert.equal(h.signals().length, 0, 'the delivery failed, so the loop saw no signal');
   assert.deepEqual(h.studyCalls, []);
+  assert.equal(h.unrefs(), 1, 'the runner lets go of the live child');
+  assert.ok(report.criteria.o0.reasons.includes('CHILD_ERROR'));
+});
+
+// 이벤트 순서를 결정적으로 만드는 가짜 ChildProcess. spawnLoop가 세션 파일을 동기로 써 두어 "핸들러 설치 뒤" 상태를 만든다.
+function scriptedChild(t, { spawnEvent, killError, exitAfterKillMs = null }) {
+  const dir = tmp();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const targets = { storeDir: path.join(dir, 'store'), out: path.join(dir, 'out.json') };
+  const child = new EventEmitter();
+  child.pid = 4_000_001;
+  child.kills = [];
+  child.unrefs = 0;
+  child.unref = () => { child.unrefs += 1; };
+  child.kill = (name) => {
+    child.kills.push(name);
+    if (killError) child.emit('error', Object.assign(new Error('kill failed'), { code: 'EPERM' }));
+    if (exitAfterKillMs !== null) setTimeout(() => child.emit('exit', 0, null), exitAfterKillMs);
+    return false;
+  };
+  const studyCalls = [];
+  let writes = 0;
+  const deps = {
+    spawnLoop: (args) => {
+      const store = args[args.indexOf('--store-dir') + 1];
+      const session = path.join(store, '.session-store', 'sessions', 'g1');
+      fs.mkdirSync(session, { recursive: true });
+      fs.writeFileSync(path.join(store, '.session-store', 'current.json'), JSON.stringify({ sessionRel: 'sessions/g1' }));
+      fs.writeFileSync(path.join(session, 'loop-state.json'), JSON.stringify({ phase: 'bootstrap' }));
+      if (spawnEvent === 'nextTick') process.nextTick(() => child.emit('spawn'));
+      return child;
+    },
+    // manifest 쓰기를 실패시켜 첫 동기 감시 단계에서 바로 정지 경로로 들어가게 한다.
+    writeReport: () => { writes += 1; if (writes === 1) throw Object.assign(new Error('full'), { code: 'ENOSPC' }); },
+    inspectStudy: async (store) => { studyCalls.push(store); return { status: 'stopped' }; },
+    stopStudy: async () => {},
+    environment: { sha: () => null, codexVersion: () => null, loadavg: () => [0, 0, 0], codexProcesses: () => 0 },
+    identityStatus: () => 'dead', listenerOwnedBy: async () => false, pollMs: 10, stopGraceMs: 200,
+  };
+  return { targets, deps, child, studyCalls };
+}
+
+test('observe: before the spawn is confirmed no signal goes; a stop then ends unconfirmed with unref and no study stop', async (t) => {
+  const s = scriptedChild(t, { spawnEvent: 'never', killError: true });
+  const report = await observeOnce(base, s.targets, s.deps);
+  assert.equal(report.run.stopReason, 'RUNNER_ERROR');
+  assert.deepEqual(s.child.kills, [], 'no signal to a child whose spawn was never confirmed');
+  assert.equal(report.run.terminationConfirmed, false);
+  assert.equal(report.run.exit, null);
+  assert.equal(s.child.unrefs, 1);
+  assert.deepEqual(s.studyCalls, []);
+});
+
+test('observe: a kill error raised synchronously is never taken for an exit, even right after the spawn event', async (t) => {
+  const s = scriptedChild(t, { spawnEvent: 'nextTick', killError: true });
+  const report = await observeOnce(base, s.targets, s.deps);
+  assert.deepEqual(s.child.kills, ['SIGTERM']);
+  assert.deepEqual(report.run.childErrors, ['EPERM']);
+  assert.equal(report.run.exit, null);
+  assert.equal(report.run.terminationConfirmed, false);
+  assert.equal(s.child.unrefs, 1);
+  assert.deepEqual(s.studyCalls, []);
+});
+
+test('observe: after a child error the runner waits for the real exit, then cleans up and fails O0 with CHILD_ERROR', async (t) => {
+  const s = scriptedChild(t, { spawnEvent: 'nextTick', killError: true, exitAfterKillMs: 50 });
+  const report = await observeOnce(base, s.targets, s.deps);
+  assert.deepEqual(report.run.exit, { code: 0, signal: null });
+  assert.equal(report.run.terminationConfirmed, true);
+  assert.deepEqual(report.run.childErrors, ['EPERM']);
+  assert.equal(s.child.unrefs, 0);
+  assert.equal(s.studyCalls.length, 1, 'study cleanup only after the real exit');
   assert.ok(report.criteria.o0.reasons.includes('CHILD_ERROR'));
 });
 

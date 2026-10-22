@@ -660,13 +660,15 @@ export async function observeOnce(rawOptions, targets, deps = {}) {
   }
   run.loopPid = child.pid ?? null;
   let exit = null;
+  // spawn이 실패하면 Node는 pid를 두지 않고 'error'를 낸다. 그래서 spawn 실패는 이벤트 순서가 아니라 pid 부재로 판정한다.
+  // pid가 있는 자식의 'error'(신호 전달 실패 등)는 'spawn' 이벤트 전에 와도 종료의 증거가 아니다 — 기록만 하고 실제 exit를 기다린다.
+  const spawnFailed = child.pid === undefined;
   let spawned = false;
   const exited = new Promise((resolve) => {
     child.once('spawn', () => { spawned = true; });
     child.once('exit', (code, sig) => { exit ??= { code, signal: sig }; resolve(); });
-    // 'error'는 spawn 실패에만 종료의 증거다. spawn 뒤의 'error'(신호 전달 실패 등)는 기록만 하고 실제 exit를 기다린다.
     child.on('error', (error) => {
-      if (spawned) {
+      if (!spawnFailed) {
         if (run.childErrors.length < 10) run.childErrors.push(short(error?.code) ?? 'ERROR');
         return;
       }
@@ -737,7 +739,8 @@ export async function observeOnce(rawOptions, targets, deps = {}) {
       if (run.stopReason !== null) {
         stopAskedAt ??= clock();
         // §9.8: SIGTERM 핸들러는 bootstrap이 loop-state를 처음 쓰기 전에 설치된다. 그 전에는 신호를 미룬다.
-        if (signalledAt === null && stateSeen) {
+        // spawn 확인('spawn' 이벤트) 전에도 미룬다 — 신호를 보낼 자식이 확정되지 않았다.
+        if (signalledAt === null && stateSeen && spawned) {
           signalledAt = clock();
           run.stopSignalledAt = new Date(now()).toISOString();
           try { signal(child, 'SIGTERM'); } catch { /* 이미 끝났으면 exit가 온다 */ }
