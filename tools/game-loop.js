@@ -8317,6 +8317,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (stopErrors.length) {
         let stopError = stopErrors[0];
         if (jevRuntime) stopError = Object.assign(codedError(stopError.code ?? 'ERROR', stopError.message ?? 'Cleanup failed'), {
+          // #319 F5: the closed site of a SERVER_IDENTITY_UNAVAILABLE survives this re-wrap.
+          ...(failureDiagnostic(stopError) ?? {}),
           details: {...stopError.details, stopAttempt,
             jevClosureOnly: stopErrors.length === 1 && stopError.code === 'JEV_REQUEST_CLOSE_UNCONFIRMED',
             stopFailures: stopErrors.map(error => ({code:error.code ?? 'ERROR'}))},
