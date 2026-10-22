@@ -19,7 +19,7 @@ import {
   validateComparisonOptions,
 } from '../tools/compare-codex-players.js';
 import { legalFromMessage } from '../tools/player-decision.js';
-import { createPlayerRuntime, spawnCli } from '../tools/player-runtime.js';
+import { createPlayerRuntime, spawnCli, TERMINATE_KILL_WAIT_MS } from '../tools/player-runtime.js';
 
 // 모든 테스트는 가짜 CLI(`test/helpers/fake-cli.js`)만 띄운다 — 실제 codex·네트워크·store는 쓰지 않는다.
 const FAKE_CLI = fileURLToPath(new URL('./helpers/fake-cli.js', import.meta.url));
@@ -36,7 +36,13 @@ const decision = (spot, body) => reply(JSON.stringify({ decisionId: spot.decisio
 const legalOf = (spot) => legalFromMessage(spot.message);
 const safeAction = (spot) => (legalOf(spot).canCheck ? 'check' : 'call');
 
-function fixture(t, { script = {}, deps = {} } = {}) {
+// #319 F1: a phase's budget (`--timeout-ms 400`) covered the child a test meant to time out and every
+// child that answers; on a slow Windows runner an answering child ran past it too, and its close then
+// missed the 300 ms confirmation this fixture used to set. A test now names the calls it means to
+// time out (`slow`): only those keep the phase's budget, the others get ANSWER_BUDGET_MS. Closes are
+// confirmed within the product's own TERMINATE_KILL_WAIT_MS.
+const ANSWER_BUDGET_MS = 20_000;
+function fixture(t, { script = {}, deps = {}, slow = null } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-compare-test-'));
   const scriptPath = path.join(dir, 'script.json');
   const logPath = path.join(dir, 'calls.jsonl');
@@ -53,7 +59,10 @@ function fixture(t, { script = {}, deps = {} } = {}) {
     calls,
     deps: {
       tmpRoot,
-      runtimeOpts: { env: { FAKE_CLI_SCRIPT: scriptPath, FAKE_CLI_LOG: logPath }, terminateKillWaitMs: 300 },
+      runtimeOpts: {
+        env: { FAKE_CLI_SCRIPT: scriptPath, FAKE_CLI_LOG: logPath },
+        ...(slow ? { callBudget: (call) => (slow(call) ? call.timeoutMs : Math.max(call.timeoutMs, ANSWER_BUDGET_MS)) } : {}),
+      },
       exec: (spec) => {
         const child = spawnCli({ ...spec, command: process.execPath, args: [FAKE_CLI, ...spec.args] });
         return { ...child, kill: (signal) => { killAt.push(Date.now()); return child.kill(signal); } };
@@ -182,6 +191,10 @@ function decisionMatchers(spots, { invalidSpot = null } = {}) {
     { includes: `decisionId: ${spot.decisionId}`, argvIncludes: SOL, reply: decision(spot, { action: safeAction(spot), reason: '솔 사유' }) },
   ]);
 }
+
+// The calls a test means to time out (`fixture({ slow })`): Sol's decision on one spot, Sol's warmups.
+const slowSolCall = (spot) => ({ purpose, model, input }) => purpose === 'resume' && model === SOL && String(input).includes(`decisionId: ${spot.decisionId}`);
+const solWarmupCall = ({ purpose, model }) => purpose === 'create' && model === SOL;
 
 test('옵션 검증: 기본값은 작고, 표본·타임아웃·예산은 상한 안의 정수만 받는다', () => {
   assert.deepEqual(validateComparisonOptions({}), {
@@ -457,7 +470,7 @@ test('실행: 타임아웃은 자식 종료를 확인한 뒤에만 기록되고 
   const slowSol = {
     includes: `decisionId: ${spots[0].decisionId}`, argvIncludes: SOL, delayMs: 30_000, reply: decision(spots[0], { action: 'fold' }),
   };
-  const f = fixture(t, { script: { matchers: [slowSol, ...decisionMatchers(spots)] } });
+  const f = fixture(t, { script: { matchers: [slowSol, ...decisionMatchers(spots)] }, slow: slowSolCall(spots[0]) });
   const report = await runComparison({ samples: 2, timeoutMs: 400, budgetMs: 60_000 }, f.deps);
   const sol = report.variants[1];
   assert.deepEqual(sol.samples.map((sample) => sample.status), ['timeout', 'ok']);
@@ -482,7 +495,10 @@ test('실행: 타임아웃은 자식 종료를 확인한 뒤에만 기록되고 
 
 test('실행: 자식 종료를 확인하지 못하면 즉시 중단하고 임시 디렉터리를 남기며 모든 어댑터를 dispose한다', async (t) => {
   const spots = buildComparisonSpots(3);
-  const f = fixture(t, { script: { matchers: decisionMatchers(spots) } });
+  // The hanging first decision is the only call meant to time out. It never closes, so how long a
+  // close is awaited changes only how long this takes.
+  const f = fixture(t, { script: { matchers: decisionMatchers(spots) }, slow: ({ purpose }) => purpose === 'resume' });
+  f.deps.runtimeOpts.terminateKillWaitMs = 300;
   const disposed = [];
   let resumes = 0;
   const hangingExec = (spec) => {
@@ -946,7 +962,7 @@ const solWarmup = (extra) => ({ includes: '비교용', argvIncludes: SOL, reply:
 // #311: Windows에서는 그룹 신호 대신 Node 런처(libuv)의 kill-on-close Job이 손자를 함께 끝낸다.
 test('#297 실행: 래퍼 CLI의 warmup 타임아웃은 그룹째 끝나 close가 확인되고, 타임라인이 신호·exit·close를 나눠 보인다', async (t) => {
   const spots = buildComparisonSpots(2);
-  const f = fixture(t, { script: { wrapper: true, matchers: [solWarmup({ delayMs: 30_000 }), ...decisionMatchers(spots)] } });
+  const f = fixture(t, { script: { wrapper: true, matchers: [solWarmup({ delayMs: 30_000 }), ...decisionMatchers(spots)] }, slow: solWarmupCall });
   const report = await runComparison({ samples: 2, timeoutMs: 20_000, warmupTimeoutMs: 1500, budgetMs: 120_000 }, f.deps);
   const [luna, sol] = report.variants;
   // 타임아웃은 쓸 만한 관측이고 하네스 사고가 아니다 — 종료가 확인됐으니 중단도 없다.
@@ -970,8 +986,8 @@ test('#297 실행: 래퍼 CLI의 warmup 타임아웃은 그룹째 끝나 close�
     const [timeline] = sample.timelines.warmup;
     assert.deepEqual(timeline.kills.map(({ signal, delivered }) => [signal, delivered]), [['SIGKILL', true]]);
     assert.equal(timeline.closed, true, '손자까지 끝나 close가 왔다(POSIX 그룹 신호, Windows 런처의 Job)');
-    assert.ok(timeline.derived.signalToCloseMs !== null && timeline.derived.signalToCloseMs < 300,
-      `close는 어댑터의 확인 대기(300ms) 안에 왔다: ${timeline.derived.signalToCloseMs}`);
+    assert.ok(timeline.derived.signalToCloseMs !== null && timeline.derived.signalToCloseMs < TERMINATE_KILL_WAIT_MS,
+      `close는 어댑터의 확인 대기(${TERMINATE_KILL_WAIT_MS}ms) 안에 왔다: ${timeline.derived.signalToCloseMs}`);
     assert.ok(timeline.derived.signalToExitMs <= timeline.derived.signalToCloseMs);
     assert.equal(timeline.exitSignal, 'SIGKILL');
     assert.deepEqual(sample.timelines.decide, [], '돌리지 않은 단계에는 타임라인이 없다');
@@ -992,7 +1008,7 @@ test('#297 실행: 래퍼 CLI의 warmup 타임아웃은 그룹째 끝나 close�
 test('#297 실행: 그룹을 벗어난 후손이 stdio를 쥐면 종료 미확인으로 중단하고, 후손이 끝난 뒤 dispose 재시도에서 늦은 close가 확인된다', async (t) => {
   if (skipOnWin32(t, 'POSIX sessions and process groups')) return;
   const spots = buildComparisonSpots(1);
-  const f = fixture(t);
+  const f = fixture(t, { slow: solWarmupCall });
   const release = path.join(f.dir, 'release-holder');
   fs.writeFileSync(path.join(f.dir, 'script.json'), JSON.stringify({
     default: { reply: reply('ready') },
@@ -1400,7 +1416,7 @@ const NON_OK_SCENARIOS = [
   },
   {
     name: '타임아웃(부분 비교)', args: ['--samples', '2', '--timeout-ms', '400'],
-    gates: { executionOk: true, complete: false, allDecisionsLegal: true }, code: 'TIMEOUT',
+    gates: { executionOk: true, complete: false, allDecisionsLegal: true }, code: 'TIMEOUT', slow: (spots) => slowSolCall(spots[0]),
     script: (spots) => ({
       matchers: [
         { includes: `decisionId: ${spots[0].decisionId}`, argvIncludes: SOL, delayMs: 30_000, reply: decision(spots[0], { action: 'fold' }) },
@@ -1420,7 +1436,7 @@ const NON_OK_SCENARIOS = [
 for (const scenario of NON_OK_SCENARIOS) {
   test(`CLI: ${scenario.name}은 종료 코드 3이고 JSON ok=false, 사유는 stderr로 알린다`, async (t) => {
     const spots = buildComparisonSpots(2);
-    const f = fixture(t, { script: scenario.script(spots) });
+    const f = fixture(t, { script: scenario.script(spots), slow: scenario.slow?.(spots) ?? null });
     const json = await runCli(['--live', ...scenario.args, '--json'], f.deps);
     assert.equal(json.code, 3);
     const report = JSON.parse(json.out);

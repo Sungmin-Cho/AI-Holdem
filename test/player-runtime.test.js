@@ -3260,21 +3260,35 @@ test('카탈로그 자식의 종료를 확인하지 못하면 그 어댑터는 �
   assert.equal(spawned.length, 1);
 });
 
+// #320 D8: one `timeoutMs` bounded both the catalog child this test times out and the probe's round
+// trip, which answers; a slow Windows runner ran the round trip past 300 ms as well (TIMEOUT, two
+// kills, ~0.7 s). Only the catalog call keeps the short budget now, so the probe can fail only for
+// its own reasons — which the message names.
 test('카탈로그 타임아웃이라도 종료가 확인되면 폴백 고정값으로 진행한다', async () => {
   const { file } = canary();
   const f = fakeRuntime('codex', {
-    matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-7-sol']), delayMs: 5_000 }],
+    matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-7-sol']), delayMs: 30_000 }],
     default: { reply: CODEX_REPLY_OK },
-  });
+  }, { callBudget: ({ purpose, timeoutMs }) => (purpose === 'catalog' ? timeoutMs : 20_000) });
   try {
     const res = await f.rt.probe({ canaryAbsPath: file, timeoutMs: 300 });
-    assert.equal(res.containment, true);
+    assert.equal(res.containment, true, JSON.stringify({ notice: res.notice, kills: f.kills, catalog: f.rt.models.catalog, elapsedMs: res.elapsedMs }));
     assert.equal(f.rt.models.catalog, 'error:TIMEOUT');
     assert.equal(f.rt.models.player, 'gpt-6.1-sol');
     assert.deepEqual(f.kills, ['SIGKILL']);
   } finally {
     f.cleanup();
   }
+});
+
+test('#319 callBudget는 시험 전용 함수이고, 양의 정수가 아닌 상한은 자식을 띄우기 전에 거부한다', async () => {
+  assert.throws(() => createPlayerRuntime('codex', { callBudget: 300 }), { code: 'BAD_CALL_BUDGET' });
+  const spawned = [];
+  for (const ms of [0, 1.5, Number.NaN, '300']) {
+    const rt = createPlayerRuntime('codex', { callBudget: () => ms, exec: (spec) => { spawned.push(spec); throw new Error('spawned'); } });
+    await assert.rejects(rt.warmup({ playerId: 'p1', prompt: 'x', timeoutMs: 1000 }), { code: 'BAD_CALL_BUDGET' });
+  }
+  assert.deepEqual(spawned, []);
 });
 
 test('probe(upper): 카나리 호출이 유출 없이 정상 응답을 못 줘도 모델 귀속 실패로 폴백한다', async () => {

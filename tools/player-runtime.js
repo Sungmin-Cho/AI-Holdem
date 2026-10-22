@@ -157,7 +157,7 @@ const CATALOG_TIMEOUT_MS = 15_000;
 export const WARMUP_TIMEOUT_MS = 120_000;
 const ONESHOT_TIMEOUT_MS = 120_000;
 const TERMINATE_GRACE_MS = 5_000;
-const TERMINATE_KILL_WAIT_MS = 2_000;
+export const TERMINATE_KILL_WAIT_MS = 2_000;
 const TERMINATE_POLL_MS = 50;
 
 const UPPER_PROBE_PROMPT = 'ok 한 단어만 출력\n';
@@ -876,6 +876,18 @@ export function createPlayerRuntime(kind, opts = {}) {
   const startTimeOf = opts.processStartTime ?? defaultProcessStartTime;
   const graceMs = opts.terminateGraceMs ?? TERMINATE_GRACE_MS;
   const killWaitMs = opts.terminateKillWaitMs ?? TERMINATE_KILL_WAIT_MS;
+  // #319: tests only. One phase's budget (probe, decide) covered both the child a test meant to time
+  // out and the ones that answer, so a slow runner timed out an answering child too. A test names
+  // the budget of each call; production passes nothing and every call keeps the budget it is given.
+  if (opts.callBudget !== undefined && typeof opts.callBudget !== 'function') {
+    throw runtimeError('BAD_CALL_BUDGET', 'BAD_CALL_BUDGET: callBudget는 함수여야 합니다.');
+  }
+  const callBudgetOf = (call) => {
+    if (!opts.callBudget) return call.timeoutMs;
+    const ms = opts.callBudget(call);
+    if (!Number.isSafeInteger(ms) || ms < 1) throw runtimeError('BAD_CALL_BUDGET', 'BAD_CALL_BUDGET: 호출 상한은 양의 정수여야 합니다.');
+    return ms;
+  };
   const platform = opts.platform ?? process.platform;
   const resolveCommandPath = opts.resolveCommandPath
     ?? (() => defaultResolveCommandPath(command));
@@ -1150,8 +1162,9 @@ export function createPlayerRuntime(kind, opts = {}) {
     const started = Date.now();
     // #312: 구간 시각(이벤트 이름·exit·close)만 본다. 결과와 오류에 그대로 붙어 게임 루프 기록으로 간다.
     const timing = createPhaseTiming();
+    const budgetMs = callBudgetOf({ purpose, model, input, timeoutMs });
     const { handle, format, args, entry } = start({ purpose, model, sessionId, input, modelArgs, catalogHome, observe: timing.observe });
-    const timer = timeoutIn(timeoutMs);
+    const timer = timeoutIn(budgetMs);
     let abort;
     const interrupted=new Promise((_,reject)=>{
       abort=()=>{if(!entry.closed)reject(runtimeError('INTERRUPTED','INTERRUPTED: 사용자가 결정을 중단했습니다.'));};
