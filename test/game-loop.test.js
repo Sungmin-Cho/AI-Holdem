@@ -666,14 +666,24 @@ test('#196 a crash after fresh marker readiness and session-file write but befor
   assert.deepEqual(fs.readFileSync(path.join(gameDir, '.player-sessions.json')), capturedSessions);
 });
 
+// #320 D4: everything this test asserts holds once p2 decides after the retry — p2 keeps its session,
+// p1 has a new one. It used to wait for the next user boundary instead (next hand start, coach,
+// publish) under a fixed 5 s helper wait, and a stalled runner failed it there ("user boundary was
+// not reached"). It now waits for that decision itself and stops the run.
 test('#196 fresh retry recreates only the parked seat in a multi-AI game', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  let afterRetry = false;
+  let p2Decided;
+  const p2DecidedAfterRetry = new Promise((resolve) => { p2Decided = resolve; });
   const adapter = makeAdapter({
     sessionIdFor: (input, n) => `${input.playerId}-session-${n}`,
-    onDecide: async ({ sessionId, message }) => ({
-      raw: sessionId === 'p1-session-1'
-        ? 'invalid'
-        : JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }),
-    }),
+    onDecide: async ({ sessionId, message }) => {
+      if (afterRetry && sessionId.startsWith('p2-')) p2Decided(sessionId);
+      return {
+        raw: sessionId === 'p1-session-1'
+          ? 'invalid'
+          : JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }),
+      };
+    },
   });
   const { gameDir, loop } = await setupAiFirst(t, { adapter, ai: 2 });
   await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
@@ -681,9 +691,20 @@ test('#196 fresh retry recreates only the parked seat in a multi-AI game', { tim
   await loop.retryDecision(loop.pendingDecision.decisionId, {
     freshAuthorization: { source: 'app', requestId: 'only-p1-recreated' },
   });
-  await runUntilUserBoundary(loop, gameDir);
+  afterRetry = true;
+  const running = startRun(loop);
+  const p2Session = await Promise.race([
+    p2DecidedAfterRetry,
+    running.then(() => { throw new Error('the loop stopped before p2 decided after the retry'); }),
+  ]);
+  // The stop lands mid-hand (hand over, coach, next hand): the run ends at the next step it refuses.
+  await loop.requestStop();
+  await running.then(() => {}, (error) => assert.equal(error.code, 'STOPPING', String(error?.stack ?? error)));
   const after = readJson(path.join(gameDir, '.player-sessions.json'));
   assert.deepEqual(adapter.calls.map((call) => call.playerId), ['p1', 'p2', 'p1']);
+  assert.equal(p2Session, before.p2.sessionId, 'p2 decided on its own session');
+  assert.deepEqual(adapter.decideCalls.slice(-2).map((call) => call.sessionId), [after.p1.sessionId, before.p2.sessionId],
+    'after the retry p1 decides on its new session, then p2 on its old one');
   assert.notEqual(after.p1.sessionId, before.p1.sessionId);
   assert.deepEqual(after.p2, before.p2);
 });
