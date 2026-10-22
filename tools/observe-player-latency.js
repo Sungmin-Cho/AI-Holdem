@@ -2,8 +2,8 @@
 // 실제 game-loop 경로에서 Codex Sol/low 플레이어의 지연을 관측하는 **선택 실행** 러너(#312).
 //
 // 무엇을 하는가: 새 임시 store에 legacy game-loop(`--player-runtime codex --opponent-runtime llm`)를 띄운다. 그러면 앱이 여는
-// 것과 같은 loop가 AI 좌석 수만큼 시작 warmup을 병렬로 열고, 결정·코치·리뷰를 돌린다. 인간 좌석은 relay의 공개 HTTP 계약
-// (`/api/snapshot`·`/api/action`)으로 check(가능하면) 또는 fold만 둔다. 게임이 끝나면 그 store에 `player-latency-report`를
+// 것과 같은 loop가 AI 좌석 수만큼 시작 warmup을 병렬로 열고, 결정·코치·리뷰를 돌린다. 인간 좌석은 relay가 쓰는
+// `ui-snapshot.json`으로 차례를 읽고 relay의 `POST /api/action`으로 check(가능하면) 또는 fold만 둔다. 게임이 끝나면 그 store에 `player-latency-report`를
 // 돌리고 측정 전에 고정한 판정 O0–O5를 붙여 JSON 하나로 남긴다.
 //
 // 지키는 규칙:
@@ -294,8 +294,9 @@ export function scanLoopLog(file, { limit = OBSERVATION_LIMITS.failureList } = {
 export function summarizeMetrics(state) {
   const rows = Array.isArray(state?.metrics) ? state.metrics : null;
   if (!rows) return null;
-  const elapsed = rows.map((row) => finite(row?.elapsedMs)).filter((value) => value !== null).map((value) => Math.round(value)).sort((a, b) => a - b);
-  const at = (p) => (elapsed.length ? elapsed[Math.min(elapsed.length - 1, Math.max(0, Math.ceil(p * elapsed.length) - 1))] : null);
+  // 임계 초과는 원래 값(단조 시계 차, 소수 ms)으로 센다. 반올림은 표시값(중앙값·p95·최대)에만 한다.
+  const elapsed = rows.map((row) => finite(row?.elapsedMs)).filter((value) => value !== null).sort((a, b) => a - b);
+  const at = (p) => (elapsed.length ? Math.round(elapsed[Math.min(elapsed.length - 1, Math.max(0, Math.ceil(p * elapsed.length) - 1))]) : null);
   const outcomes = {};
   const runtimes = {};
   for (const row of rows) {
@@ -306,7 +307,7 @@ export function summarizeMetrics(state) {
   }
   return {
     count: rows.length, withElapsed: elapsed.length, dropped: Number.isSafeInteger(state.metricsDropped) ? state.metricsDropped : null,
-    medianMs: at(0.5), p95Ms: at(0.95), maxMs: elapsed.at(-1) ?? null,
+    medianMs: at(0.5), p95Ms: at(0.95), maxMs: elapsed.length ? Math.round(elapsed.at(-1)) : null,
     overSoft25s: elapsed.filter((value) => value > OBSERVATION_CRITERIA.decisionSoftMs).length,
     overHard300s: elapsed.filter((value) => value > OBSERVATION_CRITERIA.decisionHardMs).length,
     outcomes, runtimes,
@@ -337,8 +338,9 @@ export function readHumanTurn(sessionDir) {
  * 토큰을 실은 요청의 전송 경계(설계 §9.7·§10). 요청마다 다음을 확인한 뒤에만 보낸다.
  *   1) 세션 lock.json의 relay 기록(serverPid·serverStartTime·port·sessionToken)이 loop-state의 port·sessionToken과 같다.
  *   2) 그 pid가 그 포트의 listener다(OS 조회, 비동기).
- *   3) 조회를 기다린 뒤 lock·loop-state 바이트가 그대로이고, pid가 기록된 시작 시각으로 살아 있고(identity), 정지 중이
- *      아니다. 이 마지막 확인과 같은 동기 구간에서 `send`를 부른다.
+ *   3) 조회를 기다린 뒤 pid가 기록된 시작 시각으로 살아 있다(identity, 동기 OS 조회).
+ *   4) 그 뒤 lock·loop-state를 다시 읽어 바이트가 처음과 같고 정지 중이 아니다. 이 마지막 확인과 같은 동기 구간에서
+ *      `send`를 부른다(identity 조회 동안 다른 프로세스가 바꾼 바인딩도 잡는다).
  * 남는 경쟁: 마지막 관찰 뒤 connect까지 사이에 relay가 포트를 놓고 다른 프로세스가 묶는 경우는 막지 못한다
  * (tools/relay-access.js와 같은 잔여). 캐시는 없다.
  */
@@ -370,15 +372,15 @@ export function createRelayGuard({ identityStatus, listenerOwnedBy, requestTimeo
       let owned = null;
       try { owned = await listenerOwnedBy(first.lock.serverPid, first.lock.port, { timeoutMs: requestTimeoutMs }); } catch { owned = null; }
       if (owned !== true) return deny(owned === false ? 'LISTENER_MISMATCH' : 'LISTENER_UNKNOWN');
-      // 여기서부터 send까지 await가 없다: 마지막 OS 판독은 identity이고, 나머지는 파일·메모리 판독이다.
-      const again = read(sessionDir);
-      if (again.reason) return deny(again.reason);
-      if (again.lockRaw !== first.lockRaw || again.stateRaw !== first.stateRaw) return deny('CHANGED');
+      // 여기서부터 send까지 await가 없다. 마지막 OS 판독은 identity이고, 그 뒤 파일을 다시 읽어 바인딩이 그대로인지 본다.
       let status = 'unknown';
-      try { status = identityStatus(again.lock.serverPid, again.lock.serverStartTime); } catch { status = 'unknown'; }
+      try { status = identityStatus(first.lock.serverPid, first.lock.serverStartTime); } catch { status = 'unknown'; }
       if (status !== 'alive') return deny('IDENTITY_UNKNOWN');
+      const last = read(sessionDir);
+      if (last.reason) return deny(last.reason);
+      if (last.lockRaw !== first.lockRaw || last.stateRaw !== first.stateRaw) return deny('CHANGED');
       if (isStopping()) return deny('STOPPING');
-      return send({ port: again.lock.port, sessionToken: again.lock.sessionToken });
+      return send({ port: last.lock.port, sessionToken: last.lock.sessionToken });
     },
     denied() { return { ...denied }; },
   };
@@ -480,6 +482,7 @@ export function evaluateObservation({ run, latency, options }) {
   if (run.terminationConfirmed !== true) o0Reasons.push('TERMINATION_UNCONFIRMED');
   if (run.exit?.error) o0Reasons.push('SPAWN_FAILED');
   if (run.runnerErrors?.length) o0Reasons.push('RUNNER_ERROR');
+  if (run.childErrors?.length) o0Reasons.push('CHILD_ERROR');
   if (run.study?.ok !== true) o0Reasons.push('STUDY_CLEANUP');
   if (run.relay?.alive !== false) o0Reasons.push('RELAY_NOT_CONFIRMED_DEAD');
   // §9.1 표본 적격: 실제로 codex Sol 플레이어와 codex 상위가 선택된 실행만 대상 표본이다.
@@ -606,7 +609,8 @@ export const LIVE_PLATFORMS = Object.freeze(['darwin', 'linux']);
 
 /**
  * 관측 1회. `targets`는 `checkTargets`를 통과한 값이다. 의존성(`deps`)은 시험용 주입점이다: spawnLoop·fetchImpl·now·sleep·
- * signal·identityStatus·listenerOwnedBy·inspectStudy·stopStudy·environment·stopSignal·readHumanTurn·pollMs·stopGraceMs·requestTimeoutMs.
+ * signal·identityStatus·listenerOwnedBy·inspectStudy·stopStudy·environment·stopSignal·readHumanTurn·writeReport·pollMs·stopGraceMs·
+ * requestTimeoutMs.
  * spawn 뒤의 어떤 예외도 같은 정지 경로(핸들러 설치 확인 → SIGTERM 한 번 → 제한된 대기 → 미확인이면 unref)를 거친다.
  */
 export async function observeOnce(rawOptions, targets, deps = {}) {
@@ -629,20 +633,21 @@ export async function observeOnce(rawOptions, targets, deps = {}) {
     loadavg: { start: env.loadavg(), end: null }, codexProcesses: { start: env.codexProcesses(), end: null },
     loopPid: null, loopStartTime: null, exit: null, finalPhase: null, handsCompleted: null, finalHalt: null, finalPending: null,
     stopReason: null, stopRequestedAt: null, stopSignalledAt: null, preHandler: false, terminationConfirmed: null,
-    runnerErrors: [], outputError: null,
+    runnerErrors: [], childErrors: [], outputError: null,
     playingAfterMs: null, elapsedMs: null, playerCalls: 0, playerCallsAtStop: null,
     runtimes: null, runtimeModels: null, metrics: null, decisions: 0, eventCounts: {}, failures: [], failuresOmitted: 0,
     rejections: [], rejectionsOmitted: 0, timingMissing: 0, logUnparsable: 0, relayUnverified: {}, study: null, relay: null,
   };
   const fds = claimTargets(targets);
-  const writeOut = (value) => {
-    fs.ftruncateSync(fds.json, 0);
-    fs.writeSync(fds.json, `${JSON.stringify(value, null, 2)}\n`, 0);
-    fs.fsyncSync(fds.json);
-  };
+  const writeReport = deps.writeReport ?? ((fd, text) => {
+    fs.ftruncateSync(fd, 0);
+    fs.writeSync(fd, text, 0);
+    fs.fsyncSync(fd);
+  });
+  const writeOut = (value) => writeReport(fds.json, `${JSON.stringify(value, null, 2)}\n`);
   // 예산은 spawn 직전부터 단조 시계로 잰다(loop 시작 시각 조회·manifest 쓰기 시간도 예산에 든다).
   const clock = deps.now ?? (() => performance.now());
-  const started = clock();
+  const startedAt = clock();
   let child;
   try {
     child = (deps.spawnLoop ?? defaultSpawnLoop)(loopArgs(options, storeDir), { stdout: fds.stdout, stderr: fds.stderr });
@@ -655,9 +660,19 @@ export async function observeOnce(rawOptions, targets, deps = {}) {
   }
   run.loopPid = child.pid ?? null;
   let exit = null;
+  let spawned = false;
   const exited = new Promise((resolve) => {
+    child.once('spawn', () => { spawned = true; });
     child.once('exit', (code, sig) => { exit ??= { code, signal: sig }; resolve(); });
-    child.once('error', (error) => { exit ??= { code: null, signal: null, error: short(error?.code) ?? 'SPAWN_FAILED' }; resolve(); });
+    // 'error'는 spawn 실패에만 종료의 증거다. spawn 뒤의 'error'(신호 전달 실패 등)는 기록만 하고 실제 exit를 기다린다.
+    child.on('error', (error) => {
+      if (spawned) {
+        if (run.childErrors.length < 10) run.childErrors.push(short(error?.code) ?? 'ERROR');
+        return;
+      }
+      exit ??= { code: null, signal: null, error: short(error?.code) ?? 'SPAWN_FAILED' };
+      resolve();
+    });
   });
   const cancel = new AbortController();
   let signalledAt = null;
@@ -701,7 +716,7 @@ export async function observeOnce(rawOptions, targets, deps = {}) {
           run.playerCalls = run.eventCounts['player-call'] ?? 0;
         }
         if (run.stopReason === null) {
-          const elapsed = clock() - started;
+          const elapsed = clock() - startedAt;
           if (state?.halt) requestStop('HALT');
           else if (['recovery_required', 'unsafe'].includes(state?.pendingDecision?.status)) requestStop('DECISION_FAILURE');
           else if (run.playerCalls >= options.maxPlayerCalls) requestStop('CALL_CAP');
@@ -711,7 +726,7 @@ export async function observeOnce(rawOptions, targets, deps = {}) {
         }
         if (!playing && typeof state?.phase === 'string' && state.phase !== 'bootstrap') {
           playing = true;
-          run.playingAfterMs = Math.round(clock() - started);
+          run.playingAfterMs = Math.round(clock() - startedAt);
         }
         if (run.stopReason === null && playing && state?.phase === 'playing') await seat.tick((deps.readHumanTurn ?? readHumanTurn)(sessionDir));
       } catch (error) {
@@ -742,7 +757,7 @@ export async function observeOnce(rawOptions, targets, deps = {}) {
 
   run.terminationConfirmed = exit !== null;
   run.exit = exit;
-  run.elapsedMs = Math.round(clock() - started);
+  run.elapsedMs = Math.round(clock() - startedAt);
   run.relayUnverified = guard.denied();
   try {
     sessionDir ??= sessionDirOf(storeDir);
@@ -898,8 +913,13 @@ export async function main(argv, { stdout = process.stdout, stderr = process.std
   } finally {
     detach();
   }
-  stdout.write(parsed.json ? `${JSON.stringify(report, null, 2)}\n` : `${formatObservation(report)}\n`);
-  if (report.run.outputError) stderr.write(`보고서를 ${targets.out}에 쓰지 못했습니다(${report.run.outputError}). 위 출력이 보고서입니다.\n`);
+  if (report.run.outputError) {
+    // 파일에 남기지 못한 보고서는 형식 선택과 무관하게 전체 JSON을 stdout에 낸다(요약은 stderr).
+    stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    stderr.write(`${formatObservation(report)}\n보고서를 ${targets.out}에 쓰지 못했습니다(${report.run.outputError}). stdout의 JSON이 보고서입니다.\n`);
+  } else {
+    stdout.write(parsed.json ? `${JSON.stringify(report, null, 2)}\n` : `${formatObservation(report)}\n`);
+  }
   if (report.run.terminationConfirmed !== true) {
     stderr.write(`종료 미확인: loop pid ${report.run.loopPid}(시작 ${report.run.loopStartTime ?? '?'})가 정지 요청 뒤 끝나지 않았습니다${report.run.preHandler ? '(SIGTERM 핸들러 설치 전이라 신호를 보내지 않았습니다)' : ''}. store를 보존했습니다: ${targets.storeDir}\n`);
     return 1;

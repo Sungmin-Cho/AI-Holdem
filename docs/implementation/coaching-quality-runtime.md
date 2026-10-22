@@ -571,8 +571,8 @@ Fixture evidence (`test/player-runtime.test.js`, `test/codex-player-comparison.t
 - **What it does:** it starts the real legacy game loop on a new scratch store with
   `--player-runtime codex --opponent-runtime llm --port 0`. That loop opens parallel start
   warmups for every AI seat, decides on reused sessions and runs the coach and the review.
-  The human seat is answered through the relay's public `/api/snapshot` and `/api/action`
-  with `check` when it is legal and `fold` otherwise. When the game ends the tool runs
+  The human seat is answered with `check` when it is legal and `fold` otherwise: its turn
+  is read from the relay's `ui-snapshot.json` and the action goes to `POST /api/action`. When the game ends the tool runs
   `player-latency-report` on that store and writes one JSON (`player-latency-observation/1`).
 - **Defaults:** the lobby's new game (AI 5, 20 hands, `normal` pace), a stop threshold of
   400 completed player calls, a 60-minute budget and a 10-minute boot timeout. Without
@@ -597,9 +597,10 @@ Fixture evidence (`test/player-runtime.test.js`, `test/codex-player-comparison.t
   proves the relay again with no cache:
   1. The session `lock.json` matches the loop state's port and token.
   2. The relay pid owns that port (an OS query).
-  3. After that query the lock and loop-state bytes are unchanged, the pid is alive under
-     its recorded start time (`ownedIdentityStatus`), and no stop has begun. The request
-     starts in that same synchronous step.
+  3. The pid is alive under its recorded start time (`ownedIdentityStatus`).
+  4. After that, the lock and loop-state are read again and must be byte-identical to the
+     first read, and no stop may have begun. The request starts in that same synchronous
+     step, so a binding another process changed during the identity read is refused.
 
   As with the relay access module, a port re-bound between the last observation and the
   connect is not detected.
@@ -637,7 +638,10 @@ Fixture evidence (`test/player-runtime.test.js`, `test/codex-player-comparison.t
   - 3 = ran but not a pass
   - 2 = arguments, targets or platform
   - 1 = execution error: spawn failure, unconfirmed termination or a report that could
-    not be written. The report then goes to stdout.
+    not be written. An unwritten report goes to stdout as full JSON whatever the format.
+- **Child errors:** an `error` event before the loop has spawned is a spawn failure. After
+  that, an `error` (such as a failed signal delivery) is recorded and fails O0, but only a
+  real `exit` counts as the end of the loop.
 - **Limits:** the JSON has no decision ids, session ids, tokens or raw text. The kept store
   and the loop's stdout/stderr files are raw evidence, not shareable artifacts. The human
   seat only checks or folds, so pots and decision contexts differ from a real player's

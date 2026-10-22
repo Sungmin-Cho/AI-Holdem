@@ -264,6 +264,16 @@ test('relay guard: every send re-proves lock, loop state, listener and identity;
   assert.equal(await guard.use(dir, send), null, 'a stop that began during the probe');
   duringProbe = null;
   stopping = false;
+  const realStatus = () => status;
+  const changing = createRelayGuard({
+    listenerOwnedBy: async () => true,
+    identityStatus: () => { lock({ serverPid: 13, serverStartTime: 'U', port: 4100, sessionToken: 'tok' }); return 'alive'; },
+  });
+  lock({ serverPid: 11, serverStartTime: 'S', port: 4100, sessionToken: 'tok' });
+  assert.equal(await changing.use(dir, send), null, 'the lock changed during the synchronous identity read');
+  assert.deepEqual(changing.denied(), { CHANGED: 1 });
+  lock({ serverPid: 11, serverStartTime: 'S', port: 4100, sessionToken: 'tok' });
+  assert.equal(realStatus(), 'alive');
   assert.equal(await guard.use(dir, send), 'sent');
   assert.equal(await guard.use(dir, send), 'sent');
   assert.deepEqual(sends, [{ port: 4100, sessionToken: 'tok' }, { port: 4100, sessionToken: 'tok' }]);
@@ -430,6 +440,40 @@ test('observe: an exception inside supervision takes the same stop path — one 
   assert.ok(report.criteria.o0.reasons.includes('RUNNER_ERROR'));
 });
 
+test('observe: an error after spawn (a failed signal delivery) is not an exit — wait, then unconfirmed, unref, no study stop', posixOnly, async (t) => {
+  const controller = new AbortController();
+  const failedSignal = (child) => child.emit('error', Object.assign(new Error('kill failed'), { code: 'EPERM' }));
+  const h = harness(t, { kind: 'ignore-term', release: true }, { stopSignal: controller.signal, stopGraceMs: 300, signal: failedSignal });
+  h.ready().then(() => controller.abort());
+  const report = await observeOnce(base, h.targets, h.deps);
+  assert.equal(report.run.terminationConfirmed, false);
+  assert.equal(report.run.exit, null);
+  assert.deepEqual(report.run.childErrors, ['EPERM']);
+  assert.equal(h.signals().length, 0, 'the delivery failed, so the loop saw no signal');
+  assert.deepEqual(h.studyCalls, []);
+  assert.ok(report.criteria.o0.reasons.includes('CHILD_ERROR'));
+});
+
+test('observe: a failed manifest write takes the stop path; a failed final write keeps the report for stdout', posixOnly, async (t) => {
+  let calls = 0;
+  const failFirst = harness(t, { kind: 'done' }, { writeReport: () => { calls += 1; if (calls === 1) throw Object.assign(new Error('full'), { code: 'ENOSPC' }); } });
+  const stopped = await observeOnce(base, failFirst.targets, failFirst.deps);
+  assert.equal(stopped.run.stopReason, 'RUNNER_ERROR');
+  assert.deepEqual(stopped.run.runnerErrors, ['ENOSPC']);
+  assert.equal(stopped.run.terminationConfirmed, true);
+  assert.equal(failFirst.signals().length, 1);
+  assert.equal(stopped.run.outputError, null);
+  let writes = 0;
+  const failLast = harness(t, { kind: 'done' }, { writeReport: () => { writes += 1; if (writes === 2) throw Object.assign(new Error('io'), { code: 'EIO' }); } });
+  const out = [];
+  const code = await main(['--live', '--store-dir', failLast.targets.storeDir, '--out', failLast.targets.out, '--hands', '3', '--ai', '2', '--pace', 'instant'],
+    { stdout: { write: (text) => out.push(text) }, stderr: { write: () => {} }, deps: { ...failLast.deps, signalSource: new EventEmitter() } });
+  assert.equal(code, 1);
+  const printed = JSON.parse(out.join(''));
+  assert.equal(printed.run.outputError, 'EIO');
+  assert.equal(printed.criteria.pass, true, 'the full report survives on stdout without --json');
+});
+
 test('observe: a relay alive under its recorded identity, a failed study cleanup and a spawn error each fail O0', posixOnly, async (t) => {
   const same = harness(t, { kind: 'done', lockPid: process.pid, lockStartTime: 'T0' });
   const report = await observeOnce(base, same.targets, same.deps);
@@ -533,6 +577,16 @@ test('sha: recorded only when the runner root is the top of a git work tree', ()
   assert.equal(gitShaOf(ROOT, (cmd, args) => (args[1] === '--show-toplevel' ? ROOT : sha)), sha);
   assert.equal(gitShaOf(ROOT, (cmd, args) => (args[1] === '--show-toplevel' ? path.dirname(ROOT) : sha)), null, 'an archive copy under another repository');
   assert.equal(gitShaOf(ROOT, () => null), null);
+});
+
+test('criteria: thresholds use the raw fractional waits; only displayed values are rounded', () => {
+  const metrics = metricsOf([...Array(94).fill(4000), ...Array(5).fill(26_000), 25_000.1]);
+  assert.equal(metrics.overSoft25s, 6, '25,000.1 ms is over 25 s');
+  assert.equal(judge([warm(), decide(100)], { metrics }).o3.pass, false, '6 % is over the 5 % bound');
+  const hard = metricsOf([...Array(99).fill(4000), 300_000.1]);
+  assert.deepEqual([hard.overHard300s, hard.maxMs], [1, 300_000]);
+  assert.equal(judge([warm(), decide(100)], { metrics: hard }).o3.pass, false);
+  assert.deepEqual([metricsOf([25_000, 300_000]).overSoft25s, metricsOf([25_000, 300_000]).overHard300s], [1, 0], 'the bounds themselves are not over');
 });
 
 test('criteria: a decision left unresolved keeps its observed wait in O3 and blocks a pass', () => {
