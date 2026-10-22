@@ -118,11 +118,16 @@ test('spread hash assignments stay fixed', () => {
 });
 
 // Runs `ci-shards.mjs run rest` against a scripted child and a clock that reports `elapsed` minutes.
-async function runWithClock({ elapsed, env = { GITHUB_ACTIONS: 'true' }, outcome = { code: 0 } }) {
+async function runWithClock({ elapsed, env = { GITHUB_ACTIONS: 'true' }, outcome = { code: 0 }, thenExit = false }) {
   const writes = [];
   const child = new EventEmitter();
   const spawnFn = () => {
-    setImmediate(() => (outcome.error ? child.emit('error', outcome.error) : child.emit('exit', outcome.code ?? null, outcome.signal ?? null)));
+    setImmediate(() => {
+      if (outcome.error) child.emit('error', outcome.error);
+      else child.emit('exit', outcome.code ?? null, outcome.signal ?? null);
+      // A late exit after error, or a late error after exit, must not change the result.
+      if (thenExit) child.emit(outcome.error ? 'exit' : 'error', ...(outcome.error ? [0, null] : [new Error('late error')]));
+    });
     return child;
   };
   const times = [1000, 1000 + elapsed * 60_000];
@@ -152,6 +157,13 @@ test('run warns only over 35 minutes on Actions and preserves child outcomes', a
   assert.equal(error.code, 1);
   assert.doesNotMatch(error.output, /::warning/);
   assert.match(error.output, /spawn ENOENT/);
+  const errorThenExit = await runWithClock({ elapsed: 36, outcome: { error: new Error('spawn ENOENT') }, thenExit: true });
+  assert.equal(errorThenExit.code, 1);
+  assert.doesNotMatch(errorThenExit.output, /::warning/);
+  const exitThenError = await runWithClock({ elapsed: 36, outcome: { code: 0 }, thenExit: true });
+  assert.equal(exitThenError.code, 0);
+  assert.doesNotMatch(exitThenError.output, /late error/);
+  assert.equal(exitThenError.output.split('\n').filter(Boolean).length, 1);
 });
 
 // Workflow job body and its steps, split on `      - ` step starts.
@@ -209,5 +221,10 @@ test('workflow installs without audit and pins UI npm cache contract', () => {
   assert.ok(ui.indexOf('actions/setup-node@') < ui.indexOf('actions/cache@'));
   assert.ok(ui.indexOf('actions/cache@') < ui.indexOf('run: npm ci'));
   assert.match(ui, /npx --yes agent-browser@0\.36\.0 install --with-deps/);
+  // The cache key must follow the installed agent-browser version.
+  const keyVersion = ui.match(/key: ui-browser-npm-\$\{\{ runner\.os \}\}-agent-browser-([0-9.]+)-/)?.[1];
+  const installVersions = [...ui.matchAll(/npx --yes agent-browser@([0-9.]+) install/g)].map((match) => match[1]);
+  assert.ok(keyVersion);
+  assert.deepEqual(installVersions, [keyVersion]);
   assert.doesNotMatch(ui, /path: .*\.agent-browser/);
 });

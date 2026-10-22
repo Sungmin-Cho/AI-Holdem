@@ -13,7 +13,8 @@ export const PRE_RUN = [GATE, ...RELAY_GATE];
 // SHA-256 of its basename: weight is the share of the hash range, in key order.
 // A file's shard depends only on its name, so a new file never moves another.
 // The weights follow each shard's free minutes under a 20-minute Windows job
-// (#317: about 15, 10, 8 and 18). Pin a heavy new file in NAMED instead.
+// (#317: about 15, 10, 8 and 18), rounded so rest, which also runs the pre-steps
+// and has grown fastest, gets no more than learning-a. Pin a heavy new file in NAMED.
 export const SPREAD = { 'learning-a': 3, 'study-b': 2, 'learning-b': 2, rest: 3 };
 export const NAMED = {
   'study-a': ['study-service.test.js', 'app-command-store.test.js', 'policy-loop.test.js', 'participant-api.test.js'],
@@ -106,8 +107,17 @@ export async function main(argv = process.argv.slice(2), {
     const started = now();
     const child = spawnFn(argvRun[0], argvRun.slice(1), { stdio: 'inherit', cwd: root });
     return await new Promise((resolve) => {
-      child.on('error', (error) => { stderr.write(`${error.message}\n`); resolve(1); });
+      // Only the first of error and exit decides the outcome; a late one is ignored.
+      let settled = false;
+      child.on('error', (error) => {
+        if (settled) return;
+        settled = true;
+        stderr.write(`${error.message}\n`);
+        resolve(1);
+      });
       child.on('exit', (code, signal) => {
+        if (settled) return;
+        settled = true;
         const minutes = (now() - started) / 60_000;
         // Test-process time only; setup and the rest pre-steps took up to about 3.6 more minutes (#317).
         if (env.GITHUB_ACTIONS === 'true' && minutes > SHARD_WARN_MINUTES) {
