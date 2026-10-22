@@ -1872,9 +1872,11 @@ test('Task 7A r2: expired deadline의 rejected terminate도 관찰되어 unhandl
   });
   await loop.resume();
   assert.equal(cutoffs.length, 1);
+  // Below the test's own timeout, so this names the step that never came.
   let gaveUp;
+  t.after(() => clearTimeout(gaveUp));
   await Promise.race([waiting, new Promise((_, reject) => {
-    gaveUp = setTimeout(() => reject(new Error('the pipeline never waited on its bound worker')), 30_000 * WIN32_SCALE);
+    gaveUp = setTimeout(() => reject(new Error('the pipeline never waited on its bound worker')), 12_000 * WIN32_SCALE);
   })]).finally(() => clearTimeout(gaveUp));
   assert.ok(readJson(path.join(gameDir, '.coach-authority.json')).hands?.['1']?.agentHandle, 'the worker handle is bound');
   assert.equal(upper.starts.length, 1);
