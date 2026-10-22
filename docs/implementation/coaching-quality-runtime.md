@@ -563,3 +563,64 @@ Fixture evidence (`test/player-runtime.test.js`, `test/codex-player-comparison.t
     least 1.5 × the sequential median **and** at least 2 s above it. This is checked on
     the raw medians; the rounded ratio in the summary is for display only.
 - **Limits:** these are observations from small samples, not distribution guarantees.
+
+### Operating-path observation (`tools/observe-player-latency.js`)
+
+`node tools/observe-player-latency.js --store-dir <absolute> --out <absolute .json> [--live] [--hands N] [--ai N] [--pace P] [--max-player-calls N] [--budget-ms N] [--boot-timeout-ms N] [--json]`
+
+- **What it does:** it starts the real legacy game loop on a new scratch store with
+  `--player-runtime codex --opponent-runtime llm --port 0`. That loop opens parallel start
+  warmups for every AI seat, decides on reused sessions and runs the coach and the review.
+  The human seat is answered through the relay's public `/api/snapshot` and `/api/action`
+  with `check` when it is legal and `fold` otherwise. When the game ends the tool runs
+  `player-latency-report` on that store and writes one JSON (`player-latency-observation/1`).
+- **Defaults:** the lobby's new game (AI 5, 20 hands, `normal` pace), a stop threshold of
+  400 completed player calls, a 60-minute budget and a 10-minute boot timeout. Without
+  `--live` it prints the plan and starts nothing.
+- **Targets:** the store must be a new path outside the repository; the tool creates it
+  with a non-recursive `mkdir`. The output and its `.loop.stdout`/`.loop.stderr` siblings
+  are created exclusively before the loop starts, and a collision removes only what that
+  attempt created. The output first holds a manifest (loop pid and start time), so an
+  operator can find the loop if the tool itself dies.
+- **Human seat:** each decision gets one `requestId` and action, and only that request is
+  resent. `STALE_DECISION`, `DECISION_CLOSED`, `NOT_YOUR_TURN` and
+  `ACTION_ALREADY_RECEIVED` close the decision. Other failures are resent up to 20 times
+  before the run stops as stuck. Every request has a 2 s deadline and is cancelled when a
+  stop begins.
+- **Token boundary:** the session token is sent only when the session `lock.json` matches
+  the loop state's port and token, the relay pid is alive under its recorded start time
+  (`ownedIdentityStatus`), and that pid owns the port. The listener is proved once per
+  lock and the identity is re-read every 5 s. As with the relay access module, a port
+  re-bound between the observation and the connect is not detected.
+- **Stops:** a decision left for recovery (`recovery_required`/`unsafe`), a halt, the call
+  threshold, the budget, the boot timeout, a stuck human seat or an operator signal sends
+  one `SIGTERM` to the loop it spawned. The signal waits until the session loop state
+  exists, because the loop installs its handler just before bootstrap writes that file.
+  Failed decisions are recorded, never retried with `--retry-decision`.
+- **Cleanup:** a loop that does not exit within 120 s of the stop is recorded as an
+  unconfirmed termination (exit 1) without `SIGKILL`, and the store is kept. After the loop
+  exits, only that store's study service is stopped through
+  `inspectStudyService`/`stopStudyService`. A relay still alive under its recorded pid and
+  start time is recorded, not signalled.
+- **Criteria (fixed before measuring):**
+  - O0 sound and eligible: exit 0, `done`, every planned hand, no stop, confirmed cleanup.
+    `runtime-models` and the loop state must show a codex Sol player and a codex upper
+    tier. Every latency group must be codex Sol. The records must be complete: no skipped
+    log lines, a latency for every answer, no dropped metrics, and one metric per decision.
+  - O1 no termination failures.
+  - O2 every start warmup answered within the 120 s cap. Answers over 60 s are listed with
+    their phases, not counted as violations.
+  - O3 per decision, from the loop state's metrics, which include correction calls: no
+    decision over 300 s, at most 5 % over 25 s, and no call timeout.
+  - O4 no transport or session failures, no failed repair warmups and no halt or
+    unresolved decision.
+  - O5 legality (as #297 K2): no `player-decision-rejected`, `illegal_action` or
+    `response_format`. A correction that later succeeds does not erase the rejection.
+  - Violations are counted even when O0 fails. `pass` needs all six. Exit codes are
+    0 = pass, 3 = ran but not a pass, 2 = arguments or targets, 1 = execution error.
+- **Limits:** the JSON has no decision ids, session ids, tokens or raw text. The kept store
+  and the loop's stdout/stderr files are raw evidence, not shareable artifacts. The human
+  seat only checks or folds, so pots and decision contexts differ from a real player's
+  game. Host load is recorded, not controlled. The call threshold counts completed player
+  calls, so calls already started can still finish, and probe and upper-tier calls are
+  not counted.
