@@ -373,6 +373,31 @@ test('#319 F2: a creation child that failed otherwise, or was stopped twice with
  } finally {h.cleanup();}
 });
 
+test('#319 F2: a creation child stopped twice leaves the path to its proof when the second one created it', () => {
+ const h=creationHarness({creates:[{result:STOPPED},{make:'S-1-5-21-7',result:STOPPED}]});
+ try {
+  files.createPrivateDirectory(h.target,{platform:'win32',spawn:h.spawn});
+  assert.deepEqual(h.calls,['create','create','acl']);
+ } finally {h.cleanup();}
+});
+
+// Review r1: a path lstat cannot read (ENOTDIR here, EPERM/EACCES on Windows) counts as present after a
+// stopped child, and its proof is refused before any child runs, so only the loop's own budget check
+// can end it under a spent platform budget — as a budget failure, without a second creation.
+test('#319 F2: a present path whose proof never reaches a child still ends with the platform budget', () => {
+ const h=creationHarness({creates:[{result:STOPPED}]});
+ const blocker=path.join(h.parent,'not-a-directory');
+ fs.writeFileSync(blocker,'');
+ const target=path.join(blocker,'created');
+ const started=Date.now();
+ try {
+  assert.throws(()=>files.withPlatformDeadline(files.platformNow()+300,()=>files.createPrivateDirectory(target,{platform:'win32',spawn:h.spawn})),
+   (error)=>error.code==='STUDY_DESCRIPTOR_CORRUPT'&&error.budgetSpent===true);
+  assert.ok(Date.now()-started<5_000,`the retries outlived the budget: ${Date.now()-started} ms`);
+  assert.deepEqual(h.calls,['create'],'no second creation over a present path, and no proof child');
+ } finally {h.cleanup();}
+});
+
 import * as windows from '../shared/windows-owned-process.js';
 import { killGroup } from '../tools/solver-runtime.js';
 test('untracked Windows identity never grants numeric PID termination', async () => {

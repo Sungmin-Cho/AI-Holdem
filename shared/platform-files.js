@@ -249,6 +249,8 @@ try { [Runtime.InteropServices.Marshal]::Copy($bytes,0,$ptr,$bytes.Length); $sa=
   const deadline = Date.now() + 15_000;
   while (!isPrivatePath(file, { platform, spawn })) {
     if (Date.now() >= deadline) throw denied();
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    // A proof refused before its child (a path lstat cannot read) never consults the platform
+    // budget; a spent budget ends the retries here as a budget failure, never a privacy verdict.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, platformTimeout(50));
   }
 }
