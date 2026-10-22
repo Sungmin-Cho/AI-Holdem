@@ -2,8 +2,9 @@
 // 테스트 전용 가짜 game-loop(#312 관측 러너 시험용). 실제 엔진·LLM·네트워크를 부르지 않는다.
 //
 // `tools/game-loop.js`와 같은 인자(`--store-dir S --ai N --hands H ...`)를 받아 store에 세션 파일
-// (`.session-store/current.json`, `sessions/<id>/loop-state.json`·`loop.log`·`lock.json`)을 쓰고, 127.0.0.1 임시 포트에 relay의
-// `/api/snapshot`·`/api/action`만 흉내 내는 서버를 연다. 동작은 `FAKE_LOOP_SCENARIO`(JSON)가 정한다.
+// (`.session-store/current.json`, `sessions/<id>/loop-state.json`·`loop.log`·`lock.json`·`ui-snapshot.json`)을 쓰고,
+// 127.0.0.1 임시 포트에 relay의 `/api/action`만 흉내 내는 서버를 연다. 다른 요청은 로그에 남기고 404다.
+// 동작은 `FAKE_LOOP_SCENARIO`(JSON)가 정한다.
 //   kind: 'done' | 'recovery' | 'unsafe' | 'halt' | 'calls' | 'boot-hang' | 'ignore-term' | 'never-state'
 //   log: 절대 경로 — 받은 신호·행동을 JSONL로 남긴다
 //   release: 절대 경로 — ignore-term·never-state가 이 파일이 생기면 끝난다
@@ -11,6 +12,8 @@
 //   model·upperRuntime: runtime-models·loop-state에 쓸 값(기본 gpt-6.1-sol·codex)
 //   decisionMs: AI 결정마다 쓸 결정 elapsedMs 목록(순환, 기본 3000) · rejected: 거절 이벤트 수
 //   badLock: lock.json의 토큰을 loop-state와 다르게 쓴다 · lockPid·lockStartTime: 끝날 때 남길 relay 기록
+//   pendingMs: recovery·unsafe의 pendingDecision.elapsedMs
+// 준비 통지: playing을 쓴 뒤 로그에 `{ready:true}` 한 줄을 남긴다 — 시험은 이 줄을 본 뒤에 정지를 건다.
 // 실제 game-loop처럼 SIGTERM 핸들러는 loop-state를 처음 쓰기 직전에 설치한다(그 전의 SIGTERM은 기본 동작으로 죽는다).
 // 비밀 표지: 결정 id·세션 토큰·세션 id·stdout·stderr·학습 URL에 `SECRET-` 문자열을 넣는다 — 러너 JSON에 새면 안 된다.
 import fs from 'node:fs';
@@ -82,11 +85,20 @@ if (scenario.kind === 'boot-hang') await forever();
 
 let legal = null;
 let onAction = null;
+// relay처럼 게시마다 ui-snapshot.json을 원자 교체로 쓴다(현재 결정 + 호스트 view의 합법 행동).
+const publish = (next) => {
+  const file = path.join(sessionDir, 'ui-snapshot.json');
+  fs.writeFileSync(`${file}.tmp`, JSON.stringify({ decision: next ? { decisionId: next.decisionId, toAct: next.toAct } : null, view: { legal: next ?? undefined, myCards: ['SECRET-CARD'] } }));
+  fs.renameSync(`${file}.tmp`, file);
+};
 server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   const send = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
   if (url.searchParams.get('token') !== token) return send(403, { ok: false });
-  if (req.method === 'GET' && url.pathname === '/api/snapshot') return send(200, { view: { legal } });
+  if (!(req.method === 'POST' && url.pathname === '/api/action')) {
+    note({ request: `${req.method} ${url.pathname}` });
+    return send(404, { ok: false });
+  }
   if (req.method === 'POST' && url.pathname === '/api/action') {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
@@ -95,6 +107,7 @@ server = http.createServer((req, res) => {
       note({ action: action.action, decisionId: action.decisionId, requestId: action.requestId });
       if (!legal || action.decisionId !== legal.decisionId) return send(409, { ok: false, code: 'STALE_DECISION' });
       legal = null;
+      publish(null);
       send(200, { ok: true });
       onAction?.();
     });
@@ -107,6 +120,7 @@ port = server.address().port;
 fs.writeFileSync(path.join(sessionDir, 'lock.json'), JSON.stringify({ serverPid: process.pid, serverStartTime: 'FAKE-START', port, sessionToken: scenario.badLock ? 'SECRET-OTHER' : token }));
 log({ event: 'runtime-models', player: { runtime: 'codex', model, source: 'catalog' }, upper: { runtime: scenario.upperRuntime ?? 'codex', model: 'gpt-6.1-sol', source: 'catalog' } });
 writeState({ phase: 'playing', port });
+note({ ready: true });
 for (let i = 0; i < ai; i += 1) call('start-warmup', 4000 + i * 100, { batch: { id: 'b1', size: ai, index: i } });
 log({ event: 'player-warmup-batch', purpose: 'start-warmup', batchId: 'b1', size: ai, answered: ai, failed: 0, wallMs: 4500 });
 for (let i = 0; i < (scenario.rejected ?? 0); i += 1) log({ event: 'player-decision-rejected', decisionId: 'SECRET-DECISION-r' });
@@ -132,7 +146,8 @@ for (let hand = 1; hand <= hands; hand += 1) {
     writeState({ metrics: [...state.metrics, { playerId: `p${i + 2}`, decisionId: id, runtime: 'codex', outcome: 'accepted', elapsedMs }] });
   }
   if (['recovery', 'unsafe'].includes(scenario.kind) && hand === 1) {
-    writeState({ pendingDecision: { status: scenario.kind === 'unsafe' ? 'unsafe' : 'recovery_required', code: 'TIMEOUT', decisionId: 'SECRET-DECISION-pending' } });
+    writeState({ pendingDecision: { status: scenario.kind === 'unsafe' ? 'unsafe' : 'recovery_required', code: 'TIMEOUT', category: 'timeout',
+      elapsedMs: scenario.pendingMs ?? 1000, decisionId: 'SECRET-DECISION-pending' } });
     await forever();
   }
   if (scenario.kind === 'ignore-term' && hand === 1) {
@@ -140,6 +155,7 @@ for (let hand = 1; hand <= hands; hand += 1) {
     finish(0);
   }
   legal = { toAct: 'user', decisionId: `SECRET-DECISION-user-${hand}`, canCheck: hand % 2 === 0 };
+  publish(legal);
   await new Promise((resolve) => { onAction = resolve; });
   onAction = null;
 }
