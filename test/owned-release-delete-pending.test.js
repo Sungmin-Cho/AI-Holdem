@@ -1112,16 +1112,21 @@ test('#306: a pending read is read again only within its bound, and never starte
   assert.equal(await readSettled(() => { reads += 1; if (reads < 3) throw pending(); return 'read'; }, platformNow() + 10_000, win32), 'read');
   assert.equal(reads, 3);
 
-  // The call's deadline.
+  // The call's deadline. The clock moves only while a read runs (each takes 40), so the time a read
+  // records is the time readSettled last checked the bound at. A real clock also counted the
+  // scheduler's gap between that check and the read's first line, and a slow runner put that line
+  // past the deadline although the check had been inside it (#319).
   const starts = [];
   const budgets = [];
-  const deadline = platformNow() + 300;
-  await assert.rejects(readSettled(() => {
+  let clock = 0;
+  const deadline = 300;
+  await assert.rejects(withPlatformDeadline(10_000, () => readSettled(() => {
     starts.push(platformNow());
     if (starts.length > 1) budgets.push(platformTimeout(15_000));
+    clock += 40;
     throw pending();
-  }, deadline, win32), { fsCode: 'EPERM' });
-  assert.ok(starts.length > 2, `read ${starts.length} times`);
+  }, deadline, win32), { now: () => clock }), { fsCode: 'EPERM' });
+  assert.deepEqual(starts, [0, 40, 80, 120, 160, 200, 240, 280], 'reads are started up to the deadline, and none past it');
   assert.ok(starts.every((at) => at < deadline), 'a read started past the deadline');
   assert.ok(budgets.every((ms) => ms <= 300), `a read again ran with ${Math.max(...budgets)} ms`);
 
