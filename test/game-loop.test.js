@@ -2306,6 +2306,53 @@ test('resume adopts a healthy external server and requestStop identity-confirms 
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
 });
 
+// #319 F3·F5: PR #322's receipt named the cause — a resume after an app restart met the previous
+// relay as it exited: kill(pid, 0) still answered while its start time could no longer be read
+// (`reuse-start-time`, pidAfter `gone`). The relay here is killed at the first read that cannot see
+// it, the order the CI run recorded. A pid that stops answering is a relay that is gone: its lock is
+// retired and a new relay serves the game.
+test('#319 resume replaces a recorded relay that exits while its identity is being read', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  writeLoopStateFixture(gameDir, init.sessionToken, { phase: 'bootstrap' });
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const real = createStartTimeProbe();
+  const startTimeOf = createStartTimeProbe(real);
+  let killed = false;
+  startTimeOf.set((pid) => {
+    if (pid !== external.child.pid) return real(pid);
+    if (!killed) { killed = true; external.child.kill('SIGKILL'); }
+    return null;
+  });
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0, processStartTime: startTimeOf } });
+  t.after(() => loop.requestStop().catch(() => {}));
+  const resumed = await loop.resume();
+  assert.equal(resumed.phase, 'playing');
+  assert.equal(killed, true, 'the recorded relay was met while it exited');
+  assert.notEqual(loop.serverPid, external.child.pid);
+  assert.equal(readJson(path.join(gameDir, 'lock.json')).serverPid, loop.serverPid, 'a new relay holds the lock');
+  await loop.requestStop();
+});
+
+// A recorded relay that still answers but whose start time stays unreadable is not adopted, not
+// signalled and not retired: after the short re-check it stays SERVER_IDENTITY_UNAVAILABLE.
+test('#319 resume still refuses a recorded relay that answers but whose identity stays unreadable', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  writeLoopStateFixture(gameDir, init.sessionToken, { phase: 'bootstrap' });
+  const external = await startExternalServer(gameDir, init.sessionToken);
+  t.after(() => terminateIfAlive(external.child));
+  const real = createStartTimeProbe();
+  const startTimeOf = createStartTimeProbe(real);
+  startTimeOf.set((pid) => (pid === external.child.pid ? null : real(pid)));
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0, processStartTime: startTimeOf, serverExitTransitionMs: 300 } });
+  t.after(async () => { startTimeOf.reset(); await loop.requestStop().catch(() => {}); });
+  await assert.rejects(loop.resume(), (error) => error.code === 'SERVER_IDENTITY_UNAVAILABLE' && error.site === 'reuse-start-time' && error.pidAfter === 'alive');
+  assert.doesNotThrow(() => process.kill(external.child.pid, 0), 'the relay was not signalled');
+  assert.equal(readJson(path.join(gameDir, 'lock.json')).serverPid, external.child.pid, 'its lock was not retired');
+});
+
 test('requestStop fails closed without signalling an adopted server when identity revalidation is unavailable', { timeout: 10_000 }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
