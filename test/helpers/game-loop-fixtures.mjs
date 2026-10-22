@@ -301,7 +301,9 @@ export function makeCoachAdapter({ rounds = [], evaluatorRounds = [], synthesize
       return {
         pid: round.pid !== undefined ? round.pid : 910_000 + handleIndex,
         startTime: round.startTime !== undefined ? round.startTime : `coach-start-${handleIndex}`,
-        done,
+        // A round's `onAwaited` observes the loop reading the handle's outcome — the pipeline does
+        // that once, when it starts waiting on the worker after binding its handle (#320 D3).
+        get done() { round.onAwaited?.(index); return done; },
         async terminate() {
           const result = typeof round.terminate === 'function'
             ? await round.terminate()

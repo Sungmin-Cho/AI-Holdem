@@ -1836,7 +1836,8 @@ test('Task 7A r2: finalizing resume은 stale COACH_RECONCILE_PENDING halt를 지
 // could not finish in 600 ms: either the resume itself was refused (FINALIZATION_ABORTED, 3.5 s) or
 // the coach pipeline met the cutoff at its spawn guard and the worker never started (the 20 s test
 // timeout, below the helper's 30 s win32 wait). Now the result wait is long and the deadline is
-// crossed with the jump clock at the event under test: the worker bound to its handle and waiting.
+// crossed with the jump clock at the event under test: the pipeline, its worker's handle bound,
+// starts waiting on the worker (the only read of the handle's outcome, after `record.bound`).
 test('Task 7A r2: expired deadline의 rejected terminate도 관찰되어 unhandledRejection 없이 gate abort로 수렴한다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
@@ -1844,10 +1845,13 @@ test('Task 7A r2: expired deadline의 rejected terminate도 관찰되어 unhandl
   const gate = new Promise((resolve) => { release = resolve; });
   t.after(() => release());
   let terminates = 0;
+  let awaited;
+  const waiting = new Promise((resolve) => { awaited = resolve; });
   const upper = makeCoachAdapter({
     rounds: [{
       gate,
       raw: JSON.stringify({ handNo: 1, text: 'deadline 뒤 종료 거부' }),
+      onAwaited: () => awaited(),
       terminate: async () => {
         terminates += 1;
         throw Object.assign(new Error('terminate rejected'), { code: 'TERMINATE_REJECTED' });
@@ -1868,9 +1872,11 @@ test('Task 7A r2: expired deadline의 rejected terminate도 관찰되어 unhandl
   });
   await loop.resume();
   assert.equal(cutoffs.length, 1);
-  // The worker is bound to its handle once the authority records it: the pipeline then waits on it.
-  await waitFor(() => readJson(path.join(gameDir, '.coach-authority.json')).hands?.['1']?.agentHandle,
-    'deadline rejection worker was not bound');
+  let gaveUp;
+  await Promise.race([waiting, new Promise((_, reject) => {
+    gaveUp = setTimeout(() => reject(new Error('the pipeline never waited on its bound worker')), 30_000 * WIN32_SCALE);
+  })]).finally(() => clearTimeout(gaveUp));
+  assert.ok(readJson(path.join(gameDir, '.coach-authority.json')).hands?.['1']?.agentHandle, 'the worker handle is bound');
   assert.equal(upper.starts.length, 1);
   assert.equal(terminates, 0, 'no terminate before the deadline expired');
   clock.jumpTo(cutoffs[0].deadlineNs + 1_000_000n);
