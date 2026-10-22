@@ -2353,35 +2353,38 @@ test('#319 resume still refuses a recorded relay that answers but whose identity
   assert.equal(readJson(path.join(gameDir, 'lock.json')).serverPid, external.child.pid, 'its lock was not retired');
 });
 
-// Review r1: a stop requested while the start time is being re-checked ends the re-check before its
-// next read (a Windows read is a synchronous child) — nothing is read again, retired or spawned.
-test('#319 a stop during the relay identity re-check ends it before another read', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
-  const gameDir = tmpGame();
-  const init = await initGame(gameDir);
-  writeLoopStateFixture(gameDir, init.sessionToken, { phase: 'bootstrap' });
-  const external = await startExternalServer(gameDir, init.sessionToken);
-  t.after(() => terminateIfAlive(external.child));
-  const real = createStartTimeProbe();
-  const startTimeOf = createStartTimeProbe(real);
-  let reads = 0;
-  let stopping = null;
-  let loop = null;
-  startTimeOf.set((pid) => {
-    if (pid !== external.child.pid) return real(pid);
-    reads += 1;
-    if (stopping === null) stopping = loop.requestStop().catch((error) => error);
-    return null;
+// Review r1/r2: a stop requested while a recorded relay's start time is unreadable ends the re-check
+// before its next read (a Windows read is a synchronous child) — nothing is read again, retired or
+// spawned. Where the lock records the relay's start time, relayMayBeAlive itself makes the first read,
+// so the stop requested there ends the re-check before it reads at all.
+for (const recorded of [false, true]) {
+  test(`#319 a stop during the relay identity re-check ends it before another read (start time ${recorded ? '' : 'not '}recorded)`, { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+    const gameDir = tmpGame();
+    const init = await initGame(gameDir);
+    writeLoopStateFixture(gameDir, init.sessionToken, { phase: 'bootstrap' });
+    const external = await startExternalServer(gameDir, init.sessionToken);
+    t.after(() => terminateIfAlive(external.child));
+    if (recorded) fs.writeFileSync(path.join(gameDir, 'lock.json'), JSON.stringify({ ...external.lock, serverStartTime: 'win32-v1:2026-01-01T00:00:00.0000000Z' }));
+    const real = createStartTimeProbe();
+    const startTimeOf = createStartTimeProbe(real);
+    let reads = 0;
+    let stopping = null;
+    let loop = null;
+    startTimeOf.set((pid) => {
+      if (pid !== external.child.pid) return real(pid);
+      reads += 1;
+      if (stopping === null) stopping = loop.requestStop().catch((error) => error);
+      return null;
+    });
+    loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0, processStartTime: startTimeOf } });
+    t.after(async () => { startTimeOf.reset(); await loop.requestStop().catch(() => {}); });
+    await assert.rejects(loop.resume(), { code: 'STOPPING' });
+    await stopping;
+    assert.equal(reads, 1, 'the relay was read again after the stop');
+    assert.doesNotThrow(() => process.kill(external.child.pid, 0), 'the relay was not signalled');
+    assert.equal(readJson(path.join(gameDir, 'lock.json')).serverPid, external.child.pid, 'its lock was not retired');
   });
-  loop = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0, processStartTime: startTimeOf } });
-  t.after(async () => { startTimeOf.reset(); await loop.requestStop().catch(() => {}); });
-  await assert.rejects(loop.resume(), { code: 'STOPPING' });
-  await stopping;
-  // The external relay's lock records no start time, so relayMayBeAlive reads none: the one read is
-  // the re-check's first, and the stop ends it before a second.
-  assert.equal(reads, 1, 'the re-check read again after the stop');
-  assert.doesNotThrow(() => process.kill(external.child.pid, 0), 'the relay was not signalled');
-  assert.equal(readJson(path.join(gameDir, 'lock.json')).serverPid, external.child.pid, 'its lock was not retired');
-});
+}
 
 // A start time that reads again within the re-check is the relay's: it is adopted, not replaced.
 test('#319 resume adopts a recorded relay whose start time reads again within the re-check', { timeout: 20_000 }, async (t) => {
