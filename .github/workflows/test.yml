@@ -20,11 +20,13 @@ concurrency:
 # SHA-256 of its basename, weighted 3:2:2:3 (SPREAD), so a new file never moves
 # another and new files no longer all land in rest (#317). GATE and the three
 # relay tests run only in their own steps (rest, every Linux partition).
-# Job minutes, Node 20.x / 22.x, projected from per-file minutes of runs
-# 39588219828 and 39554481231 (setup included; other shards unchanged):
-#   learning-a 21.9-22.4 / 17.7-20.6    study-b 21.3-23.9 / 18.3-18.9
-#   learning-b 16.6-18.7 / 16.5-16.7    rest    18.8-19.1 / 14.2-17.8
-#   rest runs 74 files; before #317 it ran 231 (Node 20.x tests 46-50 min).
+# Job minutes, Node 20.x / 22.x, run 39736037467 attempt 1 (PR #318, 04530aa):
+#   study-a 19.4 / 18.7   study-b 18.6 / 16.8   learning-a 29.7 / 27.0
+#   learning-b 16.9 / 16.5   loop 21.9 / 20.0   loop-b 25.1 / 23.7
+#   recovery 17.2 / 16.5   rest 17.6 / 18.5 (74 files; 231 and 47-50 min before)
+# upper-background-resolve (6.4 / 6.0 min) then moved from learning-a to NAMED
+# learning-b, which puts both near 23 / 21-23. Linux services 25.2 / 16.1,
+# rest 20.9 / 16.3 (40 min cap).
 # Targets: jobs <= 40 min, files <= 36 min; caps remain 60 and 45 min.
 # A shard whose tests run over 35 min writes a ::warning:: annotation. Remeasure
 # from attempt 1 of a run (the API returns CRLF logs; tap-file-timing accepts them):
