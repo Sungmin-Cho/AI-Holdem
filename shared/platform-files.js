@@ -198,10 +198,15 @@ export function privateAclAllowed(proof, privateMode = true) {
   return own;
 }
 
+// Present means anything but ENOENT: what is there is then judged by its proof alone.
+function pathPresent(file) {
+  try { fs.lstatSync(file); return true; } catch (error) { return error?.code !== 'ENOENT'; }
+}
+
 // Only create missing paths. Native CreateDirectoryW supplies the DACL in the
 // creation call, and ERROR_ALREADY_EXISTS never applies it to somebody else's path.
-export function createPrivateDirectory(file) {
-  if (process.platform !== 'win32') { fs.mkdirSync(file, { mode: 0o700 }); return; }
+export function createPrivateDirectory(file, { platform = process.platform, spawn = spawnSync } = {}) {
+  if (platform !== 'win32') { fs.mkdirSync(file, { mode: 0o700 }); return; }
   const script = `$ErrorActionPreference='Stop';
 Add-Type @'
 using System; using System.Runtime.InteropServices;
@@ -216,13 +221,22 @@ $acl.SetOwner($me); $acl.SetAccessRuleProtection($true,$false);
 $rule=New-Object System.Security.AccessControl.FileSystemAccessRule($me,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); $acl.AddAccessRule($rule);
 $bytes=$acl.GetSecurityDescriptorBinaryForm(); $ptr=[Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length);
 try { [Runtime.InteropServices.Marshal]::Copy($bytes,0,$ptr,$bytes.Length); $sa=New-Object PrivateDirectoryNative+SA; $sa.length=[Runtime.InteropServices.Marshal]::SizeOf($sa); $sa.descriptor=$ptr; if (![PrivateDirectoryNative]::CreateDirectory(${quote(file)},[ref]$sa)) { $e=[Runtime.InteropServices.Marshal]::GetLastWin32Error(); if($e -eq 183){exit 2}; exit 1 } } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr) }`;
-  const result = powershell(script, spawnSync, { kind: 'create', paths: 1 });
+  const create = () => powershell(script, spawn, { kind: 'create', paths: 1 });
+  // #319 F2: a creation child stopped at its timeout (15 s, or what a platform deadline leaves)
+  // does not say whether CreateDirectoryW ran; under runner load Add-Type alone can take that long.
+  // spawnSync returns once the child has exited, so nothing creates the path after this point. A
+  // path that is still absent was never created: create it again, once, under the budget that
+  // remains. A path that is there now is only proved below, like every created path — no DACL is
+  // ever applied to it, so a path that is not provably ours still fails closed.
+  const stopped = (attempt) => attempt.status !== 0 && attempt.error?.code === 'ETIMEDOUT';
+  let result = create();
+  if (stopped(result) && !pathPresent(file)) result = create();
   if (result.status === 2) throw Object.assign(new Error('EEXIST'), { code: 'EEXIST' });
-  if (result.status !== 0) throw denied();
+  if (result.status !== 0 && !(stopped(result) && pathPresent(file))) throw denied();
   // CreateDirectoryW already applied the DACL. Get-Acl can still ETIMEDOUT
   // under runner load; retry the proof instead of leaving a private dir unverified.
   const deadline = Date.now() + 15_000;
-  while (!isPrivatePath(file)) {
+  while (!isPrivatePath(file, { platform, spawn })) {
     if (Date.now() >= deadline) throw denied();
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   }
