@@ -2227,9 +2227,17 @@ test('playing resume without a server lock restarts on the persisted actual port
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).port, persistedPort);
 });
 
-test('successful player probes clear a stale NO_PLAYER_RUNTIME halt at resume boundary', { timeout: 10_000 }, async (t) => {
+// #320: the engine deals its first button at random, so this test took one of three paths to the user
+// boundary — 4 to 15 real children (0 to 3 AI decisions) — under a 10 s guard the platform scale never
+// reached; the long path timed out on Windows. The button is fixed (seats user, p1, p2: one AI decision
+// before the user acts) and the guard follows the rule of its peers below.
+test('successful player probes clear a stale NO_PLAYER_RUNTIME halt at resume boundary', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
+  const statePath = path.join(gameDir, 'state.json');
+  const engine = readJson(statePath);
+  assert.deepEqual(engine.seats.map((seat) => seat.playerId), ['user', 'p1', 'p2']);
+  fs.writeFileSync(statePath, JSON.stringify({ ...engine, button: 1 }));
   writeLoopStateFixture(gameDir, init.sessionToken, {
     phase: 'bootstrap',
     halt: { code: 'NO_PLAYER_RUNTIME', message: 'old runtime failure' },
@@ -2243,6 +2251,7 @@ test('successful player probes clear a stale NO_PLAYER_RUNTIME halt at resume bo
   assert.equal(resumed.phase, 'playing');
   assert.equal(Object.hasOwn(resumed, 'halt'), false);
   await runUntilUserBoundary(loop, gameDir);
+  assert.equal(adapter.decideCalls.length, 1, 'one AI decision before the user acts');
 });
 
 // This is a recovery/cleanup contract, not a latency assertion. On Windows the
@@ -2865,7 +2874,12 @@ test('resumed active hand의 새 archivePending은 entry check와 별개로 다�
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).halt.code, 'repair_failed');
 });
 
-test('playing starts a hand, accepts a tolerant AI decision, and preserves every chip before the 5C user boundary', { timeout: 10_000 }, async (t) => {
+// #320 D5: this test's work is a real hand of engine, publish and relay children (12 and more round
+// trips): no seam can take the clock out without changing what it proves. Windows runs of it took
+// 2.4–4.6 s; both failures hit the unscaled 10 s guard while the next test ran about 4x slower too.
+// The guard now follows the rule of its peers (a recovery contract, not a latency assertion), so the
+// helper's own wait, which names the step it was waiting for, is what reports a real stall.
+test('playing starts a hand, accepts a tolerant AI decision, and preserves every chip before the 5C user boundary', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const adapter = makeAdapter({
     onDecide: async ({ message }) => ({
       raw: `결정입니다.\n\`\`\`json\n${JSON.stringify({
