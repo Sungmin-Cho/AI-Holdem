@@ -381,20 +381,55 @@ test('#319 F2: a creation child stopped twice leaves the path to its proof when 
  } finally {h.cleanup();}
 });
 
-// Review r1: a path lstat cannot read (ENOTDIR here, EPERM/EACCES on Windows) counts as present after a
-// stopped child, and its proof is refused before any child runs, so only the loop's own budget check
-// can end it under a spent platform budget — as a budget failure, without a second creation.
-test('#319 F2: a present path whose proof never reaches a child still ends with the platform budget', () => {
- const h=creationHarness({creates:[{result:STOPPED}]});
- const blocker=path.join(h.parent,'not-a-directory');
- fs.writeFileSync(blocker,'');
- const target=path.join(blocker,'created');
+// Review r2: after a stopped child only a plain directory is proved. A file or a link at the path is
+// what CreateDirectoryW would have refused (EEXIST), and a path lstat cannot read stays unverified —
+// neither is proved, created again or changed.
+// The unreadable path is an lstat that fails with EPERM (a Windows delete-pending name), injected into the
+// check after the stop only, chosen by its stack.
+test('#319 F2: after a stopped child a file or link at the path is EEXIST and an unreadable path is unverified', () => {
+ const original=fs.lstatSync;
+ for (const [kind, expected] of [['file','EEXIST'],['link','EEXIST'],['unreadable','PRIVATE_PATH_UNVERIFIED']]) {
+  const h=creationHarness({creates:[{result:STOPPED}]});
+  if (kind==='file') fs.writeFileSync(h.target,'');
+  if (kind==='link') { fs.mkdirSync(path.join(h.parent,'elsewhere')); fs.symlinkSync(path.join(h.parent,'elsewhere'),h.target,'dir'); }
+  if (kind==='unreadable') fs.lstatSync=function(file,...rest){
+   if (file===h.target && /pathAfterStop/.test(new Error().stack)) throw Object.assign(new Error('EPERM'),{code:'EPERM'});
+   return original.call(this,file,...rest);
+  };
+  try {
+   assert.throws(()=>files.createPrivateDirectory(h.target,{platform:'win32',spawn:h.spawn}),{code:expected},kind);
+   assert.deepEqual(h.calls,['create'],`${kind}: no proof and no second creation`);
+  } finally {fs.lstatSync=original;h.cleanup();}
+ }
+});
+
+// Review r1: a proof refused before its child (an lstat that fails inside the proof) never consults the
+// platform budget, so the loop checks it itself. One lstat — the proof's — fails, chosen by its stack.
+test('#319 F2: proof retries refused before any child still end with the platform budget', () => {
+ const h=creationHarness({creates:[{make:'S-1-5-21-7',result:STOPPED}]});
+ const original=fs.lstatSync;
+ fs.lstatSync=function(file,...rest){
+  if (file===h.target && /arePrivatePaths/.test(new Error().stack)) throw Object.assign(new Error('EPERM'),{code:'EPERM'});
+  return original.call(this,file,...rest);
+ };
  const started=Date.now();
  try {
-  assert.throws(()=>files.withPlatformDeadline(files.platformNow()+300,()=>files.createPrivateDirectory(target,{platform:'win32',spawn:h.spawn})),
+  assert.throws(()=>files.withPlatformDeadline(files.platformNow()+300,()=>files.createPrivateDirectory(h.target,{platform:'win32',spawn:h.spawn})),
    (error)=>error.code==='STUDY_DESCRIPTOR_CORRUPT'&&error.budgetSpent===true);
   assert.ok(Date.now()-started<5_000,`the retries outlived the budget: ${Date.now()-started} ms`);
-  assert.deepEqual(h.calls,['create'],'no second creation over a present path, and no proof child');
+  assert.deepEqual(h.calls,['create'],'no second creation over a present directory, and no proof child');
+ } finally {fs.lstatSync=original;h.cleanup();}
+});
+
+test('#319 F2: the second creation child gets what remains of the platform budget', () => {
+ const h=creationHarness({creates:[{result:STOPPED},{make:'S-1-5-21-7',result:CREATED}]});
+ let clock=0;
+ const timeouts=[];
+ const spawn=(exe,args,options)=>{timeouts.push(options.timeout);clock+=2_000;return h.spawn(exe,args,options);};
+ try {
+  files.withPlatformDeadline(5_000,()=>files.createPrivateDirectory(h.target,{platform:'win32',spawn}),{now:()=>clock});
+  assert.deepEqual(h.calls,['create','create','acl']);
+  assert.deepEqual(timeouts,[5_000,3_000,1_000]);
  } finally {h.cleanup();}
 });
 

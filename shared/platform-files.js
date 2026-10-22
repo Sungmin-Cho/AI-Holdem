@@ -209,9 +209,14 @@ export function privateAclAllowed(proof, privateMode = true) {
   return own;
 }
 
-// Present means anything but ENOENT: what is there is then judged by its proof alone.
-function pathPresent(file) {
-  try { fs.lstatSync(file); return true; } catch (error) { return error?.code !== 'ENOENT'; }
+// What a stopped creation child left at the path: nothing, a plain directory (to be proved), another
+// kind of entry (a file or link CreateDirectoryW would have refused as ERROR_ALREADY_EXISTS), or a
+// path that cannot be read.
+function pathAfterStop(file) {
+  try {
+    const st = fs.lstatSync(file);
+    return st.isDirectory() && !st.isSymbolicLink() ? 'directory' : 'other';
+  } catch (error) { return error?.code === 'ENOENT' ? 'absent' : 'unreadable'; }
 }
 
 // Only create missing paths. Native CreateDirectoryW supplies the DACL in the
@@ -237,13 +242,19 @@ try { [Runtime.InteropServices.Marshal]::Copy($bytes,0,$ptr,$bytes.Length); $sa=
   // does not say whether CreateDirectoryW ran; under runner load Add-Type alone can take that long.
   // spawnSync returns once the child has exited, so nothing creates the path after this point. A
   // path that is still absent was never created: create it again, once, under the budget that
-  // remains. A path that is there now is only proved below, like every created path — no DACL is
-  // ever applied to it, so a path that is not provably ours still fails closed.
+  // remains. A directory that is there now is only proved below, like every created path — no DACL
+  // is ever applied to it, so one that is not provably ours still fails closed. Any other entry is
+  // what CreateDirectoryW would have answered with ERROR_ALREADY_EXISTS.
   const stopped = (attempt) => attempt.status !== 0 && attempt.error?.code === 'ETIMEDOUT';
+  const exists = () => Object.assign(new Error('EEXIST'), { code: 'EEXIST' });
   let result = create();
-  if (stopped(result) && !pathPresent(file)) result = create();
-  if (result.status === 2) throw Object.assign(new Error('EEXIST'), { code: 'EEXIST' });
-  if (result.status !== 0 && !(stopped(result) && pathPresent(file))) throw denied();
+  if (stopped(result) && pathAfterStop(file) === 'absent') result = create();
+  if (result.status === 2) throw exists();
+  if (result.status !== 0) {
+    const left = stopped(result) ? pathAfterStop(file) : 'failed';
+    if (left === 'other') throw exists();
+    if (left !== 'directory') throw denied();
+  }
   // CreateDirectoryW already applied the DACL. Get-Acl can still ETIMEDOUT
   // under runner load; retry the proof instead of leaving a private dir unverified.
   const deadline = Date.now() + 15_000;
