@@ -459,7 +459,7 @@ test('observe: an error after spawn (a failed signal delivery) is not an exit �
 });
 
 // 이벤트 순서를 결정적으로 만드는 가짜 ChildProcess. spawnLoop가 세션 파일을 동기로 써 두어 "핸들러 설치 뒤" 상태를 만든다.
-function scriptedChild(t, { spawnEvent, killError, exitAfterKillMs = null }) {
+function scriptedChild(t, { spawnEvent, killError, exitAfterKillMs = null, errorBeforeSpawn = false, stopGraceMs = 200 }) {
   const dir = tmp();
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const targets = { storeDir: path.join(dir, 'store'), out: path.join(dir, 'out.json') };
@@ -483,6 +483,7 @@ function scriptedChild(t, { spawnEvent, killError, exitAfterKillMs = null }) {
       fs.mkdirSync(session, { recursive: true });
       fs.writeFileSync(path.join(store, '.session-store', 'current.json'), JSON.stringify({ sessionRel: 'sessions/g1' }));
       fs.writeFileSync(path.join(session, 'loop-state.json'), JSON.stringify({ phase: 'bootstrap' }));
+      if (errorBeforeSpawn) process.nextTick(() => child.emit('error', Object.assign(new Error('early'), { code: 'EPERM' })));
       if (spawnEvent === 'nextTick') process.nextTick(() => child.emit('spawn'));
       return child;
     },
@@ -491,7 +492,7 @@ function scriptedChild(t, { spawnEvent, killError, exitAfterKillMs = null }) {
     inspectStudy: async (store) => { studyCalls.push(store); return { status: 'stopped' }; },
     stopStudy: async () => {},
     environment: { sha: () => null, codexVersion: () => null, loadavg: () => [0, 0, 0], codexProcesses: () => 0 },
-    identityStatus: () => 'dead', listenerOwnedBy: async () => false, pollMs: 10, stopGraceMs: 200,
+    identityStatus: () => 'dead', listenerOwnedBy: async () => false, pollMs: 10, stopGraceMs,
   };
   return { targets, deps, child, studyCalls };
 }
@@ -503,6 +504,16 @@ test('observe: before the spawn is confirmed no signal goes; a stop then ends un
   assert.deepEqual(s.child.kills, [], 'no signal to a child whose spawn was never confirmed');
   assert.equal(report.run.terminationConfirmed, false);
   assert.equal(report.run.exit, null);
+  assert.equal(s.child.unrefs, 1);
+  assert.deepEqual(s.studyCalls, []);
+});
+
+test('observe: an error from a child that has a pid is never a spawn failure, even before any spawn event', async (t) => {
+  const s = scriptedChild(t, { spawnEvent: 'never', killError: false, errorBeforeSpawn: true });
+  const report = await observeOnce(base, s.targets, s.deps);
+  assert.deepEqual(report.run.childErrors, ['EPERM']);
+  assert.equal(report.run.exit, null, 'not recorded as a spawn failure');
+  assert.equal(report.run.terminationConfirmed, false);
   assert.equal(s.child.unrefs, 1);
   assert.deepEqual(s.studyCalls, []);
 });
@@ -519,7 +530,8 @@ test('observe: a kill error raised synchronously is never taken for an exit, eve
 });
 
 test('observe: after a child error the runner waits for the real exit, then cleans up and fails O0 with CHILD_ERROR', async (t) => {
-  const s = scriptedChild(t, { spawnEvent: 'nextTick', killError: true, exitAfterKillMs: 50 });
+  // 유예(10초)를 exit 지연(50ms)보다 훨씬 길게 두어 느린 이벤트 루프에서도 종료 미확인으로 새지 않게 한다.
+  const s = scriptedChild(t, { spawnEvent: 'nextTick', killError: true, exitAfterKillMs: 50, stopGraceMs: 10_000 });
   const report = await observeOnce(base, s.targets, s.deps);
   assert.deepEqual(report.run.exit, { code: 0, signal: null });
   assert.equal(report.run.terminationConfirmed, true);
