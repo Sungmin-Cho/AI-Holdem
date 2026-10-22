@@ -17,7 +17,8 @@ function payload(m,kind,extra={}){const s=m.snapshot();return {requestId:randomU
 // #320 D2: the game below was given 15 s in all to play two hands, and that was its work, not a stall:
 // every decision runs engine and publish children, and on ubuntu Node 20 passing runs spent 15.2 s at
 // the median on this test. The same bound now runs from the last time the game moved (its loop log
-// grew or its state changed), so a stall still fails, and says what it was waiting for.
+// grew, its loop or engine state was written, or the manager's state changed), so a stall still
+// fails, and says what it was waiting for.
 async function waitMoving(fn,moved,label){const quiet=process.platform==='win32'?120000:15000;let mark=moved(),since=Date.now();for(;;){const r=await fn();if(r)return r;const now=moved();if(now!==mark){mark=now;since=Date.now();}if(Date.now()-since>quiet)throw new Error(`wait timeout: ${label} (nothing moved for ${quiet} ms)`);await new Promise(r=>setTimeout(r,20));}}
 async function command(m,kind,extra){const row=m.command(payload(m,kind,extra));return wait(()=>{const r=m.receipt(row.requestId);return r.status!=='accepted'?r:null;});}
 test('app journals pinned JEV, pauses, ends without key and restarts with same descriptor', {timeout:process.platform==='win32'?180000:30000},async t=>{
@@ -206,7 +207,8 @@ test('private JEV values never reach host, participant, spectator, summary, expo
  const hostGame=()=>({...host,'x-game-epoch':epoch()}),as=token=>({authorization:`Bearer ${token}`,'x-game-epoch':epoch()});
  assert.equal((await (await fetch(`${pub}/api/p/state`,{headers:as(watcher)})).json()).me.roomRole,'spectator');
  const ls=()=>read(path.join(dir,'loop-state.json'));
- const moved=()=>{let size=0;try{size=fs.statSync(path.join(dir,'loop.log')).size;}catch{}return `${m.snapshot().state}:${size}`;};
+ const mark=(name,key)=>{try{return fs.statSync(path.join(dir,name))[key];}catch{return null;}};
+ const moved=()=>`${m.snapshot().state}:${mark('loop.log','size')}:${mark('loop-state.json','mtimeMs')}:${mark('state.json','mtimeMs')}`;
  const canaryStored=()=>ls().jevDiagnostics?.entries?.some(e=>Object.values(e.probabilities).includes(CANARY)&&e.selection);
  const act=async()=>{
   if(m.snapshot().state!=='playing')return;
