@@ -366,12 +366,15 @@ async function actionAgainstForeignLock(t, { clock, onBusy }) {
   const io = { out: '', err: '' };
   holder.stderr.setEncoding('utf8').on('data', (chunk) => { io.err += chunk; });
   const exited = new Promise((resolve) => holder.once('exit', resolve));
-  released = new Promise((resolve) => {
+  // `close` comes after all of the holder's output was read, so a release it printed is seen first.
+  released = new Promise((resolve, reject) => {
     holder.stdout.setEncoding('utf8').on('data', (chunk) => {
       io.out += chunk;
       if (io.out.includes('released\n')) resolve();
     });
+    holder.once('close', (code) => reject(new Error(`the holder closed (${code}) without releasing the lock: ${io.err}`)));
   });
+  released.catch(() => {});
   const held = new Promise((resolve, reject) => {
     holder.stdout.on('data', () => { if (io.out.includes('held\n')) resolve(); });
     exited.then((code) => reject(new Error(`the holder exited (${code}) before taking the lock: ${io.err}`)));
@@ -406,9 +409,11 @@ test('an action waits out a short control lock held by another process', async (
   let pending = null;
   const clock = {
     now: () => logical,
-    // The pause between attempts lasts until the holder has released the lock it was told to release.
+    // The pause between attempts lasts until the holder has released the lock it was told to release,
+    // and fails the attempt if it does not within a real-time cap.
     sleep: async () => { if (pending) await pending; },
   };
+  const releaseCapMs = process.platform === 'win32' ? 60_000 : 10_000;
   const run = await actionAgainstForeignLock(t, {
     clock,
     onBusy: (attempt, { holder, released, dir }) => {
@@ -416,12 +421,18 @@ test('an action waits out a short control lock held by another process', async (
       if (attempt !== 1) return;
       // The first attempt outlasted the 250 ms window (#251); the minimum attempts still follow it.
       logical += 600;
-      pending = released.then(() => lockGone(dir));
+      let capTimer;
+      pending = Promise.race([
+        released.then(() => lockGone(dir)),
+        new Promise((_, reject) => { capTimer = setTimeout(() => reject(new Error('the holder did not release the lock in time')), releaseCapMs); }),
+      ]).finally(() => clearTimeout(capTimer));
+      pending.catch(() => {});
       holder.stdin.end('release\n');
     },
   });
   const { response, io } = run;
-  assert.equal(response.status, 200, `${JSON.stringify(response.json)} after ${busyAttempts} busy attempt(s)`);
+  const release = await (pending ?? Promise.resolve()).then(() => 'released', (error) => error.message);
+  assert.equal(response.status, 200, `${JSON.stringify(response.json)} after ${busyAttempts} busy attempt(s); release: ${release}`);
   assert.equal(busyAttempts, 1, 'the action met the held lock once, and the attempt after the release took it');
   assert.equal(await run.exited, 0, io.err);
   assert.equal(io.out, 'held\nreleased\n');

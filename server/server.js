@@ -1177,6 +1177,10 @@ function serveStatic(pathname, res) {
 export function startServer({ gameDir, port = 8877, token, studyUrl, controlProtocolVersion, receiptCheckpoint, publishCheckpoint = () => {}, actionControlRetryMs = 250, onActionControlBusy, actionControlRetryClock = {} }) {
   if (!gameDir) throw new Error('gameDir required');
   if (typeof token !== 'string' || token.length === 0) throw new Error('token required');
+  if (actionControlRetryClock === null || typeof actionControlRetryClock !== 'object'
+    || ['now', 'sleep'].some((key) => actionControlRetryClock[key] !== undefined && typeof actionControlRetryClock[key] !== 'function')) {
+    throw new Error('actionControlRetryClock takes optional now and sleep functions');
+  }
   const trustedStudyUrl = validatedStudyUrl(studyUrl);
   const studyCapability = trustedStudyUrl?.split('#token=')[1];
   const assertNoStudyCapability = (value) => {
