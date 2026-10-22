@@ -141,7 +141,33 @@ function activeScope() {
   return clientAcl.getStore()?.files ?? aclScope;
 }
 function privatePath(file, privateMode) {
-  return activeScope()?.has(file) || isPrivatePath(file, { privateMode });
+  return privatePathRefusal(file, privateMode) === null;
+}
+// #319 F4: why a live proof refused a path, as a closed token for an error's detail. The reason a
+// proof reports names the path (and an ACL's SIDs), so only its kind, and a child's status and
+// errno, are kept.
+const PROOF_KINDS = new Set(['mode', 'stat', 'shape', 'powershell', 'proofs', 'acl', 'error']);
+const CODE_TOKEN = /^[A-Za-z][A-Za-z0-9_]{0,47}$/;
+export function proofRefusalToken(reason) {
+  const text = String(reason ?? '');
+  const kind = /^([a-z]+):/.exec(text)?.[1];
+  if (!PROOF_KINDS.has(kind)) return 'proof-unknown';
+  if (kind === 'powershell') {
+    const status = /^powershell:status=(-?\d{1,10}|null) /.exec(text)?.[1] ?? 'unknown';
+    const errno = /^powershell:status=\S+ error=(\S+)/.exec(text)?.[1];
+    return `proof-powershell-${status}-${CODE_TOKEN.test(errno ?? '') ? errno : 'unknown'}`;
+  }
+  if (kind === 'error' || kind === 'stat') {
+    const code = kind === 'error' ? text.slice('error:'.length) : text.split(' ').at(-1);
+    return `proof-${kind}-${CODE_TOKEN.test(code) ? code : 'unknown'}`;
+  }
+  return `proof-${kind}`;
+}
+function privatePathRefusal(file, privateMode) {
+  if (activeScope()?.has(file)) return null;
+  let reason = null;
+  if (isPrivatePath(file, { privateMode, onUnproven: (text) => { reason = text; } })) return null;
+  return proofRefusalToken(reason);
 }
 function aclCandidates(ctx) {
   return [
@@ -353,9 +379,18 @@ function context(storeDir, { create = false } = {}) {
   assertContext(ctx);
   return ctx;
 }
+// The checks run in this order and stop at the first refusal (a live ACL proof costs a child); the
+// refusal is a closed token that names the check, never the file (#319 F4).
+function unsafeFile(stat, privateMode, file) {
+  if (!stat?.isFile()) return 'type';
+  if (stat.isSymbolicLink()) return 'symlink';
+  if (!ownUid(stat)) return 'uid';
+  if (stat.nlink !== 1) return 'nlink';
+  if (process.platform === 'win32') return privatePathRefusal(file, privateMode);
+  return (privateMode ? (stat.mode & 0o777) === 0o600 : (stat.mode & 0o022) === 0) ? null : 'mode';
+}
 function safeFile(stat, privateMode, file) {
-  return stat?.isFile() && !stat.isSymbolicLink() && ownUid(stat) && stat.nlink === 1
-    && (process.platform === 'win32' ? privatePath(file, privateMode) : (privateMode ? (stat.mode & 0o777) === 0o600 : (stat.mode & 0o022) === 0));
+  return unsafeFile(stat, privateMode, file) === null;
 }
 function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized = false } = {}) {
   if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => readPrivate(ctx, file, maxBytes, { privateMode, allowOversized }));
@@ -363,27 +398,27 @@ function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized =
   const before = statOrNull(file);
   if (!before) return null;
   const missing = () => vanishedPath(file, before);
-  if (!safeFile(before, privateMode, file) || (!allowOversized && before.size > maxBytes)) {
+  const refusalOf = (stat) => unsafeFile(stat, privateMode, file) ?? (!allowOversized && stat.size > maxBytes ? 'size' : null);
+  const refuse = (stage, refusal) => {
     if (missing()) return null;
-    fail();
-  }
+    fail('STUDY_DESCRIPTOR_CORRUPT', `read:${stage}:${refusal}`);
+  };
+  const early = refusalOf(before);
+  if (early) return refuse('before', early);
   let fd;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW | NONBLOCK);
     const opened = fstatExact(fd);
-    if (!sameInode(before, opened) || !safeFile(opened, privateMode, file) || (!allowOversized && opened.size > maxBytes)) {
-      if (missing()) return null;
-      fail();
-    }
+    const openedRefusal = sameInode(before, opened) ? refusalOf(opened) : 'replaced';
+    if (openedRefusal) return refuse('opened', openedRefusal);
     assertContext(ctx);
     if (allowOversized && opened.size > maxBytes) return { text: null, stat: opened };
     const bytes = Buffer.alloc(opened.size);
     const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
     const after = fstatExact(fd);
-    if (!sameInode(opened, statOrNull(file)) || after.size > maxBytes || !safeFile(after, privateMode, file)) {
-      if (missing()) return null;
-      fail();
-    }
+    const afterRefusal = !sameInode(opened, statOrNull(file)) ? 'replaced'
+      : after.size > maxBytes ? 'size' : unsafeFile(after, privateMode, file);
+    if (afterRefusal) return refuse('after', afterRefusal);
     assertContext(ctx);
     return { text: bytes.subarray(0, length).toString('utf8'), stat: opened };
   } catch (error) {

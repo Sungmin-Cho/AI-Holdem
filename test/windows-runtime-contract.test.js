@@ -300,6 +300,139 @@ test('an exhausted deadline surfaces as a budget failure, never as a privacy ver
  } finally {fs.rmSync(dir,{recursive:true,force:true});}
 });
 
+// #319 F2: a creation child stopped at its timeout does not say whether CreateDirectoryW ran.
+// spawnSync returns once the child has exited, so the path tells: absent was never created and is
+// created once more; present is only proved — never given a DACL — and fails closed unless proved.
+// `user` owns the fake proofs; a stranger's path is owned by another SID.
+function creationHarness({ creates }) {
+ const parent=fs.mkdtempSync(path.join(os.tmpdir(),'private-create-'));
+ const target=path.join(parent,'created');
+ const calls=[];
+ const proof=(owner)=>JSON.stringify([{user:'S-1-5-21-7',tokenOwner:'S-1-5-21-7',owner,reparse:false,rules:[{sid:owner,type:'Allow',rights:2032127}]}]);
+ let owner='S-1-5-21-7';
+ const spawn=(_exe,args)=>{
+  const script=String(args.at(-1));
+  if(script.includes('CreateDirectory')){
+   const step=creates[calls.filter((call)=>call==='create').length];
+   calls.push('create');
+   if(step.make){fs.mkdirSync(target);owner=step.make;}
+   return step.result;
+  }
+  if(script.includes('GetAccessControl')){calls.push('acl');return {status:0,stdout:proof(owner),stderr:''};}
+  calls.push('other');
+  return {status:1,stdout:'',stderr:''};
+ };
+ return { parent, target, calls, spawn, cleanup: () => fs.rmSync(parent,{recursive:true,force:true}) };
+}
+const STOPPED={status:null,stdout:'',stderr:'',signal:'SIGTERM',error:Object.assign(new Error('spawnSync powershell.exe ETIMEDOUT'),{code:'ETIMEDOUT'})};
+const CREATED={status:0,stdout:'',stderr:''};
+
+test('#319 F2: a creation child stopped before it created the path is run once more, and the path is proved', () => {
+ const h=creationHarness({creates:[{result:STOPPED},{make:'S-1-5-21-7',result:CREATED}]});
+ try {
+  files.createPrivateDirectory(h.target,{platform:'win32',spawn:h.spawn});
+  assert.deepEqual(h.calls,['create','create','acl']);
+  assert.equal(fs.statSync(h.target).isDirectory(),true);
+ } finally {h.cleanup();}
+});
+
+test('#319 F2: a creation child stopped after it created the path is not run again; the path is proved', () => {
+ const h=creationHarness({creates:[{make:'S-1-5-21-7',result:STOPPED}]});
+ try {
+  files.createPrivateDirectory(h.target,{platform:'win32',spawn:h.spawn});
+  assert.deepEqual(h.calls,['create','acl']);
+ } finally {h.cleanup();}
+});
+
+test('#319 F2: a path present after a stopped child that cannot be proved ours fails closed and is never changed', () => {
+ const h=creationHarness({creates:[{make:'S-1-5-21-99',result:STOPPED}]});
+ let clock=0;
+ try {
+  // The proof keeps refusing a stranger's owner; the platform deadline ends the retries.
+  assert.throws(()=>files.withPlatformDeadline(1000,()=>files.createPrivateDirectory(h.target,{platform:'win32',spawn:(...args)=>{clock+=100;return h.spawn(...args);}}),{now:()=>clock}),
+   {code:'STUDY_DESCRIPTOR_CORRUPT'});
+  assert.deepEqual([...new Set(h.calls)],['create','acl'],'only creation and proof children ran: nothing applies a DACL');
+  assert.equal(h.calls.filter((call)=>call==='create').length,1);
+ } finally {h.cleanup();}
+});
+
+test('#319 F2: a creation child that failed otherwise, or was stopped twice without creating, fails closed', () => {
+ for (const creates of [[{result:{status:1,stdout:'',stderr:''}}],[{result:STOPPED},{result:STOPPED}]]) {
+  const h=creationHarness({creates});
+  try {
+   assert.throws(()=>files.createPrivateDirectory(h.target,{platform:'win32',spawn:h.spawn}),{code:'PRIVATE_PATH_UNVERIFIED'});
+   assert.deepEqual(h.calls,creates.map(()=>'create'));
+   assert.equal(fs.existsSync(h.target),false);
+  } finally {h.cleanup();}
+ }
+ // An existing path is still EEXIST, never proved or changed.
+ const h=creationHarness({creates:[{result:{status:2,stdout:'',stderr:''}}]});
+ try {
+  assert.throws(()=>files.createPrivateDirectory(h.target,{platform:'win32',spawn:h.spawn}),{code:'EEXIST'});
+  assert.deepEqual(h.calls,['create']);
+ } finally {h.cleanup();}
+});
+
+test('#319 F2: a creation child stopped twice leaves the path to its proof when the second one created it', () => {
+ const h=creationHarness({creates:[{result:STOPPED},{make:'S-1-5-21-7',result:STOPPED}]});
+ try {
+  files.createPrivateDirectory(h.target,{platform:'win32',spawn:h.spawn});
+  assert.deepEqual(h.calls,['create','create','acl']);
+ } finally {h.cleanup();}
+});
+
+// Review r2: after a stopped child only a plain directory is proved. A file or a link at the path is
+// what CreateDirectoryW would have refused (EEXIST), and a path lstat cannot read stays unverified —
+// neither is proved, created again or changed.
+// The unreadable path is an lstat that fails with EPERM (a Windows delete-pending name), injected into the
+// check after the stop only, chosen by its stack.
+test('#319 F2: after a stopped child a file or link at the path is EEXIST and an unreadable path is unverified', () => {
+ const original=fs.lstatSync;
+ for (const [kind, expected] of [['file','EEXIST'],['link','EEXIST'],['unreadable','PRIVATE_PATH_UNVERIFIED']]) {
+  const h=creationHarness({creates:[{result:STOPPED}]});
+  if (kind==='file') fs.writeFileSync(h.target,'');
+  if (kind==='link') { fs.mkdirSync(path.join(h.parent,'elsewhere')); fs.symlinkSync(path.join(h.parent,'elsewhere'),h.target,'dir'); }
+  if (kind==='unreadable') fs.lstatSync=function(file,...rest){
+   if (file===h.target && /pathAfterStop/.test(new Error().stack)) throw Object.assign(new Error('EPERM'),{code:'EPERM'});
+   return original.call(this,file,...rest);
+  };
+  try {
+   assert.throws(()=>files.createPrivateDirectory(h.target,{platform:'win32',spawn:h.spawn}),{code:expected},kind);
+   assert.deepEqual(h.calls,['create'],`${kind}: no proof and no second creation`);
+  } finally {fs.lstatSync=original;h.cleanup();}
+ }
+});
+
+// Review r1: a proof refused before its child (an lstat that fails inside the proof) never consults the
+// platform budget, so the loop checks it itself. One lstat — the proof's — fails, chosen by its stack.
+test('#319 F2: proof retries refused before any child still end with the platform budget', () => {
+ const h=creationHarness({creates:[{make:'S-1-5-21-7',result:STOPPED}]});
+ const original=fs.lstatSync;
+ fs.lstatSync=function(file,...rest){
+  if (file===h.target && /arePrivatePaths/.test(new Error().stack)) throw Object.assign(new Error('EPERM'),{code:'EPERM'});
+  return original.call(this,file,...rest);
+ };
+ const started=Date.now();
+ try {
+  assert.throws(()=>files.withPlatformDeadline(files.platformNow()+300,()=>files.createPrivateDirectory(h.target,{platform:'win32',spawn:h.spawn})),
+   (error)=>error.code==='STUDY_DESCRIPTOR_CORRUPT'&&error.budgetSpent===true);
+  assert.ok(Date.now()-started<5_000,`the retries outlived the budget: ${Date.now()-started} ms`);
+  assert.deepEqual(h.calls,['create'],'no second creation over a present directory, and no proof child');
+ } finally {fs.lstatSync=original;h.cleanup();}
+});
+
+test('#319 F2: the second creation child gets what remains of the platform budget', () => {
+ const h=creationHarness({creates:[{result:STOPPED},{make:'S-1-5-21-7',result:CREATED}]});
+ let clock=0;
+ const timeouts=[];
+ const spawn=(exe,args,options)=>{timeouts.push(options.timeout);clock+=2_000;return h.spawn(exe,args,options);};
+ try {
+  files.withPlatformDeadline(5_000,()=>files.createPrivateDirectory(h.target,{platform:'win32',spawn}),{now:()=>clock});
+  assert.deepEqual(h.calls,['create','create','acl']);
+  assert.deepEqual(timeouts,[5_000,3_000,1_000]);
+ } finally {h.cleanup();}
+});
+
 import * as windows from '../shared/windows-owned-process.js';
 import { killGroup } from '../tools/solver-runtime.js';
 test('untracked Windows identity never grants numeric PID termination', async () => {

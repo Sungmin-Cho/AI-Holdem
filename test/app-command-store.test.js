@@ -24,6 +24,17 @@ const payload = (manager, kind = "start") => {
     kind,
   };
 };
+// #319 F3: what a failed or unsettled command left behind — the receipt's code, its result's code
+// and detail, and the manager's state — so a failure that does not reproduce still names its cause.
+const commandState = (manager, id) => {
+  const row = manager.receipt(id);
+  const snap = manager.snapshot();
+  return JSON.stringify({
+    requestId: id, kind: row?.kind, status: row?.status, error: row?.error,
+    diagnostic: row?.diagnostic, resultError: row?.result?.error, resultDetail: row?.result?.errorDetail,
+    state: snap.state, managerError: snap.error, managerDetail: snap.errorDetail,
+  });
+};
 const settle = async (manager, id) => {
   const deadline = Date.now() + (process.platform === "win32" ? 240000 : 15000);
   while (Date.now() < deadline) {
@@ -31,7 +42,12 @@ const settle = async (manager, id) => {
     if (row.status !== "accepted") return row;
     await new Promise((r) => setTimeout(r, 20));
   }
-  throw new Error("receipt timeout");
+  throw new Error(`receipt timeout ${commandState(manager, id)}`);
+};
+const succeeded = async (manager, id) => {
+  const row = await settle(manager, id);
+  assert.equal(row.status, "succeeded", commandState(manager, id));
+  return row;
 };
 test(
   "request identity survives stale CAS and reordered JSON; new requests cannot race",
@@ -324,22 +340,22 @@ test('managed favorable deal survives app restart and restart-game setup', {time
   t.after(()=>manager.close());
   await manager.initialize();
   const start={...payload(manager),setup:{aiCount:1,dealBias:'strong'}};
-  manager.command(start);assert.equal((await settle(manager,start.requestId)).status,'succeeded');
-  const pause=payload(manager,'pause');manager.command(pause);assert.equal((await settle(manager,pause.requestId)).status,'succeeded');
+  manager.command(start);await succeeded(manager,start.requestId);
+  const pause=payload(manager,'pause');manager.command(pause);await succeeded(manager,pause.requestId);
   const gameId=manager.snapshot().gameId;
   assert.equal(manager.snapshot().setup.dealBias,'strong');
   await manager.close();
   manager=createSessionManager({storeDir:root,resolver});await manager.initialize();
   assert.equal(manager.snapshot().setup.dealBias,'strong');
-  const resume=payload(manager,'resume');manager.command(resume);assert.equal((await settle(manager,resume.requestId)).status,'succeeded');
-  const repause=payload(manager,'pause');manager.command(repause);assert.equal((await settle(manager,repause.requestId)).status,'succeeded');
-  const restart=payload(manager,'restart');manager.command(restart);assert.equal((await settle(manager,restart.requestId)).status,'succeeded');
+  const resume=payload(manager,'resume');manager.command(resume);await succeeded(manager,resume.requestId);
+  const repause=payload(manager,'pause');manager.command(repause);await succeeded(manager,repause.requestId);
+  const restart=payload(manager,'restart');manager.command(restart);await succeeded(manager,restart.requestId);
   assert.notEqual(manager.snapshot().gameId,gameId);
   assert.equal(manager.snapshot().setup.dealBias,'strong');
   const state=JSON.parse(fs.readFileSync(path.join(resolveCurrentSession(root).sessionDir,'state.json')));
   assert.equal(state.config.dealBias,'strong');
   const paused=payload(manager,'pause');manager.command(paused);await settle(manager,paused.requestId);
-  const end=payload(manager,'end');manager.command(end);assert.equal((await settle(manager,end.requestId)).status,'succeeded');
+  const end=payload(manager,'end');manager.command(end);await succeeded(manager,end.requestId);
 });
 
 test("reserved initialization proof rejects partial state and permits sealed commit recovery", async () => {
@@ -562,7 +578,7 @@ test("lobby notices an external loop owner has exited", async () => {
 
 for (const pace of [undefined, 'normal']) {
   test(`pace ${pace ?? 'legacy'} survives app restart and same-settings restart`, {timeout:process.platform==='win32'?300000:60000}, async t => {
-    const expectSuccess=async requestId=>{const receipt=await settle(manager,requestId);assert.equal(receipt.status,'succeeded',JSON.stringify({requestId,status:receipt.status,error:receipt.error}));};
+    const expectSuccess=requestId=>succeeded(manager,requestId);
     const root=createOwnedTempDir('lobby-pace');
     let manager=createSessionManager({storeDir:root,resolver});
     t.after(()=>manager.close());
@@ -601,3 +617,97 @@ for (const pace of [undefined, 'normal']) {
     assert.equal(manager.snapshot().setup.pace,pace);
   });
 }
+
+// #319 F5: SERVER_IDENTITY_UNAVAILABLE now names the check that threw it. The closed site (and,
+// where a start time could not be read, whether the pid still answered just after) is copied onto
+// the journal row and receipt(), so the next failure says where it came from. The HTTP receipt,
+// narrowed by app-server, never carries it, and nothing outside the closed set is copied.
+test("#319 F5: a failure's closed site reaches receipt() but never the HTTP receipt", { timeout: process.platform === "win32" ? 300000 : 30000 }, async (t) => {
+  const { SERVER_IDENTITY_SITES } = await import("../tools/diagnostic-codes.js");
+  let thrown = null;
+  const root = createOwnedTempDir("lobby-identity-site");
+  const manager = createSessionManager({ storeDir: root, resolver: async () => { throw thrown; } });
+  t.after(() => manager.close());
+  await manager.initialize();
+  const { startAppServer } = await import("../tools/app-server.js");
+  const app = await startAppServer({ manager, token: "identity-site", storeDir: root, publicPort: 0 });
+  t.after(() => app.close());
+  const run = async (error) => {
+    thrown = error;
+    const kind = manager.snapshot().allowedCommands.includes("start") ? "start" : "resume";
+    const body = { ...payload(manager, kind), ...(kind === "start" ? { setup: { aiCount: 1, opponentRuntime: "llm" } } : {}) };
+    manager.command(body);
+    const row = await settle(manager, body.requestId);
+    assert.equal(row.status, "failed", commandState(manager, body.requestId));
+    const http = await (await fetch(`${app.origin}/api/commands/${body.requestId}`, { headers: { authorization: "Bearer identity-site" } })).json();
+    assert.deepEqual([http.requestId, http.status, http.error], [body.requestId, "failed", row.error]);
+    assert.ok(Object.keys(http).every((key) => ["error", "requestId", "result", "status"].includes(key)), JSON.stringify(http));
+    assert.equal(JSON.stringify(http).includes("diagnostic"), false);
+    return row;
+  };
+  const coded = (code, extra) => Object.assign(new Error(`${code} /private/store pid 4242`), { code, ...extra });
+  const site = SERVER_IDENTITY_SITES[4];
+  let row = await run(coded("SERVER_IDENTITY_UNAVAILABLE", { site, pidAfter: "gone" }));
+  assert.deepEqual([row.error, row.diagnostic], ["SERVER_IDENTITY_UNAVAILABLE", { site, pidAfter: "gone" }]);
+  row = await run(coded("SERVER_IDENTITY_UNAVAILABLE", { site, pidAfter: "/private/store" }));
+  assert.deepEqual(row.diagnostic, { site }, "only alive or gone is copied");
+  for (const error of [coded("SERVER_IDENTITY_UNAVAILABLE", { site: "/private/store" }),
+    coded("SERVER_IDENTITY_UNAVAILABLE", {}), coded("SERVER_ALIVE", { site })]) {
+    row = await run(error);
+    assert.equal("diagnostic" in row, false, JSON.stringify(row));
+  }
+});
+
+// Every throw of SERVER_IDENTITY_UNAVAILABLE in the loop names a site of the closed set, and no two
+// checks share one: otherwise the next failure could not be traced back to a single check.
+test("#319 F5: every SERVER_IDENTITY_UNAVAILABLE in the loop names one site of the closed set, once", async () => {
+  const { SERVER_IDENTITY_SITES } = await import("../tools/diagnostic-codes.js");
+  const source = fs.readFileSync(new URL("../tools/game-loop.js", import.meta.url), "utf8");
+  assert.equal(Object.isFrozen(SERVER_IDENTITY_SITES), true);
+  assert.equal(/codedError\(\s*['"]SERVER_IDENTITY_UNAVAILABLE['"]/.test(source.replace(/function serverIdentityUnavailable[\s\S]*?\n}\n/, "")), false,
+    "a bare throw names no site");
+  const named = [...source.matchAll(/serverIdentityUnavailable\(\s*'([^']+)'/g), ...source.matchAll(/unavailableSite: '([^']+)'/g)].map((m) => m[1]);
+  assert.equal(source.match(/unavailableCode: 'SERVER_IDENTITY_UNAVAILABLE'/g).length, source.match(/unavailableSite: '/g).length,
+    "each wait for the server's death names its own site");
+  assert.deepEqual([...named].sort(), [...SERVER_IDENTITY_SITES].sort());
+});
+
+// #319 F5 (review r2): what receipt() returns of a stored diagnostic is the closed site of the row's own
+// failure or nothing — the journal bytes stay as they were — and a recovered success carries none.
+test("#319 F5: a stored diagnostic is re-checked on read and dropped by a recovered success", { timeout: process.platform === "win32" ? 300000 : 30000 }, async (t) => {
+  const root = createOwnedTempDir("lobby-stored-diagnostic");
+  let manager = createSessionManager({ storeDir: root, resolver });
+  t.after(() => manager.close());
+  await manager.initialize();
+  const journal = path.join(root, ".app", "commands");
+  const site = { site: "reuse-start-time", pidAfter: "gone" };
+  const rows = [
+    ["valid", { status: "failed", error: "SERVER_IDENTITY_UNAVAILABLE", diagnostic: site }, site],
+    ["foreign-site", { status: "failed", error: "SERVER_IDENTITY_UNAVAILABLE", diagnostic: { site: "/private/x", pidAfter: "gone" } }, undefined],
+    ["foreign-pid", { status: "failed", error: "SERVER_IDENTITY_UNAVAILABLE", diagnostic: { site: site.site, pidAfter: 4242 } }, { site: site.site }],
+    ["other-code", { status: "failed", error: "SERVER_ALIVE", diagnostic: site }, undefined],
+    ["not-object", { status: "failed", error: "SERVER_IDENTITY_UNAVAILABLE", diagnostic: "reuse-start-time" }, undefined],
+    ["succeeded", { status: "succeeded", diagnostic: site }, undefined],
+  ];
+  for (const [name, fields, expected] of rows) {
+    const requestId = `stored-${name}`;
+    const file = path.join(journal, `${requestId}.json`);
+    fs.writeFileSync(file, JSON.stringify({ requestId, kind: "pause", payload: "{}", ...fields }));
+    const bytes = fs.readFileSync(file);
+    assert.deepEqual(manager.receipt(requestId).diagnostic, expected, name);
+    assert.deepEqual(fs.readFileSync(file), bytes, `${name}: a read writes nothing`);
+  }
+  // An accepted row recovered at start-up as a success keeps no diagnostic, on disk or on read.
+  const body = { ...payload(manager), setup: normalizeSetup({ aiCount: 1 }) };
+  await manager.close();
+  const accepted = { ...body, payload: JSON.stringify(body), status: "accepted", reservation: { gameId: randomUUID(), selectionVersion: 1 }, diagnostic: site };
+  fs.writeFileSync(path.join(journal, `${body.requestId}.json`), JSON.stringify(accepted));
+  manager = createSessionManager({ storeDir: root, resolver });
+  await manager.initialize();
+  assert.equal(manager.receipt(body.requestId).status, "succeeded");
+  assert.equal("diagnostic" in manager.receipt(body.requestId), false);
+  assert.equal("diagnostic" in JSON.parse(fs.readFileSync(path.join(journal, `${body.requestId}.json`), "utf8")), false);
+  const end = payload(manager, "end");
+  manager.command(end);
+  await succeeded(manager, end.requestId);
+});

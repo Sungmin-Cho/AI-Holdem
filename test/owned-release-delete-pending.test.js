@@ -544,6 +544,46 @@ test('#265 A: a dead owner that left only its lock is stopped for inspect and st
   assert.equal((await api.inspectStudyService(first.storeDir)).instanceId, second.handle.instanceId);
 });
 
+// #319 F4: a refused file names the check that refused it — never its path. A dead owner's pid
+// file with a second name is refused by its link count, before any ACL proof.
+test('#319 F4: a refused lock pid file names the failed check in the error detail, never the path', { timeout: STOP_BUDGET }, async (t) => {
+  const first = await launch(t);
+  const api = await service();
+  await api.stopStudyService(first.storeDir, { expectedInstanceId: first.handle.instanceId });
+  await deadOwnedLock(path.join(first.storeDir, '.training'), 'study.lock.d');
+  const second = path.join(first.storeDir, 'pid-second-name');
+  fs.linkSync(path.join(lockPath(first.storeDir), 'pid'), second);
+  t.after(() => fs.rmSync(second, { force: true }));
+  for (const call of [() => api.inspectStudyService(first.storeDir),
+    () => api.stopStudyService(first.storeDir, { expectedInstanceId: first.handle.instanceId })]) {
+    const error = await call().then(() => null, (failure) => failure);
+    assert.equal(error?.code, 'STUDY_DESCRIPTOR_CORRUPT', String(error?.stack ?? error));
+    assert.match(error.message, /^STUDY_DESCRIPTOR_CORRUPT read:before:nlink$/);
+  }
+});
+
+test('#319 F4: a proof refusal keeps its kind, status and errno but no path or SID', async () => {
+  const { proofRefusalToken } = await service();
+  const file = 'C:\\Users\\runner admin\\AppData\\Local\\Temp\\store\\.training\\study.lock.d\\pid';
+  const cases = [
+    [`powershell:status=null error=ETIMEDOUT stderr=${file}`, 'proof-powershell-null-ETIMEDOUT'],
+    ['powershell:status=1 error=none stderr=Access denied', 'proof-powershell-1-none'],
+    [`acl:${file} {"user":"S-1-5-21-1","owner":"S-1-5-21-2","rules":[]}`, 'proof-acl'],
+    [`shape:${file}`, 'proof-shape'],
+    ['proofs:0/3', 'proof-proofs'],
+    ['error:SyntaxError', 'proof-error-SyntaxError'],
+    ['error:C:\\secret path', 'proof-error-unknown'],
+    [`stat:${file} ENOENT`, 'proof-stat-ENOENT'],
+    [`mode:/tmp/x 644`, 'proof-mode'],
+    ['something else', 'proof-unknown'],
+    [null, 'proof-unknown'],
+  ];
+  for (const [reason, token] of cases) {
+    assert.equal(proofRefusalToken(reason), token, String(reason));
+    assert.match(token, /^[A-Za-z0-9_-]+$/);
+  }
+});
+
 test('#265 A: a live owner without a descriptor is never reported stopped', { timeout: STOP_BUDGET }, async (t) => {
   const { storeDir, handle, api } = await launch(t);
   await api.stopStudyService(storeDir, { expectedInstanceId: handle.instanceId });
@@ -1072,16 +1112,21 @@ test('#306: a pending read is read again only within its bound, and never starte
   assert.equal(await readSettled(() => { reads += 1; if (reads < 3) throw pending(); return 'read'; }, platformNow() + 10_000, win32), 'read');
   assert.equal(reads, 3);
 
-  // The call's deadline.
+  // The call's deadline. The clock moves only while a read runs (each takes 40), so the time a read
+  // records is the time readSettled last checked the bound at. A real clock also counted the
+  // scheduler's gap between that check and the read's first line, and a slow runner put that line
+  // past the deadline although the check had been inside it (#319).
   const starts = [];
   const budgets = [];
-  const deadline = platformNow() + 300;
-  await assert.rejects(readSettled(() => {
+  let clock = 0;
+  const deadline = 300;
+  await assert.rejects(withPlatformDeadline(10_000, () => readSettled(() => {
     starts.push(platformNow());
     if (starts.length > 1) budgets.push(platformTimeout(15_000));
+    clock += 40;
     throw pending();
-  }, deadline, win32), { fsCode: 'EPERM' });
-  assert.ok(starts.length > 2, `read ${starts.length} times`);
+  }, deadline, win32), { now: () => clock }), { fsCode: 'EPERM' });
+  assert.deepEqual(starts, [0, 40, 80, 120, 160, 200, 240, 280], 'reads are started up to the deadline, and none past it');
   assert.ok(starts.every((at) => at < deadline), 'a read started past the deadline');
   assert.ok(budgets.every((ms) => ms <= 300), `a read again ran with ${Math.max(...budgets)} ms`);
 

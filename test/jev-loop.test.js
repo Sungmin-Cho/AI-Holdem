@@ -9,6 +9,7 @@ import {createJevRuntime} from '../tools/jev-runtime.js';
 import {validJevPending} from '../shared/jev-pending.js';
 import {JEV_CONFIG,JEV_CONFIG_LEGACY} from '../shared/opponent-runtime.js';
 import {guardFromArchive} from './helpers/jev-gate.mjs';
+import {createStartTimeProbe} from './helpers/platform.js';
 import {selectJevAction} from '../tools/jev-player.js';
 import {deriveUnit} from '../training/policies/rng.js';
 const SCALE=process.platform==='win32'?10:1;
@@ -335,4 +336,26 @@ test('v1 and v2 stores with a current pending roll forward without touching the 
   if(kind==='applied')assert.equal(loop.pendingDecision,null);
   else assert.deepEqual(ls.pendingDecision,pending);
  });
+});
+
+// #319 F5 (review r2): a JEV loop re-wraps its cleanup failure (stop attempt, failure list). The closed
+// site of a SERVER_IDENTITY_UNAVAILABLE from its relay's stop survives that re-wrap, on the thrown error
+// and in the persisted cleanupError.
+test('#319 F5: a JEV loop cleanup failure keeps the closed identity site through its re-wrap', {timeout:20000*SCALE},async t=>{
+ const real=createStartTimeProbe(),startTimeOf=createStartTimeProbe(real);
+ const f=await aiFirst(t,fakeClient([]),{loopOpts:{processStartTime:startTimeOf}});
+ await wait(()=>read(f.dir,'loop-state.json').metrics?.some(m=>m.outcome==='jev_accepted'));
+ const serverPid=read(f.dir,'lock.json').serverPid;
+ startTimeOf.set(pid=>pid===serverPid?null:real(pid));
+ // The real start time comes back whatever the assertions say, so the stop after them (and the
+ // fixture's own) can still end the relay and release the loop lock.
+ try{
+  await assert.rejects(f.loop.requestStop(),error=>error.code==='SERVER_IDENTITY_UNAVAILABLE'&&error.site==='direct-signal-start-time'
+   &&error.pidAfter==='alive'&&Number.isInteger(error.details?.stopAttempt));
+  const cleanup=read(f.dir,'loop-state.json').cleanupError;
+  assert.deepEqual([cleanup.code,cleanup.site,cleanup.pidAfter],['SERVER_IDENTITY_UNAVAILABLE','direct-signal-start-time','alive']);
+  assert.ok(Array.isArray(cleanup.details.stopFailures),'the JEV re-wrap ran');
+ }finally{startTimeOf.reset();}
+ await f.loop.requestStop();
+ await f.running.catch(e=>{if(!['STOPPING','CHILD_FAILED','SERVER_IDENTITY_UNAVAILABLE'].includes(e.code))throw e;});
 });

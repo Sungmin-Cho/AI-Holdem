@@ -1831,26 +1831,57 @@ test('Task 7A r2: finalizing resume은 stale COACH_RECONCILE_PENDING halt를 지
   assert.deepEqual(readJson(path.join(gameDir, '.coach-authority.json')).publishQueue, {});
 });
 
-test('Task 7A r2: expired deadline의 rejected terminate도 관찰되어 unhandledRejection 없이 gate abort로 수렴한다', { timeout: 20_000, concurrency: false }, async (t) => {
+// #320 D3: this test used to give the whole result wait 600 ms of real time (budget 1,200, lead 600)
+// and sleep 1.3 s past it. On a slow Windows runner the four owner/coach children of the resume
+// could not finish in 600 ms: either the resume itself was refused (FINALIZATION_ABORTED, 3.5 s) or
+// the coach pipeline met the cutoff at its spawn guard and the worker never started (the 20 s test
+// timeout, below the helper's 30 s win32 wait). Now the result wait is long and the deadline is
+// crossed with the jump clock at the event under test: the pipeline, its worker's handle bound,
+// starts waiting on the worker (the only read of the handle's outcome, after `record.bound`).
+test('Task 7A r2: expired deadline의 rejected terminate도 관찰되어 unhandledRejection 없이 gate abort로 수렴한다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {
   const gameDir = tmpGame();
   const init = await seedFinishedGame(gameDir);
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
   t.after(() => release());
+  let terminates = 0;
+  let awaited;
+  const waiting = new Promise((resolve) => { awaited = resolve; });
   const upper = makeCoachAdapter({
     rounds: [{
       gate,
       raw: JSON.stringify({ handNo: 1, text: 'deadline 뒤 종료 거부' }),
-      terminate: async () => { throw Object.assign(new Error('terminate rejected'), { code: 'TERMINATE_REJECTED' }); },
+      onAwaited: () => awaited(),
+      terminate: async () => {
+        terminates += 1;
+        throw Object.assign(new Error('terminate rejected'), { code: 'TERMINATE_REJECTED' });
+      },
     }],
   });
+  const clock = createJumpClock();
+  const cutoffs = [];
+  const leadMs = 4_000 * WIN32_SCALE;
   const { loop } = finalizingLoop(t, gameDir, init.sessionToken, {
     upper,
-    loopOpts: { finalizeBudgetMs: 1_200, finalizeCutoffLeadMs: 600 },
+    loopOpts: {
+      finalizeBudgetMs: 10_000 * WIN32_SCALE + leadMs,
+      finalizeCutoffLeadMs: leadMs,
+      monotonicNs: clock.monotonicNs,
+      onFinalizationDeadline: (installed) => cutoffs.push(installed),
+    },
   });
   await loop.resume();
-  await waitFor(() => upper.starts.length === 1, 'deadline rejection worker did not start');
-  await new Promise((resolve) => setTimeout(resolve, 1_300));
+  assert.equal(cutoffs.length, 1);
+  // Below the test's own timeout, so this names the step that never came.
+  let gaveUp;
+  t.after(() => clearTimeout(gaveUp));
+  await Promise.race([waiting, new Promise((_, reject) => {
+    gaveUp = setTimeout(() => reject(new Error('the pipeline never waited on its bound worker')), 12_000 * WIN32_SCALE);
+  })]).finally(() => clearTimeout(gaveUp));
+  assert.ok(readJson(path.join(gameDir, '.coach-authority.json')).hands?.['1']?.agentHandle, 'the worker handle is bound');
+  assert.equal(upper.starts.length, 1);
+  assert.equal(terminates, 0, 'no terminate before the deadline expired');
+  clock.jumpTo(cutoffs[0].deadlineNs + 1_000_000n);
 
   const unhandled = [];
   const onUnhandled = (error) => unhandled.push(error);
@@ -1862,6 +1893,8 @@ test('Task 7A r2: expired deadline의 rejected terminate도 관찰되어 unhandl
   } finally {
     process.removeListener('unhandledRejection', onUnhandled);
   }
+  assert.equal(terminates, 1, 'the expired-deadline terminate is observed exactly once');
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).finalization.cutoff.reason, 'deadline_exceeded');
 });
 
 test('finalizing 중 requestStop은 BAD_LOOP_PHASE 없이 정상 정리된다', { timeout: 20_000 }, async (t) => {
@@ -6255,10 +6288,27 @@ test('#192 S6: 이후 재개에서 identity가 죽어 해소되면 adapter가 �
   t.after(() => { if (orphanAlive) terminateIfAlive(orphan); });
   await seedRunningCoach(gameDir, 'old-owner', 1, orphan);
 
+  // #320 D6: the orphan's identity stays unknown, so the first closure polls it until the result-wait
+  // cutoff and then has only the lead (here 1.1 s of real time, unscaled) for fence, cleanup-result and
+  // adapter-disable. On a slow Windows runner cleanup-result's answer arrived past the deadline and
+  // adapter-disable was refused before it ran (`0 !== 1`). The first lookup of the orphan's start time
+  // now moves the jump clock to the cutoff — the identity window closes in no real time — and the
+  // three children get the whole lead.
+  const clock = createJumpClock();
+  const cutoffs = [];
+  let lateOrphanLookups = 0;
+  const leadMs = 4_000 * WIN32_SCALE;
   const loopOpts = {
-    finalizeBudgetMs: 2_200,
-    finalizeCutoffLeadMs: 1_100,
-    processStartTime: (pid) => (pid === orphan.pid ? null : processStartTime(pid)),
+    finalizeBudgetMs: 10_000 * WIN32_SCALE + leadMs,
+    finalizeCutoffLeadMs: leadMs,
+    monotonicNs: clock.monotonicNs,
+    onFinalizationDeadline: (installed) => cutoffs.push(installed),
+    processStartTime: (pid) => {
+      if (pid !== orphan.pid) return processStartTime(pid);
+      if (cutoffs.length === 1) clock.jumpTo(cutoffs[0].resultWaitCutoffNs);
+      else lateOrphanLookups += 1;
+      return null;
+    },
     signalProcess: (pid, signal) => { if (pid !== orphan.pid) process.kill(pid, signal); },
   };
 
@@ -6311,6 +6361,8 @@ test('#192 S6: 이후 재개에서 identity가 죽어 해소되면 adapter가 �
     authorityAfterSecond.retiredAttempts.find((row) => row.handNo === 1)?.cleanupState,
     'released',
   );
+  assert.equal(lateOrphanLookups, 0, 'the second resume judges the dead orphan without its start time');
+  assert.equal(cutoffs.length, 2);
 });
 
 test('#192 S6: 판정 대상 행이 늘어도 owner-runtime-closure 영수증은 closure당 한 번만 읽는다', { timeout: 20_000 * WIN32_SCALE, concurrency: false }, async (t) => {

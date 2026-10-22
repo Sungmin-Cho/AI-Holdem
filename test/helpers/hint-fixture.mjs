@@ -26,10 +26,12 @@ export async function hintFixture(t,{hints='on',dealBias}={}) {
       ...(body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),signal:AbortSignal.timeout(5000)});
     return {status:response.status,body:await response.json()};
   };
+  // #320 D7: what made a hint unavailable (closed codes only), for a test's failure message.
+  const logged=[];
   const control=createHintControl({sessionDir:dir,runCli:async args=>cli(...args),ready:async()=>{
     const result=await request('health');return result.body.capabilities?.preActionHintsReady===true;
-  }});
-  return {dir,cli,request,epoch,token,control,
+  },log:(event,fields)=>logged.push({event,...fields})});
+  return {dir,cli,request,epoch,token,control,logged,
     prepare:()=>control.prepare(cli('step')),
     state:()=>JSON.parse(fs.readFileSync(path.join(dir,'state.json'))),
     restart:async()=>{await relay.close();relay=await startServer({gameDir:dir,port:0,token});},

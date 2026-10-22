@@ -51,8 +51,12 @@ test('action receipt hides same-D numbers before engine applies; descriptor fail
   const next=await f.prepare();assert.equal(next.hint.code,'HINT_RELAY_UNAVAILABLE');
   assert.equal(fs.readFileSync(path.join(f.dir,'state.json'),'utf8'),before);
 });
+// #320 D7: once (Windows Node 22) the hint this test prepares was already unavailable, and the check
+// below reported only its status. The prepared hint is now checked first, with the code that made it
+// unavailable and what the hint control logged.
 test('query is memoized but identity remains checked across repeated GET-equivalent projections',async t=>{
   const f=await hintFixture(t);const envelope=await f.prepare();const context={};
+  assert.equal(envelope.hint?.status,'supported',JSON.stringify({code:envelope.hint?.code??null,logged:f.logged}));
   await verifyHintPublication({sessionDir:f.dir,token:f.token,context,initialize:true});
   for(let i=0;i<10;i++)assert.equal((await verifyHintPublication({sessionDir:f.dir,token:f.token,context,hint:envelope.hint,view:envelope.view})).hint.status,'supported');
   assert.equal(context.queryCount,1);

@@ -14,6 +14,12 @@ const read=f=>JSON.parse(fs.readFileSync(f));
 const resolver=async()=>({player:null,upper:null,notices:[]});
 async function wait(fn){const deadline=Date.now()+(process.platform==='win32'?120000:15000);while(Date.now()<deadline){const r=await fn();if(r)return r;await new Promise(r=>setTimeout(r,20));}throw new Error('wait timeout');}
 function payload(m,kind,extra={}){const s=m.snapshot();return {requestId:randomUUID(),expectedInstanceId:s.instanceId,expectedAppRevision:s.appRevision,expectedGameId:s.gameId,expectedSelectionVersion:s.selectionVersion,kind,...extra};}
+// #320 D2: the game below was given 15 s in all to play two hands, and that was its work, not a stall:
+// every decision runs engine and publish children, and on ubuntu Node 20 passing runs spent 15.2 s at
+// the median on this test. The same bound now runs from the last time the game moved (its loop log
+// grew, its loop or engine state was written, or the manager's state changed), so a stall still
+// fails, and says what it was waiting for.
+async function waitMoving(fn,moved,label,quiet=process.platform==='win32'?120000:15000){let mark=moved(),since=Date.now();for(;;){const r=await fn();if(r)return r;const now=moved();if(now!==mark){mark=now;since=Date.now();}if(Date.now()-since>quiet)throw new Error(`wait timeout: ${label} (nothing moved for ${quiet} ms)`);await new Promise(r=>setTimeout(r,20));}}
 async function command(m,kind,extra){const row=m.command(payload(m,kind,extra));return wait(()=>{const r=m.receipt(row.requestId);return r.status!=='accepted'?r:null;});}
 test('app journals pinned JEV, pauses, ends without key and restarts with same descriptor', {timeout:process.platform==='win32'?180000:30000},async t=>{
  const oldKey=process.env.TYPESAFE_API_KEY,oldFetch=globalThis.fetch;process.env.TYPESAFE_API_KEY='synthetic';
@@ -201,6 +207,8 @@ test('private JEV values never reach host, participant, spectator, summary, expo
  const hostGame=()=>({...host,'x-game-epoch':epoch()}),as=token=>({authorization:`Bearer ${token}`,'x-game-epoch':epoch()});
  assert.equal((await (await fetch(`${pub}/api/p/state`,{headers:as(watcher)})).json()).me.roomRole,'spectator');
  const ls=()=>read(path.join(dir,'loop-state.json'));
+ const mark=(name,key)=>{try{return fs.statSync(path.join(dir,name))[key];}catch{return null;}};
+ const moved=()=>`${m.snapshot().state}:${mark('loop.log','size')}:${mark('loop-state.json','mtimeMs')}:${mark('state.json','mtimeMs')}`;
  const canaryStored=()=>ls().jevDiagnostics?.entries?.some(e=>Object.values(e.probabilities).includes(CANARY)&&e.selection);
  const act=async()=>{
   if(m.snapshot().state!=='playing')return;
@@ -210,7 +218,7 @@ test('private JEV values never reach host, participant, spectator, summary, expo
   }
  };
  // Positive first: the canary is stored privately and its decision was accepted.
- await wait(async()=>{await act();return canaryStored()&&ls().metrics.some(x=>x.outcome==='jev_accepted');});
+ await waitMoving(async()=>{await act();return canaryStored()&&ls().metrics.some(x=>x.outcome==='jev_accepted');},moved,'the canary decision');
  const live={admin:JSON.stringify(m.snapshot()),app:await (await fetch(`${app.origin}/api/app`,{headers:host})).text()};
  for(const [name,url,headers] of [['host',`${app.origin}/api/game/${gameId}`,hostGame()],['seated',`${pub}/api/p/game/${gameId}`,as(seated)],['spectator',`${pub}/api/p/game/${gameId}`,as(watcher)]]){
   const res=await fetch(`${url}/snapshot`,{headers});assert.equal(res.status,200,name);live[`${name}-snapshot`]=await res.text();
@@ -218,7 +226,7 @@ test('private JEV values never reach host, participant, spectator, summary, expo
  }
  const lock=read(path.join(dir,'lock.json'));
  live.relay=await (await fetch(`http://127.0.0.1:${lock.port}/api/snapshot?token=${lock.sessionToken}`)).text();
- await wait(async()=>{await act();return ['completed','ended'].includes(m.snapshot().state);});
+ await waitMoving(async()=>{await act();return ['completed','ended'].includes(m.snapshot().state);},moved,'the end of the game');
  const done={};
  for(const [name,url,headers] of [['host',`${app.origin}/api/game/${gameId}`,hostGame()],['seated',`${pub}/api/p/game/${gameId}`,as(seated)],['spectator',`${pub}/api/p/game/${gameId}`,as(watcher)]]){
   const snap=await fetch(`${url}/snapshot`,{headers});assert.equal(snap.status,200,`${name} final snapshot`);done[`${name}-final`]=await snap.text();
@@ -234,4 +242,13 @@ test('private JEV values never reach host, participant, spectator, summary, expo
  const privateText=fs.readFileSync(path.join(dir,'loop-state.json'),'utf8');for(const pattern of FORBIDDEN)assert.match(privateText,pattern);
  for(const [name,text] of Object.entries({...live,...done}))for(const pattern of FORBIDDEN)assert.doesNotMatch(text,pattern,`${name} leaks ${pattern}`);
  const log=fs.readFileSync(path.join(dir,'loop.log'),'utf8');for(const pattern of FORBIDDEN)assert.doesNotMatch(log,pattern,`loop.log leaks ${pattern}`);
+});
+
+test('#320 D2: the JEV game wait fails only when nothing moved for its quiet period', async () => {
+ let ticks=0;
+ // Moving on every check, it waits past several quiet periods until the condition holds.
+ const started=Date.now();
+ assert.equal(await waitMoving(()=>Date.now()-started>400?'done':null,()=>ticks++,'moving',100),'done');
+ // Nothing moving, it fails after one quiet period and names what it waited for.
+ await assert.rejects(waitMoving(()=>null,()=>'still','the stalled step',100),/wait timeout: the stalled step \(nothing moved for 100 ms\)/);
 });

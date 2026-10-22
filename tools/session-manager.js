@@ -25,7 +25,7 @@ import { createRoomManager } from "./room-manager.js";
 import { projectNotices } from "./notice-projection.js";
 import { validateParticipantName } from "../shared/seat-roles.js";
 import { sanitizeRejectionFields } from "../publish-contract.js";
-import { projectDiagnosticCode, projectPublicCode } from "./diagnostic-codes.js";
+import { failureDiagnostic, projectDiagnosticCode, projectPublicCode } from "./diagnostic-codes.js";
 const read = readPrivateJson;
 const stable = (value) =>
   value && typeof value === "object"
@@ -248,10 +248,23 @@ export function createSessionManager({
   // `pendingDecision.code`. The journal row itself is never rewritten and never returned
   // directly, so its bytes (and the payload the request-id conflict check compares) stay as
   // recorded. Returns a deep copy.
+  // #319 F5: a failure's closed diagnostic (SERVER_IDENTITY_SITES) on its journal row and so on
+  // receipt(); the HTTP receipt (app-server) never carries it.
+  const recordFailureDiagnostic = (row, err) => {
+    const diagnostic = failureDiagnostic(err);
+    if (diagnostic) row.diagnostic = diagnostic;
+    else delete row.diagnostic;
+  };
   const publicReceipt = (row) => {
     if (!row || typeof row !== "object") return row;
     const out = structuredClone(row);
     if (out.error !== undefined) out.error = projectPublicCode(out.error);
+    // #319 F5: a stored diagnostic is the closed site of the row's own failure, or nothing.
+    if (out.diagnostic !== undefined) {
+      const diagnostic = out.status === "failed" ? failureDiagnostic({ ...(typeof out.diagnostic === "object" ? out.diagnostic : {}), code: out.error }) : null;
+      if (diagnostic) out.diagnostic = diagnostic;
+      else delete out.diagnostic;
+    }
     const result = out.result;
     if (result && typeof result === "object") {
       if (result.error !== undefined) result.error = projectPublicCode(result.error);
@@ -653,8 +666,10 @@ export function createSessionManager({
     try {
       await retained.loop.requestStop();
     } catch (cleanup) {
+      // #319 F5: the closed site of a SERVER_IDENTITY_UNAVAILABLE survives the re-wrap.
       throw Object.assign(controlError(cleanup?.code ?? "CLEANUP_FAILED"), {
         errorDetail: failureDetail(runFailure, cleanup),
+        ...(failureDiagnostic(cleanup) ?? {}),
       });
     }
     if (session === retained) session = null;
@@ -672,6 +687,7 @@ export function createSessionManager({
     } catch (cleanup) {
       throw Object.assign(controlError(cleanup?.code ?? "CLEANUP_FAILED"), {
         errorDetail: failureDetail(runFailure, cleanup),
+        ...(failureDiagnostic(cleanup) ?? {}),
       });
     }
     if (startingLoop === retained) startingLoop = null;
@@ -751,11 +767,13 @@ export function createSessionManager({
         safeBind(current.gameId);
       }
       row.status = "succeeded";
+      delete row.diagnostic;
       row.result = snapshot();
     } catch (err) {
       settleRoomAfterFailure(row, { bindWhen: row.roomLocked });
       row.status = "failed";
       row.error = projectPublicCode(err.code ?? "COMMAND_FAILED");
+      recordFailureDiagnostic(row, err);
       reconcileFailure(row.error, err.errorDetail ?? retainedLaunchDetail(err));
     } finally {
       row.completedAt = new Date().toISOString();
@@ -922,12 +940,14 @@ export function createSessionManager({
             // A crash-restored resume is parked; opening the app never silently plays.
           }
           row.status = row.kind === "retry-decision" ? "failed" : "succeeded";
+          delete row.diagnostic;
           if (row.kind === "retry-decision") row.error = "RETRY_NOT_APPLIED";
           row.result = snapshot();
         } catch (err) {
           settleRoomAfterFailure(row, { bindWhen: row.roomLocked || setupHasParticipants(row.setup) });
           row.status = "failed";
           row.error = projectPublicCode(err.code ?? "RECOVERY_REQUIRED");
+          recordFailureDiagnostic(row, err);
           reconcileFailure(row.error, err.errorDetail ?? retainedLaunchDetail(err));
         } finally {
           row.completedAt = new Date().toISOString();

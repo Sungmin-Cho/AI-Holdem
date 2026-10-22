@@ -35,6 +35,10 @@ import { projectPublicCode } from '../tools/diagnostic-codes.js';
 const TIMEOUT = process.platform === 'win32' ? 300000 : 40000;
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// The fixture child's pid 4242 can only reach a snapshot with its label: its `details` serialize as
+// `"pid":4242` and a formatted message reads `pid: 4242`. A bare `4242` also turns up inside the
+// snapshot's random hex identifiers (gameEpoch, UUIDs), which made the whole-snapshot check flaky (#319).
+const PID_LEAK = /"pid":4242|pid: 4242/;
 
 const cas = (manager, kind) => {
   const s = manager.snapshot();
@@ -64,7 +68,7 @@ const until = async (probe, label) => {
 
 // The player fails fatally on its first decision (the run ends), and the adapter's disposal —
 // the stand-in for a child whose close cannot be confirmed — fails until `closeNow` is called.
-function fixture(t, { failFirstDecision = true, runCode = 'CHILD_SIGNAL_FAILED', closeCode = 'CHILD_CLOSE_UNCONFIRMED' } = {}) {
+function fixture(t, { failFirstDecision = true, runCode = 'CHILD_SIGNAL_FAILED', closeCode = 'CHILD_CLOSE_UNCONFIRMED', closeExtra = {} } = {}) {
   const events = [];
   const state = { closes: false, decisions: 0 };
   const adapter = {
@@ -84,7 +88,7 @@ function fixture(t, { failFirstDecision = true, runCode = 'CHILD_SIGNAL_FAILED',
     async dispose() {
       const ok = state.closes;
       events.push(ok ? 'dispose:confirmed' : 'dispose:unconfirmed');
-      if (!ok) throw Object.assign(new Error('close'), { code: closeCode, details: { pid: 4242, closeConfirmed: false } });
+      if (!ok) throw Object.assign(new Error('close'), { code: closeCode, details: { pid: 4242, closeConfirmed: false }, ...closeExtra });
     },
   };
   let resolves = 0;
@@ -135,7 +139,7 @@ test('a retained failed session keeps both failures, offers 불러오기, and re
   const persisted = readJson(path.join(dir, 'loop-state.json')).cleanupError;
   assert.equal(persisted.code, 'CHILD_CLOSE_UNCONFIRMED');
   assert.deepEqual(persisted.runError, { code: 'CHILD_SIGNAL_FAILED' }, 'the persisted diagnostics keep the original run failure');
-  assert.equal(JSON.stringify(snapshot).includes('4242'), false, 'no pid or message reaches the host snapshot');
+  assert.equal(PID_LEAK.test(JSON.stringify(snapshot)), false, 'no pid or message reaches the host snapshot');
   const resolvesBefore = f.resolves();
 
   const resume = cas(f.manager, 'resume');
@@ -340,7 +344,7 @@ test('on the loop alone, an identifier-shaped run code is projected before it is
 // disposal confirms only once `closes` is set, and may be held at `disposeGate`.
 const LLM_SETUP = { mode: 'cash-training', aiCount: 1, opponentRuntime: 'llm', hints: 'off', dealBias: 'off' };
 
-function launchFixture(t, { runCode = 'CHILD_SIGNAL_FAILED', closeCode = 'CHILD_CLOSE_UNCONFIRMED', beforeWarmupFailure = null, runErrorExtra = null } = {}) {
+function launchFixture(t, { runCode = 'CHILD_SIGNAL_FAILED', closeCode = 'CHILD_CLOSE_UNCONFIRMED', beforeWarmupFailure = null, runErrorExtra = null, closeExtra = {} } = {}) {
   const events = [];
   const state = { closes: false, failWarmup: true, disposeGate: null, warmups: 0 };
   const adapter = {
@@ -369,7 +373,7 @@ function launchFixture(t, { runCode = 'CHILD_SIGNAL_FAILED', closeCode = 'CHILD_
       }
       const ok = state.closes;
       events.push(ok ? 'dispose:confirmed' : 'dispose:unconfirmed');
-      if (!ok) throw Object.assign(new Error('close'), { code: closeCode, details: { pid: 4242, closeConfirmed: false } });
+      if (!ok) throw Object.assign(new Error('close'), { code: closeCode, details: { pid: 4242, closeConfirmed: false }, ...closeExtra });
     },
   };
   let resolves = 0;
@@ -815,7 +819,7 @@ test('combined acceptance: explanation refusal -> applied AI action publication 
   const resume = cas(manager, 'resume');
   manager.command(resume);
   const row = await settle(manager, resume.requestId);
-  assert.equal(row.status, 'succeeded', row.error);
+  assert.equal(row.status, 'succeeded', JSON.stringify({ error: row.error, diagnostic: row.diagnostic }));
   assert.deepEqual([row.result.gameId, row.result.error, row.result.errorDetail], [gameId, null, null]);
   assert.ok(['playing', 'paused'].includes(row.result.state), row.result.state);
   assert.equal(resolves, resolvesBefore + 1, 'one replacement loop, after the confirmed close');
@@ -969,4 +973,60 @@ test('#273/#274 a launch error carrying hostile errorDetail: the whole public sn
   }
   assert.equal(f.manager.session, null, 'retained launch');
   assert.equal(fs.existsSync(f.lock), true);
+});
+
+test('the pid leak matcher finds the fixture pid with its label but never inside a random identifier (#319)', () => {
+  // Seeded, so the corpus (and the control count below) is the same on every run (as #304).
+  let seed = 319;
+  const next = () => {
+    seed = (seed + 0x6D2B79F5) >>> 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return (t ^ (t >>> 14)) >>> 0;
+  };
+  const hex = (chars) => Array.from({ length: chars / 8 }, () => next().toString(16).padStart(8, '0')).join('');
+  const uuid = () => {
+    const h = hex(32);
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${'89ab'[next() % 4]}${h.slice(17, 20)}-${h.slice(20)}`;
+  };
+  const rows = Array.from({ length: 20_000 }, () => JSON.stringify({
+    instanceId: uuid(), gameId: uuid(), gameEpoch: hex(64), appRevision: next() % 100_000,
+    stateSince: new Date(Date.UTC(2020, 0, 1) + next() * 100).toISOString(),
+    error: 'CHILD_CLOSE_UNCONFIRMED', errorDetail: { run: 'CHILD_SIGNAL_FAILED', cleanup: 'CHILD_CLOSE_UNCONFIRMED', rejection: null },
+  }));
+  assert.equal(rows.filter((row) => PID_LEAK.test(row)).length, 0);
+  // The fixture's two ways out: its error `details`, and a message that formats them.
+  assert.match(JSON.stringify({ errorDetail: { details: { pid: 4242, closeConfirmed: false } } }), PID_LEAK);
+  assert.match(JSON.stringify({ error: 'close failed (pid: 4242)' }), PID_LEAK);
+  // Control: the bare number the snapshot check used before does hit the same corpus.
+  assert.ok(rows.filter((row) => row.includes('4242')).length > 0, 'the corpus can produce the old false positive');
+});
+
+// #319 F5 (review r1): a retained session's or launching loop's cleanup failure reaches a resume's
+// receipt only through the manager's own re-thrown error. The closed site of a
+// SERVER_IDENTITY_UNAVAILABLE survives that re-wrap (and the loop's persisted cleanupError), and
+// nothing reaches it from a value outside the closed set.
+test('#319 F5: a retained cleanup failure keeps its closed site through the manager re-wrap, on the resume receipt and the loop state', { timeout: TIMEOUT }, async (t) => {
+  const site = { site: 'direct-signal-start-time', pidAfter: 'alive' };
+  const closeExtra = { ...site, message: 'close /private/store pid 4242' };
+  const retained = fixture(t, { closeCode: 'SERVER_IDENTITY_UNAVAILABLE', closeExtra });
+  const snapshot = await reachRetainedError(retained);
+  assert.equal(snapshot.state, 'error');
+  assert.equal(readJson(path.join(retained.manager.current.sessionDir, 'loop-state.json')).cleanupError.site, site.site);
+  const resumed = await command(retained, 'resume');
+  assert.deepEqual([resumed.status, resumed.error, resumed.diagnostic], ['failed', 'SERVER_IDENTITY_UNAVAILABLE', site], 'retained session');
+
+  const launch = launchFixture(t, { closeCode: 'SERVER_IDENTITY_UNAVAILABLE', closeExtra });
+  const { row: started } = await failedStart(launch);
+  assert.equal(started.status, 'failed');
+  const relaunched = await command(launch, 'resume');
+  assert.deepEqual([relaunched.status, relaunched.error, relaunched.diagnostic], ['failed', 'SERVER_IDENTITY_UNAVAILABLE', site], 'retained launching loop');
+  assert.equal(JSON.stringify([resumed, relaunched]).includes('/private/store'), false, 'no raw message reaches a receipt');
+
+  // A site outside the closed set is never copied.
+  const foreign = fixture(t, { closeCode: 'SERVER_IDENTITY_UNAVAILABLE', closeExtra: { site: '/private/store', pidAfter: 'gone' } });
+  await reachRetainedError(foreign);
+  const refused = await command(foreign, 'resume');
+  assert.equal(refused.status, 'failed');
+  assert.equal('diagnostic' in refused, false, JSON.stringify(refused));
 });

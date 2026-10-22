@@ -47,7 +47,9 @@ function fixture(t, script = {}) {
     calls,
     deps: {
       tmpRoot,
-      runtimeOpts: { env: { FAKE_CLI_SCRIPT: scriptPath, FAKE_CLI_LOG: logPath }, terminateKillWaitMs: 300 },
+      // #319 F1: a killed child's close is confirmed within the product's own wait (TERMINATE_KILL_WAIT_MS),
+      // not a 300 ms one a slow Windows runner can miss.
+      runtimeOpts: { env: { FAKE_CLI_SCRIPT: scriptPath, FAKE_CLI_LOG: logPath } },
       exec: (spec) => spawnCli({ ...spec, command: process.execPath, args: [FAKE_CLI, ...spec.args] }),
       loadavg: () => [1, 1, 1],
     },

@@ -73,6 +73,17 @@ export function recordProofEvent({ kind, paths = 0, ms, status, timedOut, self }
   } catch { /* Diagnostics must never change a privacy verdict. */ }
 }
 
+// #319: a diagnostic event whose fields the caller keeps to closed tokens (no path, pid of another
+// process, or message). It goes beside the proof profile, not into it: proofs.jsonl rows are proof
+// calls. The Windows CI job prints the file after its tests, so the job log keeps it.
+export function recordDiagnosticEvent(kind, fields = {}) {
+  const dir = process.env.AI_HOLDEM_PLATFORM_DIAGNOSTICS;
+  if (!dir) return;
+  try {
+    fs.appendFileSync(path.join(dir, 'events.jsonl'), `${JSON.stringify({ t: Date.now(), pid: process.pid, kind, phase: currentPhase, ...fields })}\n`);
+  } catch { /* Diagnostics must never change a verdict. */ }
+}
+
 function powershell(script, spawn = spawnSync, { kind = 'acl', paths = 0 } = {}) {
   const started = performance.now();
   let result;
@@ -198,10 +209,20 @@ export function privateAclAllowed(proof, privateMode = true) {
   return own;
 }
 
+// What a stopped creation child left at the path: nothing, a plain directory (to be proved), another
+// kind of entry (a file or link CreateDirectoryW would have refused as ERROR_ALREADY_EXISTS), or a
+// path that cannot be read.
+function pathAfterStop(file) {
+  try {
+    const st = fs.lstatSync(file);
+    return st.isDirectory() && !st.isSymbolicLink() ? 'directory' : 'other';
+  } catch (error) { return error?.code === 'ENOENT' ? 'absent' : 'unreadable'; }
+}
+
 // Only create missing paths. Native CreateDirectoryW supplies the DACL in the
 // creation call, and ERROR_ALREADY_EXISTS never applies it to somebody else's path.
-export function createPrivateDirectory(file) {
-  if (process.platform !== 'win32') { fs.mkdirSync(file, { mode: 0o700 }); return; }
+export function createPrivateDirectory(file, { platform = process.platform, spawn = spawnSync } = {}) {
+  if (platform !== 'win32') { fs.mkdirSync(file, { mode: 0o700 }); return; }
   const script = `$ErrorActionPreference='Stop';
 Add-Type @'
 using System; using System.Runtime.InteropServices;
@@ -216,14 +237,31 @@ $acl.SetOwner($me); $acl.SetAccessRuleProtection($true,$false);
 $rule=New-Object System.Security.AccessControl.FileSystemAccessRule($me,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); $acl.AddAccessRule($rule);
 $bytes=$acl.GetSecurityDescriptorBinaryForm(); $ptr=[Runtime.InteropServices.Marshal]::AllocHGlobal($bytes.Length);
 try { [Runtime.InteropServices.Marshal]::Copy($bytes,0,$ptr,$bytes.Length); $sa=New-Object PrivateDirectoryNative+SA; $sa.length=[Runtime.InteropServices.Marshal]::SizeOf($sa); $sa.descriptor=$ptr; if (![PrivateDirectoryNative]::CreateDirectory(${quote(file)},[ref]$sa)) { $e=[Runtime.InteropServices.Marshal]::GetLastWin32Error(); if($e -eq 183){exit 2}; exit 1 } } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($ptr) }`;
-  const result = powershell(script, spawnSync, { kind: 'create', paths: 1 });
-  if (result.status === 2) throw Object.assign(new Error('EEXIST'), { code: 'EEXIST' });
-  if (result.status !== 0) throw denied();
+  const create = () => powershell(script, spawn, { kind: 'create', paths: 1 });
+  // #319 F2: a creation child stopped at its timeout (15 s, or what a platform deadline leaves)
+  // does not say whether CreateDirectoryW ran; under runner load Add-Type alone can take that long.
+  // spawnSync returns once the child has exited, so nothing creates the path after this point. A
+  // path that is still absent was never created: create it again, once, under the budget that
+  // remains. A directory that is there now is only proved below, like every created path — no DACL
+  // is ever applied to it, so one that is not provably ours still fails closed. Any other entry is
+  // what CreateDirectoryW would have answered with ERROR_ALREADY_EXISTS.
+  const stopped = (attempt) => attempt.status !== 0 && attempt.error?.code === 'ETIMEDOUT';
+  const exists = () => Object.assign(new Error('EEXIST'), { code: 'EEXIST' });
+  let result = create();
+  if (stopped(result) && pathAfterStop(file) === 'absent') result = create();
+  if (result.status === 2) throw exists();
+  if (result.status !== 0) {
+    const left = stopped(result) ? pathAfterStop(file) : 'failed';
+    if (left === 'other') throw exists();
+    if (left !== 'directory') throw denied();
+  }
   // CreateDirectoryW already applied the DACL. Get-Acl can still ETIMEDOUT
   // under runner load; retry the proof instead of leaving a private dir unverified.
   const deadline = Date.now() + 15_000;
-  while (!isPrivatePath(file)) {
+  while (!isPrivatePath(file, { platform, spawn })) {
     if (Date.now() >= deadline) throw denied();
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    // A proof refused before its child (a path lstat cannot read) never consults the platform
+    // budget; a spent budget ends the retries here as a budget failure, never a privacy verdict.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, platformTimeout(50));
   }
 }

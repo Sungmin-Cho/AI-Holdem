@@ -1171,10 +1171,16 @@ function serveStatic(pathname, res) {
 
 // `actionControlRetryMs` is how long an action keeps retrying CONTROL_BUSY; a slow first
 // attempt is still followed by the minimum retries (#251). `onActionControlBusy` observes
-// each busy attempt. Only tests set either.
-export function startServer({ gameDir, port = 8877, token, studyUrl, controlProtocolVersion, receiptCheckpoint, publishCheckpoint = () => {}, actionControlRetryMs = 250, onActionControlBusy }) {
+// each busy attempt. `actionControlRetryClock` ({ now, sleep }) times those retries instead of
+// the wall clock, so a test can make an attempt slow without a slow runner (#320). Only tests
+// set any of them.
+export function startServer({ gameDir, port = 8877, token, studyUrl, controlProtocolVersion, receiptCheckpoint, publishCheckpoint = () => {}, actionControlRetryMs = 250, onActionControlBusy, actionControlRetryClock = {} }) {
   if (!gameDir) throw new Error('gameDir required');
   if (typeof token !== 'string' || token.length === 0) throw new Error('token required');
+  if (actionControlRetryClock === null || typeof actionControlRetryClock !== 'object'
+    || ['now', 'sleep'].some((key) => actionControlRetryClock[key] !== undefined && typeof actionControlRetryClock[key] !== 'function')) {
+    throw new Error('actionControlRetryClock takes optional now and sleep functions');
+  }
   const trustedStudyUrl = validatedStudyUrl(studyUrl);
   const studyCapability = trustedStudyUrl?.split('#token=')[1];
   const assertNoStudyCapability = (value) => {
@@ -1647,7 +1653,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
         // #235: a pause refusal records a durable per-request cancellation under the
         // same control lock, so the client may release the request and choose again.
         onClosed: (control) => receiptStore.cancel(body, currentDecisionId(), control.controlRevision),
-      }), {timeoutMs:actionControlRetryMs, onBusy:onActionControlBusy});
+      }), {timeoutMs:actionControlRetryMs, onBusy:onActionControlBusy, now:actionControlRetryClock.now, sleep:actionControlRetryClock.sleep});
       else receiptStore.accept(body, current);
       clearHintClients(current);
       deliverSlot();

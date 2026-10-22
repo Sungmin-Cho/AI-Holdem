@@ -259,3 +259,20 @@ export function projectPublicCode(value) {
   if (value === undefined || value === null) return null;
   return typeof value === 'string' && PUBLIC.has(value) ? value : 'UNLISTED';
 }
+
+// #319 F5: SERVER_IDENTITY_UNAVAILABLE is thrown by fourteen checks of the loop, and the code alone
+// never said which. Each throw names its check with one of these tokens, and one that could not read
+// a start time says whether the pid still answered a signal-0 probe just after (`pidAfter`). Only
+// these closed values are copied onto a command's journal row and `receipt()` — never its HTTP
+// receipt, which app-server narrows to requestId, status, error and result.
+export const SERVER_IDENTITY_SITES = Object.freeze([
+  'force-lock-after-stop', 'force-start-time', 'force-term-wait', 'force-kill-wait',
+  'reuse-start-time', 'spawn-start-time', 'startup-start-time',
+  'direct-signal-identity', 'direct-signal-start-time', 'adopted-identity', 'adopted-start-time',
+  'wait-relay-identity', 'wait-relay-lock', 'aborted-relay-start-time',
+]);
+const PID_AFTER = new Set(['alive', 'gone']);
+export function failureDiagnostic(error) {
+  if (error?.code !== 'SERVER_IDENTITY_UNAVAILABLE' || !SERVER_IDENTITY_SITES.includes(error.site)) return null;
+  return { site: error.site, ...(PID_AFTER.has(error.pidAfter) ? { pidAfter: error.pidAfter } : {}) };
+}

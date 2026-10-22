@@ -666,14 +666,24 @@ test('#196 a crash after fresh marker readiness and session-file write but befor
   assert.deepEqual(fs.readFileSync(path.join(gameDir, '.player-sessions.json')), capturedSessions);
 });
 
+// #320 D4: everything this test asserts holds once p2 decides after the retry — p2 keeps its session,
+// p1 has a new one. It used to wait for the next user boundary instead (next hand start, coach,
+// publish) under a fixed 5 s helper wait, and a stalled runner failed it there ("user boundary was
+// not reached"). It now waits for that decision itself and stops the run.
 test('#196 fresh retry recreates only the parked seat in a multi-AI game', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  let afterRetry = false;
+  let p2Decided;
+  const p2DecidedAfterRetry = new Promise((resolve) => { p2Decided = resolve; });
   const adapter = makeAdapter({
     sessionIdFor: (input, n) => `${input.playerId}-session-${n}`,
-    onDecide: async ({ sessionId, message }) => ({
-      raw: sessionId === 'p1-session-1'
-        ? 'invalid'
-        : JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }),
-    }),
+    onDecide: async ({ sessionId, message }) => {
+      if (afterRetry && sessionId.startsWith('p2-')) p2Decided(sessionId);
+      return {
+        raw: sessionId === 'p1-session-1'
+          ? 'invalid'
+          : JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }),
+      };
+    },
   });
   const { gameDir, loop } = await setupAiFirst(t, { adapter, ai: 2 });
   await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
@@ -681,9 +691,20 @@ test('#196 fresh retry recreates only the parked seat in a multi-AI game', { tim
   await loop.retryDecision(loop.pendingDecision.decisionId, {
     freshAuthorization: { source: 'app', requestId: 'only-p1-recreated' },
   });
-  await runUntilUserBoundary(loop, gameDir);
+  afterRetry = true;
+  const running = startRun(loop);
+  const p2Session = await Promise.race([
+    p2DecidedAfterRetry,
+    running.then(() => { throw new Error('the loop stopped before p2 decided after the retry'); }),
+  ]);
+  // The stop lands mid-hand (hand over, coach, next hand): the run ends at the next step it refuses.
+  await loop.requestStop();
+  await running.then(() => {}, (error) => assert.equal(error.code, 'STOPPING', String(error?.stack ?? error)));
   const after = readJson(path.join(gameDir, '.player-sessions.json'));
   assert.deepEqual(adapter.calls.map((call) => call.playerId), ['p1', 'p2', 'p1']);
+  assert.equal(p2Session, before.p2.sessionId, 'p2 decided on its own session');
+  assert.deepEqual(adapter.decideCalls.slice(-2).map((call) => call.sessionId), [after.p1.sessionId, before.p2.sessionId],
+    'after the retry p1 decides on its new session, then p2 on its old one');
   assert.notEqual(after.p1.sessionId, before.p1.sessionId);
   assert.deepEqual(after.p2, before.p2);
 });
@@ -2206,9 +2227,17 @@ test('playing resume without a server lock restarts on the persisted actual port
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).port, persistedPort);
 });
 
-test('successful player probes clear a stale NO_PLAYER_RUNTIME halt at resume boundary', { timeout: 10_000 }, async (t) => {
+// #320: the engine deals its first button at random, so this test took one of three paths to the user
+// boundary — 4 to 15 real children (0 to 3 AI decisions) — under a 10 s guard the platform scale never
+// reached; the long path timed out on Windows. The button is fixed (seats user, p1, p2: one AI decision
+// before the user acts) and the guard follows the rule of its peers below.
+test('successful player probes clear a stale NO_PLAYER_RUNTIME halt at resume boundary', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const init = await initGame(gameDir);
+  const statePath = path.join(gameDir, 'state.json');
+  const engine = readJson(statePath);
+  assert.deepEqual(engine.seats.map((seat) => seat.playerId), ['user', 'p1', 'p2']);
+  fs.writeFileSync(statePath, JSON.stringify({ ...engine, button: 1 }));
   writeLoopStateFixture(gameDir, init.sessionToken, {
     phase: 'bootstrap',
     halt: { code: 'NO_PLAYER_RUNTIME', message: 'old runtime failure' },
@@ -2222,6 +2251,7 @@ test('successful player probes clear a stale NO_PLAYER_RUNTIME halt at resume bo
   assert.equal(resumed.phase, 'playing');
   assert.equal(Object.hasOwn(resumed, 'halt'), false);
   await runUntilUserBoundary(loop, gameDir);
+  assert.equal(adapter.decideCalls.length, 1, 'one AI decision before the user acts');
 });
 
 // This is a recovery/cleanup contract, not a latency assertion. On Windows the
@@ -2298,14 +2328,16 @@ test('requestStop fails closed without signalling an adopted server when identit
   await loop.resume();
 
   startTimeOf.set(() => null);
+  // #319 F5: the failure names the check (a closed site) and that the pid still answered.
   await assert.rejects(
     loop.requestStop(),
-    (error) => error.code === 'SERVER_IDENTITY_UNAVAILABLE',
+    (error) => error.code === 'SERVER_IDENTITY_UNAVAILABLE' && error.site === 'adopted-start-time' && error.pidAfter === 'alive',
   );
   startTimeOf.reset();
   assert.doesNotThrow(() => process.kill(external.child.pid, 0));
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), true);
-  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).cleanupError.code, 'SERVER_IDENTITY_UNAVAILABLE');
+  const { cleanupError } = readJson(path.join(gameDir, 'loop-state.json'));
+  assert.deepEqual([cleanupError.code, cleanupError.site, cleanupError.pidAfter], ['SERVER_IDENTITY_UNAVAILABLE', 'adopted-start-time', 'alive']);
   await loop.requestStop();
   await waitUntilDead(external.child.pid);
   assert.equal(fs.existsSync(path.join(gameDir, 'loop.lock.d')), false);
@@ -2842,7 +2874,12 @@ test('resumed active hand의 새 archivePending은 entry check와 별개로 다�
   assert.equal(readJson(path.join(gameDir, 'loop-state.json')).halt.code, 'repair_failed');
 });
 
-test('playing starts a hand, accepts a tolerant AI decision, and preserves every chip before the 5C user boundary', { timeout: 10_000 }, async (t) => {
+// #320 D5: this test's work is a real hand of engine, publish and relay children (12 and more round
+// trips): no seam can take the clock out without changing what it proves. Windows runs of it took
+// 2.4–4.6 s; both failures hit the unscaled 10 s guard while the next test ran about 4x slower too.
+// The guard now follows the rule of its peers (a recovery contract, not a latency assertion), so the
+// helper's own wait, which names the step it was waiting for, is what reports a real stall.
+test('playing starts a hand, accepts a tolerant AI decision, and preserves every chip before the 5C user boundary', { timeout: 10_000 * WIN32_SCALE }, async (t) => {
   const adapter = makeAdapter({
     onDecide: async ({ message }) => ({
       raw: `결정입니다.\n\`\`\`json\n${JSON.stringify({
@@ -6494,7 +6531,7 @@ test('initial server startTime failure retains ownership after a failed kill and
   try {
     await assert.rejects(
       loop.bootstrap({ ai: 1, stack: 100 }),
-      (error) => error.code === 'SERVER_IDENTITY_UNAVAILABLE',
+      (error) => error.code === 'SERVER_IDENTITY_UNAVAILABLE' && error.site === 'spawn-start-time' && error.pidAfter === 'alive',
     );
 
     assert.equal(killAttempts.length, 2, 'requestStop did not retry the failed startup SIGKILL');
