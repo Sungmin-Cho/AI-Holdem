@@ -671,3 +671,43 @@ test("#319 F5: every SERVER_IDENTITY_UNAVAILABLE in the loop names one site of t
     "each wait for the server's death names its own site");
   assert.deepEqual([...named].sort(), [...SERVER_IDENTITY_SITES].sort());
 });
+
+// #319 F5 (review r2): what receipt() returns of a stored diagnostic is the closed site of the row's own
+// failure or nothing — the journal bytes stay as they were — and a recovered success carries none.
+test("#319 F5: a stored diagnostic is re-checked on read and dropped by a recovered success", { timeout: process.platform === "win32" ? 300000 : 30000 }, async (t) => {
+  const root = createOwnedTempDir("lobby-stored-diagnostic");
+  let manager = createSessionManager({ storeDir: root, resolver });
+  t.after(() => manager.close());
+  await manager.initialize();
+  const journal = path.join(root, ".app", "commands");
+  const site = { site: "reuse-start-time", pidAfter: "gone" };
+  const rows = [
+    ["valid", { status: "failed", error: "SERVER_IDENTITY_UNAVAILABLE", diagnostic: site }, site],
+    ["foreign-site", { status: "failed", error: "SERVER_IDENTITY_UNAVAILABLE", diagnostic: { site: "/private/x", pidAfter: "gone" } }, undefined],
+    ["foreign-pid", { status: "failed", error: "SERVER_IDENTITY_UNAVAILABLE", diagnostic: { site: site.site, pidAfter: 4242 } }, { site: site.site }],
+    ["other-code", { status: "failed", error: "SERVER_ALIVE", diagnostic: site }, undefined],
+    ["not-object", { status: "failed", error: "SERVER_IDENTITY_UNAVAILABLE", diagnostic: "reuse-start-time" }, undefined],
+    ["succeeded", { status: "succeeded", diagnostic: site }, undefined],
+  ];
+  for (const [name, fields, expected] of rows) {
+    const requestId = `stored-${name}`;
+    const file = path.join(journal, `${requestId}.json`);
+    fs.writeFileSync(file, JSON.stringify({ requestId, kind: "pause", payload: "{}", ...fields }));
+    const bytes = fs.readFileSync(file);
+    assert.deepEqual(manager.receipt(requestId).diagnostic, expected, name);
+    assert.deepEqual(fs.readFileSync(file), bytes, `${name}: a read writes nothing`);
+  }
+  // An accepted row recovered at start-up as a success keeps no diagnostic, on disk or on read.
+  const body = { ...payload(manager), setup: normalizeSetup({ aiCount: 1 }) };
+  await manager.close();
+  const accepted = { ...body, payload: JSON.stringify(body), status: "accepted", reservation: { gameId: randomUUID(), selectionVersion: 1 }, diagnostic: site };
+  fs.writeFileSync(path.join(journal, `${body.requestId}.json`), JSON.stringify(accepted));
+  manager = createSessionManager({ storeDir: root, resolver });
+  await manager.initialize();
+  assert.equal(manager.receipt(body.requestId).status, "succeeded");
+  assert.equal("diagnostic" in manager.receipt(body.requestId), false);
+  assert.equal("diagnostic" in JSON.parse(fs.readFileSync(path.join(journal, `${body.requestId}.json`), "utf8")), false);
+  const end = payload(manager, "end");
+  manager.command(end);
+  await succeeded(manager, end.requestId);
+});
