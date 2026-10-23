@@ -1459,7 +1459,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   // the last park and stopping. Values that leave the loop (engine --play-ms,
   // loop-state, the published level clock) are whole milliseconds. A crash loses
   // only the play time since the last checkpoint that was written.
-  const playClock = { baseMs: 0, since: null, timer: null };
+  const playClock = { baseMs: 0, since: null, timer: null, restored: false };
   const playClockNow = opts.playClockNow ?? monotonicNow;
   let timedLevelMinutes;
   const timedLevelsOf = () => {
@@ -1472,20 +1472,33 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   };
   const playNow = () => playClock.baseMs
     + (playClock.since === null ? 0 : Math.max(0, Math.floor(playClockNow() - playClock.since)));
-  // Only the loop that still owns the game records its clock; closing a clock
-  // and cancelling its timer never depend on that.
+  // Only a loop that restored the recorded clock and still owns the game writes
+  // it (an unrestored clock would move the record back). A lost lock is
+  // remembered, so no later write is attempted. A failed write is logged and
+  // retried by the next checkpoint: it only widens what a crash could lose.
+  // Closing a clock and cancelling its timer never depend on any of this.
+  const playClockWritable = () => {
+    if (stopRequested || lockLostPermanently || !playClock.restored || !timedLevelsOf()) return false;
+    if (lockHandle && !ownedLockStillVerified()) {
+      lockLostPermanently = true;
+      return false;
+    }
+    return true;
+  };
   const checkpointPlayClock = () => {
-    if (stopRequested || lockLostPermanently || !timedLevelsOf()) return;
-    writeLoopState({ playClockMs: playNow() });
+    if (!playClockWritable()) return;
+    try { writeLoopState({ playClockMs: playNow() }); }
+    catch (error) {
+      try { log('play-clock-checkpoint-error', { code: error.code ?? 'ERROR' }); } catch { /* the log is best-effort too */ }
+    }
   };
   const openPlayClock = () => {
-    if (playClock.since !== null || stopRequested || !timedLevelsOf()) return;
+    if (playClock.since !== null || stopRequested || !playClock.restored || !timedLevelsOf()) return;
     playClock.since = playClockNow();
     playClock.timer = setInterval(() => {
-      if (playClock.since === null || stopRequested || lockLostPermanently || !ownedLockStillVerified()) return;
-      // A failed checkpoint only widens what a crash could lose; the next one retries.
-      try { checkpointPlayClock(); } catch (error) { log('play-clock-checkpoint-error', { code: error.code ?? 'ERROR' }); }
-    }, PLAY_CLOCK_CHECKPOINT_MS);
+      // Nothing escapes the timer: an ownership probe that throws only skips this tick.
+      try { if (playClock.since !== null) checkpointPlayClock(); } catch { /* next tick retries */ }
+    }, opts.playClockCheckpointMs ?? PLAY_CLOCK_CHECKPOINT_MS);
     playClock.timer.unref?.();
   };
   const closePlayClock = ({ persist = true } = {}) => {
@@ -1499,6 +1512,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     const ms = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : 0);
     const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
     playClock.baseMs = Math.max(playClock.baseMs, ms(readLoopState()?.playClockMs), ms(engine?.levelClock?.playMs));
+    playClock.restored = true;
   };
   const newHandStepArgs = () => ['step', '--new-hand', ...(timedLevelsOf() ? ['--play-ms', String(playNow())] : [])];
   // `levelMs|remainingMs|at|running|sb/bb` for a timed game's live hand view; none
@@ -8336,7 +8350,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         try {
           if (lifecycleStarted && !preserveLoopState && fs.existsSync(loopStatePath)) {
             writeLoopState({ stopping: true, stoppedAt: undefined, stopRequestedAt: isoNow(now), ...deferredRecordAtStop(),
-              ...(timedLevelsOf() ? { playClockMs: playNow() } : {}) });
+              ...(playClock.restored && timedLevelsOf() ? { playClockMs: playNow() } : {}) });
           }
         } catch (error) {
           stopErrors.push(error);

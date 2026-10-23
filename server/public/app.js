@@ -14,7 +14,7 @@ import { DISPLAY_KEYS, currentDisplaySettings, saveDisplaySetting } from './disp
 
 import { decisionAid, decisionAidText } from './decision-aid.js';
 import { compareGuesses, GUESS_CHOICES, hudLine, readOpponentNotes, saveOpponentNote } from './opponent-notes.js';
-import { levelSecondsLeft, formatLevelSeconds, clampRaiseTo, snapRaiseTo, potRaiseTo, bbRaiseTo, defaultRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
+import { levelSecondsLeft, formatLevelSeconds, clampRaiseTo, snapRaiseTo, stepRaiseTo, potRaiseTo, bbRaiseTo, defaultRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
 import { createActionController, formatActionNotice } from './action-controller.js';
 import {formatAmount, formatSignedAmount, readPreference} from './chip-format.js';
 import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint, viewerId, isSpectating, lastActionsBySeat} from './seat-format.js';
@@ -1879,6 +1879,18 @@ $('raise-slider').addEventListener('input', (ev) => {
   const legal = ui.view?.legal;
   if (!legal || pendingAction) return;
   setRaiseTo(amountEditor.state.unit === 'bb' ? snapRaiseTo(ev.target.value, legal, ui.view.blinds?.[1]) : ev.target.value);
+  markAmountValid(true);
+});
+
+// Arrow keys on the big-blind slider step half a big blind: the native one-chip
+// step would be snapped straight back to where it was.
+$('raise-slider').addEventListener('keydown', (ev) => {
+  const legal = ui.view?.legal;
+  if (!legal || pendingAction || amountEditor.state.unit !== 'bb') return;
+  const direction = ev.key === 'ArrowRight' || ev.key === 'ArrowUp' ? 1 : ev.key === 'ArrowLeft' || ev.key === 'ArrowDown' ? -1 : 0;
+  if (!direction) return;
+  ev.preventDefault();
+  setRaiseTo(stepRaiseTo(raiseTo, legal, ui.view.blinds?.[1], direction));
   markAmountValid(true);
 });
 

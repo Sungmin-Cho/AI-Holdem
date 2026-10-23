@@ -19,15 +19,25 @@ const parseClock = (value) => {
 
 // A timed tournament against one policy AI. Each publish moves the play clock
 // by `stepMs` (fractional on purpose: outside values must stay whole ms).
-async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand = 6, onPublish = () => {}} = {}) {
+async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand = 6, failOnce = null} = {}) {
   const root = createOwnedTempDir('holdem-timed-loop');
   const clock = {play: 1000.25};
+  const control = {holdUser: false};
   const publishes = [];
   const loop = createGameLoop({gameDir: root, resolver: async () => ({player: null, upper: null, notices: []}), opts: {
     port: 0, waitMs: 0, opponentRuntime: 'policy', pace: 'instant', resultHoldSec: 0,
-    ...(managed ? {controlProtocolVersion: 1} : {}),
+    ...(managed ? {controlProtocolVersion: 1, playClockCheckpointMs: 10} : {}),
     playClockNow: () => clock.play,
-    onPublishInvoke: (args) => { publishes.push([...args]); clock.play += stepMs; onPublish(args); },
+    onPublishInvoke: (args) => {
+      publishes.push([...args]);
+      clock.play += stepMs;
+      // One injected publisher failure on a clock-carrying publish makes the loop resend.
+      if (failOnce && args.includes('--level-clock') && readJson(root, 'state.json').handNo >= 2) {
+        const code = failOnce;
+        failOnce = null;
+        throw Object.assign(new Error('injected publish failure'), {code});
+      }
+    },
   }});
   await loop.bootstrap({ai: 1, mode: 'tournament', stack: 20000, levelMinutes: 1, opponentRuntime: 'policy'});
   let posting = false;
@@ -40,7 +50,7 @@ async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand =
       const snap = readJson(root, 'ui-snapshot.json');
       if (!stopping && snap.view?.handNo >= stopAtHand) { stopping = true; await loop.requestStop(); return; }
       const legal = snap.view?.legal;
-      if (snap.view?.toAct === 'user' && legal?.decisionId && !sent.has(legal.decisionId) && loop.playState !== 'paused') {
+      if (snap.view?.toAct === 'user' && legal?.decisionId && !sent.has(legal.decisionId) && loop.playState !== 'paused' && !control.holdUser) {
         const lock = readJson(root, 'lock.json');
         const response = await fetch(`http://127.0.0.1:${lock.port}/api/action`, {method: 'POST', headers: {'content-type': 'application/json'},
           body: JSON.stringify({token: lock.sessionToken, decisionId: legal.decisionId, requestId: randomUUID(), action: legal.canCheck ? 'check' : 'fold'})});
@@ -49,7 +59,7 @@ async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand =
     } catch { /* the relay may be between states */ } finally { posting = false; }
   }, 20);
   t.after(() => clearInterval(timer));
-  return {root, loop, clock, publishes, stop: () => { clearInterval(timer); return loop.requestStop(); }};
+  return {root, loop, clock, control, publishes, stop: () => { clearInterval(timer); return loop.requestStop(); }};
 }
 
 test('CLI and setup carry the level minutes to a tournament', () => {
@@ -62,7 +72,7 @@ test('CLI and setup carry the level minutes to a tournament', () => {
 });
 
 test('a timed tournament rises one level per hand after each level\'s play time', {timeout: 120000}, async (t) => {
-  const f = await timedFixture(t);
+  const f = await timedFixture(t, {failOnce: 'ATTEMPT_PENDING'});
   await f.loop.run();
   const engine = readJson(f.root, 'state.json');
   assert.equal(engine.config.levelMinutes, 1);
@@ -88,7 +98,10 @@ test('a timed tournament rises one level per hand after each level\'s play time'
     assert.equal(clock.running, '1');
     assert.ok(Number.isFinite(Date.parse(clock.at)));
   }
-  assert.ok(f.publishes.filter((args) => args.includes('--retry')).every((args) => !args.includes('--level-clock')));
+  // A resend carries the recorded body only, never a fresh clock.
+  const retries = f.publishes.filter((args) => args.includes('--retry'));
+  assert.ok(retries.length >= 1, 'the injected failure made the loop resend');
+  assert.ok(retries.every((args) => !args.includes('--level-clock')));
   const snap = readJson(f.root, 'ui-snapshot.json');
   if (snap.view && !snap.view.gameOver) {
     assert.deepEqual(snap.levelClock.nextBlinds, blindsForLevel(engine.level + 1, engine.config.blinds0));
@@ -102,15 +115,28 @@ test('paused time does not count toward the level and the clock resumes after th
   running.catch(() => {});
   // Wait for hand 2, then pause and spend ten minutes parked.
   for (let i = 0; i < 400 && !(readJson(f.root, 'state.json').handNo >= 2); i++) await new Promise((r) => setTimeout(r, 25));
+  // While the clock runs, checkpoints follow it without any publish: hold the
+  // user's turn so the loop only waits, then move the clock.
+  f.control.holdUser = true;
+  for (let i = 0; i < 400 && readJson(f.root, 'ui-snapshot.json').view?.toAct !== 'user'; i++) await new Promise((r) => setTimeout(r, 10));
+  await new Promise((r) => setTimeout(r, 50));
+  const quietPublishes = f.publishes.length;
+  const beforeTick = readJson(f.root, 'loop-state.json').playClockMs;
+  f.clock.play += 7_000;
+  for (let i = 0; i < 200 && !(readJson(f.root, 'loop-state.json').playClockMs >= beforeTick + 7_000); i++) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(f.publishes.length, quietPublishes, 'no publish happened while the user held the turn');
+  assert.ok(readJson(f.root, 'loop-state.json').playClockMs >= beforeTick + 7_000, 'the running clock is checkpointed by its timer');
   const paused = await f.loop.pause();
   assert.equal(paused.state, 'paused');
   pauseAt = readJson(f.root, 'loop-state.json').playClockMs;
   assert.ok(Number.isSafeInteger(pauseAt));
   const level = readJson(f.root, 'state.json').level;
   f.clock.play += 10 * MINUTE;
-  await new Promise((r) => setTimeout(r, 50));
+  // Many checkpoint intervals pass while parked: the timer is gone with the clock.
+  await new Promise((r) => setTimeout(r, 150));
   assert.equal(readJson(f.root, 'loop-state.json').playClockMs, pauseAt, 'a parked loop writes no play time');
   const handBefore = readJson(f.root, 'state.json').handNo;
+  f.control.holdUser = false;
   await f.loop.resumePlay();
   for (let i = 0; i < 400 && !(readJson(f.root, 'state.json').handNo > handBefore); i++) await new Promise((r) => setTimeout(r, 25));
   const engine = readJson(f.root, 'state.json');
@@ -131,9 +157,18 @@ test('a resumed timed game restores its play time and never runs the clock back'
   await f.loop.run();
   // run() returns on the stop request; the lock is released when the stop completes.
   await f.loop.requestStop();
-  const saved = readJson(f.root, 'loop-state.json').playClockMs;
+  const recorded = readJson(f.root, 'loop-state.json').playClockMs;
   const savedEngine = readJson(f.root, 'state.json').levelClock;
-  assert.ok(saved >= savedEngine.playMs);
+  assert.ok(recorded >= savedEngine.playMs);
+  // A checkpoint that got ahead of the engine's last hand start.
+  const saved = recorded + 50_000;
+  fs.writeFileSync(path.join(f.root, 'loop-state.json'), JSON.stringify({...readJson(f.root, 'loop-state.json'), playClockMs: saved}));
+  // A loop that stops before it restores the clock writes no play time.
+  const early = createGameLoop({gameDir: f.root, resolver: async () => ({player: null, upper: null, notices: []}), opts: {
+    port: 0, waitMs: 0, opponentRuntime: 'policy', pace: 'instant', resultHoldSec: 0, playClockNow: () => 0}});
+  await early.resume();
+  await early.requestStop();
+  assert.equal(readJson(f.root, 'loop-state.json').playClockMs, saved);
   // A new loop over the same game, its own clock starting from zero.
   const playStart = {now: 0};
   const resumed = createGameLoop({gameDir: f.root, resolver: async () => ({player: null, upper: null, notices: []}), opts: {

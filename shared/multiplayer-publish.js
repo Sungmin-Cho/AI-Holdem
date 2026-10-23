@@ -232,7 +232,7 @@ export function validateLevelClock(clock) {
     || typeof clock.at !== 'string' || !Number.isFinite(Date.parse(clock.at))
     || typeof clock.running !== 'boolean'
     || !Array.isArray(clock.nextBlinds) || clock.nextBlinds.length !== 2
-    || !clock.nextBlinds.every(value => int(value) && value > 0) || clock.nextBlinds[0] > clock.nextBlinds[1]) fail('BAD_LEVEL_CLOCK');
+    || !clock.nextBlinds.every(value => Number.isSafeInteger(value) && value > 0) || clock.nextBlinds[0] > clock.nextBlinds[1]) fail('BAD_LEVEL_CLOCK');
   return clock;
 }
 

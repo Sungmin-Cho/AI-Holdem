@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createAmountEditor,parseBbInput,formatBbInput} from '../server/public/amount-editor.js';
-import {snapRaiseTo} from '../server/public/table-controls.js';
+import {snapRaiseTo,stepRaiseTo} from '../server/public/table-controls.js';
 
 const legal={decisionId:'d1',minRaiseTo:100,maxRaiseTo:1000};
 const bbEditor=()=>{const editor=createAmountEditor();editor.setUnit('bb',50,legal);editor.adopt(legal,125);return editor;};
@@ -113,4 +113,23 @@ test('slider values snap to half big blinds between exact legal ends',()=>{
   assert.equal(snapRaiseTo(110,wide,50),100);
   assert.equal(snapRaiseTo(40,{minRaiseTo:30,maxRaiseTo:500},25),38);
   assert.equal(snapRaiseTo('x',wide,50),100);
+});
+
+test('slider keys move one half big blind at a time and reach the exact ends',()=>{
+  const wide={minRaiseTo:100,maxRaiseTo:4987};
+  assert.equal(stepRaiseTo(125,wide,50,1),150);
+  assert.equal(stepRaiseTo(125,wide,50,-1),100);
+  assert.equal(stepRaiseTo(130,wide,50,1),150);
+  assert.equal(stepRaiseTo(130,wide,50,-1),125);
+  assert.equal(stepRaiseTo(4975,wide,50,1),4987);
+  assert.equal(stepRaiseTo(4987,wide,50,-1),4975);
+  assert.equal(stepRaiseTo(4987,wide,50,1),4987);
+  assert.equal(stepRaiseTo(100,wide,50,-1),100);
+  // Odd big blind: half steps round to chips and always move.
+  const odd={minRaiseTo:30,maxRaiseTo:500};
+  assert.equal(stepRaiseTo(38,odd,25,-1),30);
+  assert.equal(stepRaiseTo(38,odd,25,1),50);
+  assert.equal(stepRaiseTo(37,odd,25,1),38);
+  let at=30,seen=[];for(let i=0;i<5;i++){at=stepRaiseTo(at,odd,25,1);seen.push(at);}
+  assert.deepEqual(seen,[38,50,63,75,88]);
 });

@@ -55,7 +55,9 @@ test('new lobby games choose the hand result display time apart from the AI pace
     assert.match(html,new RegExp(`<option value="${value}"[^>]*>${label}</option>`));
   }
   assert.match(html, /<option value="4" selected>4초<\/option>/);
-  assert.match(js, /setup\.resultHoldSec = Number\(data\.get\("resultHoldSec"\)\)/);
+  assert.match(js, /if \(data\.get\("resultHoldSec"\) !== null\) setup\.resultHoldSec = Number\(data\.get\("resultHoldSec"\)\)/);
+  // A valid prefill outside the listed choices is added, never mapped to another one.
+  assert.match(js, /key === "resultHoldSec" && field\.options/);
 });
 
 test('lobby tournaments level up by time by default with a hand-period alternative', () => {

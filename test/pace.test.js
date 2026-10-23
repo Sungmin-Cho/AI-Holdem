@@ -49,7 +49,8 @@ test('the level clock is a closed public envelope that reaches every seat', asyn
   const clock = {levelMs:60000,remainingMs:0,at:'2026-01-01T00:00:00.000Z',running:false,nextBlinds:[25,50]};
   assert.deepEqual(validateLevelClock(clock), clock);
   for (const value of [undefined, null]) assert.equal(validateLevelClock(value), value);
-  for (const bad of [[], 'x', {...clock,levelMs:3600001}, {...clock,remainingMs:-1}, {...clock,nextBlinds:[25]}, {...clock,nextBlinds:[25,50,100]}]) {
+  for (const bad of [[], 'x', {...clock,levelMs:3600001}, {...clock,remainingMs:-1}, {...clock,nextBlinds:[25]}, {...clock,nextBlinds:[25,50,100]},
+    {...clock,nextBlinds:[2**53,2**53]}]) {
     assert.throws(() => validateLevelClock(bad), {code:'BAD_LEVEL_CLOCK'});
   }
   assert.deepEqual(projectForSeat({views:{h1:{handNo:1}},levelClock:clock},'h1').levelClock, clock);

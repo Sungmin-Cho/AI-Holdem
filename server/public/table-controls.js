@@ -18,6 +18,26 @@ export function snapRaiseTo(value, legal, bb) {
   return step > 0 ? clampRaiseTo(Math.round(n / step) * step, legal) : clampRaiseTo(n, legal);
 }
 
+/** One slider key press in big-blind mode: the next half big blind above or
+ * below `current` (never the same chip amount), ending at the exact legal ends. */
+export function stepRaiseTo(current, legal, bb, direction) {
+  const max = Math.max(0, Number(legal.maxRaiseTo) || 0);
+  const min = Math.min(max, Math.max(0, Number(legal.minRaiseTo) || 0));
+  const n = Math.round(Number(current));
+  const step = Number(bb) / 2;
+  if (!Number.isFinite(n) || !(step > 0)) return clampRaiseTo(n, legal);
+  if (direction > 0) {
+    let k = Math.floor(n / step) + 1;
+    while (Math.round(k * step) <= n) k += 1;
+    const next = Math.round(k * step);
+    return next >= max ? max : clampRaiseTo(next, legal);
+  }
+  let k = Math.ceil(n / step) - 1;
+  while (k > 0 && Math.round(k * step) >= n) k -= 1;
+  const previous = Math.round(k * step);
+  return previous <= min ? min : clampRaiseTo(previous, legal);
+}
+
 export function potRaiseTo(legal, actorBet, fraction) {
   return clampRaiseTo(actorBet + legal.callAmount + fraction * (legal.potTotal + legal.callAmount), legal);
 }

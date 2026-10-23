@@ -21,10 +21,12 @@ test('actual lobby retains the terminal document then clears record layout for a
 });
 test('actual participant poll preserves iframe identity through stopping and ending, and creates a terminal cold document',async()=>{
  const dom=elements(),source=fs.readFileSync(new URL('../server/public/join.js',import.meta.url),'utf8');let state;
- const context={...dom,sessionStorage:{getItem:()=> 'fixture'},fetch:async()=>({ok:true,json:async()=>state}),polling:false,fails:0,latest:null,tableIdentity:null,summaryIdentity:null,finalSummary:null,finalPanelKey:null,tableGame:null,paintFinal(){},loadSummary(){},paintProvider(){},paintWaiting(){},bindBridge(){}};
+ const context={...dom,sessionStorage:{getItem:()=> 'fixture'},fetch:async()=>({ok:true,json:async()=>state}),polling:false,fails:0,latest:null,tableIdentity:null,summaryIdentity:null,finalSummary:null,finalPanelKey:null,tableGame:null,paintFinal(){},loadSummary(){},paintProvider(){},paintWaiting(){},bindBridge(){},repaintContext(){context.repaints=(context.repaints??0)+1;}};
  vm.createContext(context);vm.runInContext(source.slice(source.indexOf('async function poll()'),source.indexOf("$('join-form').onsubmit")),context);
  const poll=async (status,playerId='h1',roomRole='seated')=>{state={me:{roomRole,playerId,viewerGeneration:1},room:{status:'locked'},game:{state:status,gameId:'one',gameEpoch:'epoch',final:['completed','ended'].includes(status)?{stacks:[]}:null}};await context.poll();assert.equal(context.fails,0);};
  await poll('playing');const frame=dom.$('table'),src=frame.src;
+ // Each poll repaints the header context, so its level clock follows a pause the table cannot see.
+ const repaints=context.repaints;await poll('paused');assert.ok(context.repaints>repaints);
  for(const status of ['pausing','paused','stopping','finalizing','completed','ended']){await poll(status);assert.equal(dom.$('table'),frame);assert.equal(frame.src,src);assert.equal(dom.$('playing').hidden,false);if(['completed','ended'].includes(status))assert.equal(dom.$('final').hidden,false);}
  context.tableIdentity=null;dom.$('table').removeAttribute('src');await poll('ended');assert.match(dom.$('table').src,/terminal=1/);
  await poll('completed',null);assert.equal(dom.$('waiting').hidden,false);assert.equal(dom.$('playing').hidden,true);assert.equal(dom.$('final').hidden,true);assert.equal(dom.$('table').getAttribute('src'),null);

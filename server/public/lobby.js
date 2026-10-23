@@ -349,7 +349,13 @@ async function refresh() {
       if (key === "mode") {
         for (const radio of field) radio.checked = radio.value === value;
       } else if (field.type === "checkbox") field.checked = value;
-      else field.value = String(value);
+      else {
+        // A valid result time the menu does not list gets its own choice
+        // rather than silently becoming another one.
+        if (key === "resultHoldSec" && field.options && ![...field.options].some((option) => option.value === String(value)))
+          field.add(new Option(`${value}초`, String(value)));
+        field.value = String(value);
+      }
     }
     if (defaults.levelEvery !== undefined) form.elements.levelMode.value = "hands";
     else if (defaults.levelMinutes !== undefined) form.elements.levelMode.value = "time";
@@ -799,7 +805,7 @@ function setupFromForm() {
         "pace",
       ].map((k) => [k, data.get(k)]),
     );
-  setup.resultHoldSec = Number(data.get("resultHoldSec"));
+  if (data.get("resultHoldSec") !== null) setup.resultHoldSec = Number(data.get("resultHoldSec"));
   // The AI wait budget only exists for remote players; policy games use the
   // server defaults (and their hidden inputs can never block a start).
   const remote = data.get("opponentRuntime") !== "policy";
