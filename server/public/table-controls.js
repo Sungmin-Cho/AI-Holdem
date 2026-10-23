@@ -6,6 +6,18 @@ export function clampRaiseTo(value, legal) {
   return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : min;
 }
 
+/** A slider position in big-blind mode: the nearest half big blind, except
+ * that the legal ends stay exact (an all-in is rarely a whole number of BB). */
+export function snapRaiseTo(value, legal, bb) {
+  const max = Math.max(0, Number(legal.maxRaiseTo) || 0);
+  const min = Math.min(max, Math.max(0, Number(legal.minRaiseTo) || 0));
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n) || n <= min) return min;
+  if (n >= max) return max;
+  const step = Number(bb) / 2;
+  return step > 0 ? clampRaiseTo(Math.round(n / step) * step, legal) : clampRaiseTo(n, legal);
+}
+
 export function potRaiseTo(legal, actorBet, fraction) {
   return clampRaiseTo(actorBet + legal.callAmount + fraction * (legal.potTotal + legal.callAmount), legal);
 }

@@ -14,12 +14,12 @@ import { DISPLAY_KEYS, currentDisplaySettings, saveDisplaySetting } from './disp
 
 import { decisionAid, decisionAidText } from './decision-aid.js';
 import { compareGuesses, GUESS_CHOICES, hudLine, readOpponentNotes, saveOpponentNote } from './opponent-notes.js';
-import { clampRaiseTo, potRaiseTo, bbRaiseTo, defaultRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
+import { clampRaiseTo, snapRaiseTo, potRaiseTo, bbRaiseTo, defaultRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
 import { createActionController, formatActionNotice } from './action-controller.js';
 import {formatAmount, formatSignedAmount, readPreference} from './chip-format.js';
 import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint, viewerId, isSpectating, lastActionsBySeat} from './seat-format.js';
 import {aggregatePot, showPotBreakdown, logBlindContexts} from './table-presentation.js';
-import {createAmountEditor, parseChipInput} from './amount-editor.js';
+import {createAmountEditor} from './amount-editor.js';
 import {createDialogController} from './dialog-controller.js';
 import {captureHandPrior, updateHandResult, handResultFrame, trackLatestResult} from './hand-result.js';
 import {renderHandResultCard} from './hand-result-view.js';
@@ -794,7 +794,8 @@ function writeAmountField(value) {
 function markAmountValid(valid) {
   $('raise-amount').closest('.amount-field').classList.toggle('is-invalid', !valid);
   $('raise-amount').setAttribute('aria-invalid', String(!valid));
-  $('amount-error').textContent = !valid ? '칩 정수와 합법 범위를 확인해 주세요.' : amountEditor.state.pendingCorrection ? '합법 범위로 보정했습니다. 레이즈를 눌러 금액을 확인해 주세요.' : amountEditor.state.confirmedCorrection ? `보정된 ${amountEditor.state.value.toLocaleString('ko-KR')} 칩을 확인했습니다. 레이즈를 다시 눌러 제출하세요.` : '';
+  const malformed = amountEditor.state.unit === 'bb' ? 'BB 숫자(소수 둘째 자리까지)와 합법 범위를 확인해 주세요.' : '칩 정수와 합법 범위를 확인해 주세요.';
+  $('amount-error').textContent = !valid ? malformed : amountEditor.state.pendingCorrection ? '합법 범위로 보정했습니다. 레이즈를 눌러 금액을 확인해 주세요.' : amountEditor.state.confirmedCorrection ? `보정된 금액(${amountText(amountEditor.state.value)})을 확인했습니다. 레이즈를 다시 눌러 제출하세요.` : '';
   if ($('amount-error').textContent && matchMedia('(max-width:600px)').matches) {
     $('action-bar').classList.add('options-expanded');
     $('action-options-toggle').setAttribute('aria-expanded','true');
@@ -819,6 +820,25 @@ function commitAmount() {
   $('raise-slider').value = String(raiseTo);
   setBtnLabel($('btn-raise'), raiseLabel(raiseTo), raiseTo);
   markAmountValid(!state.invalid);
+}
+
+// The field reads and writes the display unit: big blinds when this view has one.
+function syncAmountUnit(legal, view = ui.view) {
+  const before = amountEditor.state.unit;
+  const state = amountEditor.setUnit(displayUnit, view?.blinds?.[1], legal);
+  if (state.unit !== before && legal.decisionId === lastDecisionId) {
+    // Same decision, new unit: the amount is unchanged, its text and the
+    // malformed-input message follow the unit.
+    if (!state.invalid) raiseTo = state.value;
+    const input = $('raise-amount');
+    if (document.activeElement !== input || !state.invalid) input.value = state.text;
+    markAmountValid(!state.invalid);
+  }
+  const unit = state.unit === 'bb' ? 'BB' : '칩';
+  const input = $('raise-amount');
+  $('raise-amount-label').textContent = `총액 (${unit})`;
+  input.setAttribute('aria-label', `이번 스트리트 레이즈 총액 직접 입력 (${unit})`);
+  input.setAttribute('inputmode', unit === 'BB' ? 'decimal' : 'numeric');
 }
 
 function adoptDecision(legal, view = ui.view) {
@@ -878,6 +898,7 @@ function paintActionBar(view) {
   const cards=(view.myCards??[]).map(code=>cardLabel(formatCard(code))).join(', ');
   $('action-summary').textContent = `내 스택 ${amountText(hero?.stack)} · 팟 ${pot.kind==='ready' ? amountText(pot.total) : '정보 확인 중'} · 내 카드 ${cards}`;
   paintDecisionAid(view);
+  syncAmountUnit(legal, view);
   adoptDecision(legal, view);
 
   const shortAllIn = legal.minRaiseTo > legal.maxRaiseTo;
@@ -1836,8 +1857,9 @@ $('btn-raise').addEventListener('click', () => {
 $('btn-allin-only').addEventListener('click', () => sendAction('raise', ui.view?.legal?.maxRaiseTo));
 
 $('raise-slider').addEventListener('input', (ev) => {
-  if (!ui.view?.legal || pendingAction) return;
-  setRaiseTo(ev.target.value);
+  const legal = ui.view?.legal;
+  if (!legal || pendingAction) return;
+  setRaiseTo(amountEditor.state.unit === 'bb' ? snapRaiseTo(ev.target.value, legal, ui.view.blinds?.[1]) : ev.target.value);
   markAmountValid(true);
 });
 
@@ -1862,7 +1884,7 @@ $('raise-panel').addEventListener('click', (ev) => {
 
 // 직접 입력 — 유효 값은 전체 선택하고, 잘못된 원문과 보정 확인 상태는 보존한다.
 $('raise-amount').addEventListener('focus', (ev) => {
-  if(amountEditor.state.invalid || parseChipInput(ev.target.value)!==raiseTo)return;
+  if(amountEditor.state.invalid || amountEditor.read(ev.target.value)!==raiseTo)return;
   ev.target.value = amountEditor.state.text;
   ev.target.select();
 });
@@ -1888,7 +1910,7 @@ $('raise-amount').addEventListener('keydown', (ev) => {
   if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
   ev.preventDefault();
   const step = ui.view?.blinds?.[1] ?? 1;
-  const base = amountEditor.state.invalid ? raiseTo : (parseChipInput(ev.target.value) ?? raiseTo);
+  const base = amountEditor.state.invalid ? raiseTo : (amountEditor.read(ev.target.value) ?? raiseTo);
   setRaiseTo(base + (ev.key === 'ArrowUp' ? step : -step));
   markAmountValid(true);
 });
