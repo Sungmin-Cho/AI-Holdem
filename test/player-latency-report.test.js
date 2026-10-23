@@ -132,8 +132,11 @@ test('unanswered calls are counted by where they ended, and error events by clos
   const codesIn = (text, pattern) => [...text.matchAll(pattern)].map((match) => match[1]);
   const gameLoop = source('../tools/game-loop.js');
   const budget = source('../shared/player-budget.js');
-  const adapter = codesIn(source('../tools/player-runtime.js'), /\b(?:runtimeError|grokFail)\('([A-Z][A-Z0-9_]+)'/g);
-  const home = codesIn(source('../tools/runtime-home.js'), /\bcoded\('([A-Z][A-Z0-9_]+)'/g);
+  // 호출이 여러 줄이거나 큰따옴표여도 잡는다.
+  const adapter = codesIn(source('../tools/player-runtime.js'), /\b(?:runtimeError|grokFail)\(\s*['"]([A-Z][A-Z0-9_]+)['"]/g);
+  const home = codesIn(source('../tools/runtime-home.js'), /\bcoded\(\s*['"]([A-Z][A-Z0-9_]+)['"]/g);
+  assert.deepEqual(codesIn('runtimeError(\n  "MULTI_LINE_CODE", x); grokFail( \'SPACED\')', /\b(?:runtimeError|grokFail)\(\s*['"]([A-Z][A-Z0-9_]+)['"]/g),
+    ['MULTI_LINE_CODE', 'SPACED'], 'the scanner reads multi-line, spaced and double-quoted calls');
   const loopSets = [...gameLoop.matchAll(/const (?:FATAL_RUNTIME_CODES|RESTORED_SESSION_REJECTION_CODES) = new Set\(\[([^\]]*)\]/g)]
     .flatMap((match) => codesIn(match[1], /'([A-Z_]+)'/g));
   const classified = codesIn(budget.slice(budget.indexOf('export function playerFailureCategory')), /'([A-Z_]+)'/g);
