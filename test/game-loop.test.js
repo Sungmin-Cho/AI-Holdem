@@ -9284,7 +9284,7 @@ test('#325 a stop that completes while an interrupted wait is still asleep wins:
   await loop.requestStop();
   const afterStop = fs.readFileSync(statePath);
   releaseWait();
-  await interrupting;
+  assert.deepEqual(await interrupting, { interrupted: true }, 'the stop owner records the interrupted decision');
   assert.equal(await settled, null);
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.deepEqual(fs.readFileSync(statePath), afterStop, 'the decision path wrote after the stop completed');
