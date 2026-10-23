@@ -93,6 +93,9 @@ test('unanswered calls are counted by where they ended, and error events by clos
       // 옛 행(진단 필드 없음)과 timing 없는 행은 위치를 모른다.
       call(5, 'decision', 900, { callNo: 1, code: 'CLI_FAILED', category: 'transport', timing: t({}) }),
       call(6, 'decision', 900, { callNo: 1, code: 'CLI_FAILED', category: 'transport' }),
+      // 코드·분류·신호는 닫힌 목록으로만 남는다: 형식만 맞는 신호, 카드 같은 짧은 문자열, 모르는 분류.
+      call(8, 'decision', 900, { callNo: 1, code: 'As Kd', category: 'SECRET-CAT', timing: t({ exitSignal: 'SIGSECRET' }) }),
+      call(9, 'decision', 900, { callNo: 1, code: 'ENOENT', category: 'transport', timing: t({ exitSignal: 'SIGKILL\n' }) }),
       // 허용 밖 값은 남지 않는다. timeout은 outliers에 timing째 실리므로 투영 자체를 본다.
       // `__proto__` 키는 객체 리터럴로는 JSON에 실리지 않으므로 원시 줄에 넣는다.
       JSON.stringify(call(7, 'decision', 300000, { callNo: 1, code: 'TIMEOUT', category: 'timeout', censored: true, timing: t({
@@ -104,10 +107,12 @@ test('unanswered calls are counted by where they ended, and error events by clos
   const report = buildLatencyReport(root);
   const [decision] = report.groups;
   assert.equal(decision.kind, 'decision');
-  assert.deepEqual(decision.outcomes, { answered: 1, timeout: 2, interrupted: 0, failed: { transport: 4 } });
+  assert.deepEqual(decision.outcomes, { answered: 1, timeout: 2, interrupted: 0, failed: { transport: 5, other: 1 } });
   assert.deepEqual(decision.failureSignatures, [
     { code: 'CLI_FAILED', category: 'transport', turnEnd: 'failed', turnError: 'capacity', exitCode: 1, exitSignal: null, calls: 2 },
     { code: 'CLI_FAILED', category: 'transport', turnEnd: null, turnError: null, exitCode: null, exitSignal: null, calls: 2 },
+    { code: 'other', category: 'other', turnEnd: null, turnError: null, exitCode: null, exitSignal: null, calls: 1 },
+    { code: 'other', category: 'transport', turnEnd: null, turnError: null, exitCode: null, exitSignal: null, calls: 1 },
     { code: 'TIMEOUT', category: 'timeout', turnEnd: null, turnError: null, exitCode: null, exitSignal: 'SIGKILL', calls: 1 },
     { code: 'TIMEOUT', category: 'timeout', turnEnd: null, turnError: null, exitCode: null, exitSignal: null, calls: 1 },
   ]);
@@ -120,9 +125,10 @@ test('unanswered calls are counted by where they ended, and error events by clos
   assert.deepEqual(Object.keys(hostile.timing.errorEvents), ['other']);
   assert.deepEqual(decision.errorEvents, { code_mode_unavailable: 1, capacity: 2, other: 2 });
   const text = JSON.stringify(report);
-  assert.doesNotMatch(text, /SECRET|polluted/);
+  assert.doesNotMatch(text, /SECRET|polluted|As Kd|ENOENT|SIGKILL\\n/);
   assert.equal({}.polluted, undefined);
   const lines = formatLatencyReport(report);
+  assert.doesNotMatch(lines, /SECRET|As Kd|ENOENT/);
   assert.match(lines, /응답 없음 CLI_FAILED\/transport · turn failed\[capacity\] · exit 1 ×2/);
   assert.match(lines, /응답 없음 TIMEOUT\/timeout · turn \? · exit SIGKILL ×1/);
   assert.match(lines, /응답 없음 TIMEOUT\/timeout · turn \? · exit \? ×1/);

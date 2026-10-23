@@ -30,7 +30,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { ownedIdentityStatus, serverProcessStartTime } from '../engine/state.js';
 import { createListenerOwnedBy } from './listener-ownership.js';
-import { buildLatencyReport, formatSignature, projectTiming } from './player-latency-report.js';
+import { buildLatencyReport, formatSignature, projectCallCategory, projectCallCode, projectTiming, WARMUP_PURPOSES } from './player-latency-report.js';
 import { RUNTIME_TABLE } from './player-runtime.js';
 import { inspectStudyService, stopStudyService } from './study-service.js';
 
@@ -281,7 +281,9 @@ export function scanLoopLog(file, { limit = OBSERVATION_LIMITS.failureList } = {
       : elapsedMs !== null && elapsedMs > OBSERVATION_CRITERIA.warmupReportMs;
     if (row.code !== 'RESPONSE_RECEIVED' || over) {
       if (out.failures.length < limit) {
-        out.failures.push({ at: short(row.at, 40), purpose: short(row.purpose), code: short(row.code), category: short(row.category), elapsedMs, timing });
+        // 호출 종류·code·분류는 닫힌 목록으로만 싣는다(목록 밖은 'other').
+        const purpose = row.purpose == null ? null : ['decision', ...WARMUP_PURPOSES].includes(row.purpose) ? row.purpose : 'other';
+        out.failures.push({ at: short(row.at, 40), purpose, code: projectCallCode(row.code), category: projectCallCategory(row.category), elapsedMs, timing });
       } else out.failuresOmitted += 1;
     }
   }

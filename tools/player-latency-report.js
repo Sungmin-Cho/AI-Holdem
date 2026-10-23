@@ -14,14 +14,15 @@
 //     포함된 **상한 대리값**이지 호출 지연이 아니다. `bootstrap-playing`이 없는 시작은 분위수에 넣지 않고 따로 센다.
 //   - 쓰는 중인 마지막 줄·손상 줄·상한을 넘는 줄과 파일은 건너뛰고 개수만 센다.
 //   - 실패 위치(#312 진단): 응답 없는 호출은 (code, 분류, turn 종료 종류, turn.failed 분류, exit 코드·신호) 서명별로 세고,
-//     error 이벤트는 닫힌 분류별로 더한다. 이 값은 어댑터 timing에만 있으므로 그 기록이 없는 옛 행은 null이다.
+//     error 이벤트는 닫힌 분류별로 더한다. 위치 값은 어댑터 timing에만 있으므로 그 기록이 없는 옛 행은 null이다.
+//     호출의 code·분류도 닫힌 목록으로만 남는다(목록 밖은 `other`).
 // 이 집계는 관측 기록의 요약이다. 분포 보장·안정성 증명이 아니다.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_PLAYER_BUDGET } from '../shared/player-budget.js';
 import { lstatExact, fstatExact } from '../shared/exact-stat.js';
-import { ERROR_CLASS_NAMES } from './cli-phase-timing.js';
+import { ERROR_CLASS_NAMES, SIGNAL_NAMES } from './cli-phase-timing.js';
 
 export const REPORT_SCHEMA = 'player-latency-report/1';
 export const REPORT_LIMITS = Object.freeze({ fileBytes: 64 * 1024 * 1024, lineBytes: 1024 * 1024, outliers: 20 });
@@ -38,7 +39,21 @@ const finite = (value) => (typeof value === 'number' && Number.isFinite(value) ?
 const text = (value, max = 64) => (typeof value === 'string' && value.length <= max ? value : null);
 const oneOf = (value, allowed) => (allowed.includes(value) ? value : null);
 const TURN_ENDS = Object.freeze(['completed', 'failed']);
-const SIGNAL_NAME = /^SIG[A-Z0-9]{1,12}$/;
+// 플레이어 호출이 끝나는 코드의 닫힌 목록: 응답, 어댑터(`player-runtime.js`)가 던지는 코드, 결정 분류
+// (`shared/player-budget.js`)가 이름으로 아는 코드, 루프가 세션 복구에서 던지는 코드. 분류는 그 함수의 값과 `response`다.
+// 기록에 있는 다른 값(Node 오류 코드 포함)은 `other`, 없으면 null이다 — 길이만 맞는 문자열을 그대로 내보내지 않는다.
+export const PLAYER_CALL_CODES = Object.freeze([
+  'RESPONSE_RECEIVED', 'CLI_FAILED', 'TIMEOUT', 'INTERRUPTED', 'NOT_READY', 'NO_SESSION', 'INVALID_SESSION_ID',
+  'SESSION_NOT_FOUND', 'SESSION_EXPIRED', 'CHILD_CLOSE_UNCONFIRMED', 'CHILD_SIGNAL_FAILED', 'IDENTITY_UNAVAILABLE',
+  'ILLEGAL_ACTION', 'INVALID_DECISION', 'RUNTIME_NOT_VERIFIED', 'RUNTIME_DISPOSING', 'RUNTIME_CLOSED', 'CWD_NOT_ISOLATED',
+  'NO_PLAYER_RUNTIME',
+]);
+export const PLAYER_CALL_CATEGORIES = Object.freeze([
+  'response', 'transport', 'timeout', 'interrupted', 'termination', 'session', 'illegal_action', 'response_format',
+]);
+const closedOrOther = (value, allowed) => (value === undefined || value === null ? null : allowed.includes(value) ? value : 'other');
+export const projectCallCode = (value) => closedOrOther(value, PLAYER_CALL_CODES);
+export const projectCallCategory = (value) => closedOrOther(value, PLAYER_CALL_CATEGORIES);
 
 // timing은 숫자·불리언과 닫힌 이름만 남긴다. 분류별 수는 알려진 분류 이름의 양의 정수만이다.
 export function projectTiming(raw) {
@@ -57,7 +72,7 @@ export function projectTiming(raw) {
     turnError: oneOf(raw.turnError, ERROR_CLASS_NAMES),
     errorEvents,
     exitCode: Number.isSafeInteger(raw.exitCode) ? raw.exitCode : null,
-    exitSignal: raw.exitSignal === 'other' || (typeof raw.exitSignal === 'string' && SIGNAL_NAME.test(raw.exitSignal)) ? raw.exitSignal : null,
+    exitSignal: raw.exitSignal === 'other' || SIGNAL_NAMES.includes(raw.exitSignal) ? raw.exitSignal : null,
   };
 }
 
@@ -172,7 +187,7 @@ function project(raw) {
         purpose: raw.event === 'player-attempt' ? 'decision' : text(raw.purpose),
         runtime: text(raw.runtime), model: text(raw.model, 128),
         timeoutMs: finite(raw.timeoutMs), elapsedMs: finite(raw.elapsedMs),
-        code: text(raw.code), category: text(raw.category), censored: raw.censored === true,
+        code: projectCallCode(raw.code), category: projectCallCategory(raw.category), censored: raw.censored === true,
         batchSize: Number.isSafeInteger(raw.batch?.size) ? raw.batch.size : null,
         timing,
       };

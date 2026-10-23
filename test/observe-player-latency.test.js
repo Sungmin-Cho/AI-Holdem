@@ -645,15 +645,21 @@ test('failure locations: the log scan keeps how a failed call ended and the summ
   const file = path.join(dir, 'loop.log');
   const timing = { bootMs: 274, turnMs: 6822, exitToCloseMs: 0, signalMs: null, closeMs: 7477, censored: false,
     turnEnd: 'failed', turnError: 'capacity', errorEvents: { capacity: 1 }, exitCode: 1, exitSignal: null, message: 'SECRET-MSG' };
+  const hostile = { event: 'player-call', purpose: 'SECRET-PURPOSE', code: 'As Kd', category: 'SECRET-CAT', elapsedMs: 900,
+    timing: { exitSignal: 'SIGSECRET', turnEnd: 'SECRET-END' } };
   fs.writeFileSync(file, `${JSON.stringify({ event: 'player-call', purpose: 'decision', decisionId: 'SECRET-D', code: 'CLI_FAILED',
-    category: 'transport', elapsedMs: 7477, timing })}\n`);
+    category: 'transport', elapsedMs: 7477, timing })}\n${JSON.stringify(hostile)}\n`);
   const scan = scanLoopLog(file);
-  assert.equal(scan.failures.length, 1);
+  assert.equal(scan.failures.length, 2);
+  assert.deepEqual(
+    [scan.failures[1].purpose, scan.failures[1].code, scan.failures[1].category, scan.failures[1].timing.exitSignal, scan.failures[1].timing.turnEnd],
+    ['other', 'other', 'other', null, null],
+  );
   assert.deepEqual(
     [scan.failures[0].timing.turnEnd, scan.failures[0].timing.turnError, scan.failures[0].timing.exitCode, scan.failures[0].timing.errorEvents],
     ['failed', 'capacity', 1, { capacity: 1 }],
   );
-  assert.doesNotMatch(JSON.stringify(scan), /SECRET-/);
+  assert.doesNotMatch(JSON.stringify(scan), /SECRET-|As Kd/);
   const signature = { code: 'CLI_FAILED', category: 'transport', turnEnd: 'failed', turnError: 'capacity', exitCode: 1, exitSignal: null, calls: 1 };
   const groups = [warm(), decide(150, { calls: 151, outcomes: { answered: 150, timeout: 0, interrupted: 0, failed: { transport: 1 } }, failureSignatures: [signature] })];
   const report = {

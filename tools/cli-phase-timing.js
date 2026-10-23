@@ -31,9 +31,16 @@ export function errorClassOf(event) {
   return ERROR_CLASSES.find(([, pattern]) => pattern.test(message))?.[0] ?? 'other';
 }
 
-const SIGNAL_NAME = /^SIG[A-Z0-9]{1,12}$/;
+// 신호 이름의 닫힌 목록(darwin·linux·win32의 `os.constants.signals` 합집합). 기록은 다른 플랫폼에서도 읽히므로
+// 실행 플랫폼의 목록이 아니라 이 고정 목록과 정확히 비교한다. 목록 밖 값은 `other`다.
+export const SIGNAL_NAMES = Object.freeze([
+  'SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGILL', 'SIGTRAP', 'SIGABRT', 'SIGIOT', 'SIGBUS', 'SIGEMT', 'SIGFPE', 'SIGKILL',
+  'SIGUSR1', 'SIGSEGV', 'SIGUSR2', 'SIGPIPE', 'SIGALRM', 'SIGTERM', 'SIGSTKFLT', 'SIGCHLD', 'SIGCONT', 'SIGSTOP',
+  'SIGTSTP', 'SIGBREAK', 'SIGTTIN', 'SIGTTOU', 'SIGURG', 'SIGXCPU', 'SIGXFSZ', 'SIGVTALRM', 'SIGPROF', 'SIGWINCH',
+  'SIGIO', 'SIGPOLL', 'SIGLOST', 'SIGPWR', 'SIGINFO', 'SIGSYS', 'SIGUNUSED',
+]);
 const exitCodeOf = (code) => (Number.isSafeInteger(code) ? code : null);
-const exitSignalOf = (signal) => (signal == null ? null : typeof signal === 'string' && SIGNAL_NAME.test(signal) ? signal : 'other');
+const exitSignalOf = (signal) => (signal == null ? null : SIGNAL_NAMES.includes(signal) ? signal : 'other');
 
 const since = (later, earlier) => (later === null || earlier === null ? null : later - earlier);
 

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createPhaseTiming, ERROR_CLASS_NAMES, errorClassOf, withTiming } from '../tools/cli-phase-timing.js';
+import { createPhaseTiming, ERROR_CLASS_NAMES, errorClassOf, SIGNAL_NAMES, withTiming } from '../tools/cli-phase-timing.js';
 import { createPlayerRuntime, spawnCli } from '../tools/player-runtime.js';
 
 const FAKE_CLI = fileURLToPath(new URL('./helpers/fake-cli.js', import.meta.url));
@@ -105,9 +105,20 @@ test('only the first turn end counts, an exit is read once, and odd exit values 
   assert.equal(view.turnError, null);
   assert.equal(view.exitCode, null, 'a non-integer code is not a code');
   assert.equal(view.exitSignal, 'other', 'an unexpected signal value is not copied');
+  for (const odd of ['SIGSECRET', 'SIGKILL\n', 'sigkill', 42]) {
+    const one = createPhaseTiming(() => 0);
+    one.observe({ type: 'exit', code: null, signal: odd });
+    assert.equal(one.view().exitSignal, 'other', `${JSON.stringify(odd)} is not a signal name`);
+  }
   const fresh = createPhaseTiming(() => 0).view();
   assert.deepEqual([fresh.turnEnd, fresh.turnError, fresh.errorEvents, fresh.exitCode, fresh.exitSignal], [null, null, {}, null, null]);
   assert.notEqual(timing.view().errorEvents, timing.view().errorEvents, 'each view gets its own copy');
+});
+
+test('the signal list is closed and holds every signal name of the running platform', () => {
+  for (const name of Object.keys(os.constants.signals)) assert.ok(SIGNAL_NAMES.includes(name), `${name} is missing`);
+  assert.equal(new Set(SIGNAL_NAMES).size, SIGNAL_NAMES.length);
+  assert.ok(SIGNAL_NAMES.every((name) => /^SIG[A-Z0-9]+$/.test(name)));
 });
 
 test('error classes are a closed list where the first match wins; capacity is last so older classes stay the same', () => {
@@ -146,6 +157,7 @@ test('an oversize line (and its remainder) is not read; later lines and an unter
   assert.equal(view.turnEndMs, 950, 'an unterminated last line is read at close');
   assert.equal(view.exitMs, null);
   assert.equal(view.exitToCloseMs, null);
+  assert.deepEqual([view.exitCode, view.exitSignal], [null, null], 'a close without an exit event leaves both unknown');
 });
 
 test('non-JSON and malformed lines are ignored without throwing', () => {
@@ -311,6 +323,19 @@ test('a codex decide whose completed turn has no answer exits 0 — the timing t
     );
   } finally {
     await f.cleanup();
+  }
+});
+
+test('a CLI that cannot be spawned reports no exit code or signal', async () => {
+  const rt = createPlayerRuntime('codex', { exec: (spec) => spawnCli({ ...spec, command: path.join(os.tmpdir(), 'holdem-no-such-cli', 'codex') }) });
+  try {
+    await assert.rejects(rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 10_000 }), (error) => {
+      assert.equal(error.code, 'ENOENT');
+      assert.deepEqual([error.timing.exitCode, error.timing.exitSignal, error.timing.turnEnd], [null, null, null]);
+      return true;
+    });
+  } finally {
+    await rt.dispose?.().catch(() => {});
   }
 });
 
