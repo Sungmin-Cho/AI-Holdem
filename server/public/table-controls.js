@@ -60,6 +60,24 @@ export function reviewDismissalAfterUpdate(dismissed) {
   return dismissed === true;
 }
 
+/** Whole seconds left in a timed level at server time `serverNow`: the clock
+ * only runs down while play time runs (`running`), and stops at zero — the
+ * next hand then starts the next level. Null without a valid clock. */
+export function levelSecondsLeft(clock, serverNow = Date.now()) {
+  if (!clock || !Number.isSafeInteger(clock.remainingMs)) return null;
+  const at = Date.parse(clock.at);
+  if (!Number.isFinite(at)) return null;
+  const left = clock.running ? clock.remainingMs - Math.max(0, serverNow - at) : clock.remainingMs;
+  return Math.max(0, Math.ceil(left / 1000));
+}
+
+/** "1:05" for the next level; "다음 핸드" once the level's time is up. */
+export function formatLevelSeconds(seconds) {
+  if (!Number.isSafeInteger(seconds) || seconds < 0) return null;
+  if (seconds === 0) return '다음 핸드';
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
 export function formatTurnDeadline(deadline, now = Date.now()) {
   const at = deadline && typeof deadline === 'object' ? deadline.at : deadline;
   if (typeof at !== 'string') return null;

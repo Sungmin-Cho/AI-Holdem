@@ -35,7 +35,7 @@ metadata:
 
 딜러(이 세션)가 하는 일은 셋뿐이다: **사전 점검 → 사이드카 기동 → 보고.** 게임이 시작된 뒤에는 **개입하지 않는다** — 핸드 안 딜러 라운드는 0회다.
 
-사용법: `/start-game [AI수 1~8]` (옵션 `--stack N`, `--level-every N`, `--blinds SB/BB`, `--mode cash-training|tournament`, `--stack-bb N`, `--hands N`, `--opponent-runtime llm|policy`, `--showdown-policy open|standard`, `--replay-reveal all|showdown`, `--mirror-self`, `--exploit-self`). 새 store 게임의 기본은 cash-training·AI 5명(6인)·100BB·20핸드·policy v2·showdownPolicy=open·replayReveal=all이다. `--mirror-self`/`--exploit-self`는 policy 런타임과 누적 60핸드가 필요하다. 부트 로그 코드 `TENDENCY_INSUFFICIENT`는 표본 부족으로 기동을 거부한 것이다. 중단 재개: `/start-game resume`.
+사용법: `/start-game [AI수 1~8]` (옵션 `--stack N`, `--level-every N`, `--level-minutes N`, `--result-hold-sec N`, `--blinds SB/BB`, `--mode cash-training|tournament`, `--stack-bb N`, `--hands N`, `--opponent-runtime llm|policy`, `--showdown-policy open|standard`, `--replay-reveal all|showdown`, `--mirror-self`, `--exploit-self`). 새 store 게임의 기본은 cash-training·AI 5명(6인)·100BB·20핸드·policy v2·showdownPolicy=open·replayReveal=all이다. `--mirror-self`/`--exploit-self`는 policy 런타임과 누적 60핸드가 필요하다. 부트 로그 코드 `TENDENCY_INSUFFICIENT`는 표본 부족으로 기동을 거부한 것이다. 중단 재개: `/start-game resume`.
 
 저장소 루트에서 실행. `game/`은 런타임 상태(gitignore)이고 사이드카·엔진만 쓴다.
 

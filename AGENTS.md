@@ -24,7 +24,7 @@ LLM 모드의 플레이어와 LLM 코치·evaluator·종합자는 사이드카�
 - **Windows:** `core.symlinks=false`면 위 링크가 일반 파일/빈 경로로 풀릴 수 있다. git config를 바꾸지 말고 정본 `.agents/skills/start-game/SKILL.md`를 읽는다. 사이드카 identity는 POSIX `ps`/`lsof`가 아니라 플랫폼 어댑터다.
 
 
-새 로비 게임의 진행 속도는 `normal`(보통)이며, 즉시/빠름/보통/느림을 선택한다. resume과 같은 설정 재시작은 저장된 `pace`를 유지하고 기록이 없는 예전 게임은 `instant`다. legacy CLI의 `--pace`는 명시한 값만 적용한다.
+새 로비 게임의 진행 속도는 `normal`(보통)이며, 즉시/빠름/보통/느림을 선택한다. resume과 같은 설정 재시작은 저장된 `pace`를 유지하고 기록이 없는 예전 게임은 `instant`다. legacy CLI의 `--pace`는 명시한 값만 적용한다. 핸드 결과 표시 시간은 pace와 별도인 `resultHoldSec`(0~30초, 로비 기본 4초, legacy `--result-hold-sec`)이고 키가 없는 기존 게임은 pace의 결과 대기를 쓴다. 로비 토너먼트는 기본 레벨당 2분(`levelMinutes`, 플레이 시간 — 일시정지 중 멈추고 만료 후 다음 핸드에서 한 단계)이며 핸드 주기를 고를 수 있다. legacy CLI 토너먼트는 핸드 8 기본을 유지하고 `--level-minutes N`을 받는다. 시간 방식 게임은 이전 버전으로 resume하지 않는다. 금액을 BB로 표시하면 레이즈 입력도 BB(소수 둘째 자리)로 받고, 보내는 금액은 칩이다.
 
 결과 대기 건너뛰기는 단독 인간 호스트의 `POST /api/game/:gameId/skip-result`, 오래 걸리는 AI 취소는 호스트 `POST /api/app/interrupt-decision`으로 처리한다. 후자는 자식 종료 확인 후 복구 상태를 남기므로 UI에서 재시도한다. 최종 결과는 리뷰보다 먼저 표시하고 종료 후 테이블을 유지한다. 종료 요약은 호스트 `/api/game/:gameId/summary`, 참가자 `/api/p/game/:gameId/summary`이며 인증·세대·완료 상태를 검사한다. `metrics`는 최근 5,000건, 폐기 누계는 `metricsDropped`다. 진단 이력은 기존 loop-state로 재개하면 유지된다. loop-state가 없어 재구성한 경우에는 `metrics`와 `metricsDropped`가 0부터 시작하므로, 폐기 누계가 0이어도 게임 전체 표본이라고 단정하지 않는다. 참가 요청 주소 목록은 1,024개 초과 시 60초가 지난 항목을 청소하며 활성 주소 수의 하드 상한은 아니다.
 

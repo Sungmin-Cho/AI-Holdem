@@ -35,6 +35,7 @@ export function sanitizeContext(data) {
     level: int(data.level, 1),
     blinds,
     levelLeft: int(data.levelLeft, 0),
+    levelSecondsLeft: int(data.levelSecondsLeft, 0),
     sessionNet: Number.isSafeInteger(data.sessionNet) ? data.sessionNet : null,
     conn: data.conn,
     retryCount: int(data.retryCount, 0) ?? 0,

@@ -68,10 +68,14 @@ function paintFinal(final,state) {
 // iframe element is replaced for each game, so the bridge is rebound with it.
 let tableGame = null;
 let bridge = null;
+// The table cannot see a pause; this page polls it, so the level clock reads paused here.
+function paintContext(context) {
+  paintShellContext($('shell-context'), context, { paused: ['pausing', 'paused'].includes(latest?.game?.state) });
+}
 function bindBridge() {
   bridge?.dispose();
   paintShellContext($('shell-context'), null);
-  bridge = createShellBridge({ frame: $('table'), identity: () => tableGame, onContext: (context) => paintShellContext($('shell-context'), context) });
+  bridge = createShellBridge({ frame: $('table'), identity: () => tableGame, onContext: paintContext });
 }
 function paintProvider(state) {
   // Before joining the page cannot know the host's choice, so the form carries
@@ -131,6 +135,7 @@ async function poll() {
     $('playing').hidden = !inGame;
     document.body.classList.toggle('has-game', !$('playing').hidden);
     $('pause-banner').hidden = state.game?.state !== 'paused';
+    repaintContext();
     $('final').hidden = !final;
     if (final) {
       paintFinal(final,state);
@@ -198,7 +203,7 @@ $('seat-request')?.addEventListener('click', async () => {
 wireHelpMenu();
 $('join-transfer-help').append(helpButton('privacy', '외부 전송'));
 // Follow the BB/chips choice made here or in the table's own selector.
-const repaintContext = () => paintShellContext($('shell-context'), bridge?.context ?? null);
+const repaintContext = () => paintContext(bridge?.context ?? null);
 window.addEventListener('storage', (event) => { if (event.key === 'holdem.display-unit.v1') repaintContext(); });
 window.addEventListener('holdem:display-unit', repaintContext);
 bindBridge();
