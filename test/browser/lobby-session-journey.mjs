@@ -40,6 +40,8 @@ export const requiredJourneyChecks = [
   "hand-result-hold-respected",
   "pause-during-ai-interval",
   "skip-advances",
+  "tournament-level-clock",
+  "tournament-level-paused",
 ];
 export async function runLobbyJourney(outDir) {
   fs.mkdirSync(outDir, { recursive: true });
@@ -313,8 +315,16 @@ export async function runLobbyJourney(outDir) {
       ).length,
       9,
     );
+    // A lobby tournament levels up by play time (two minutes by default). The
+    // embedded table hides its top bar, so the header carries the countdown.
+    assert.equal(readEngine().config.levelMinutes, 2);
+    assert.equal(readEngine().config.levelEvery, null);
+    await wait(() => evaluate("/다음 레벨 \\d+:\\d{2}/.test(document.querySelector('#shell-context')?.textContent ?? '')"), 30000);
+    check("tournament-level-clock");
     await click("#menu");
     await state("paused");
+    await wait(() => evaluate("(document.querySelector('#shell-context')?.textContent ?? '').includes('다음 레벨 일시정지')"));
+    check("tournament-level-paused");
     await evaluate("window.__endingFrame=document.querySelector('#table').contentDocument");
     await click("#end");
     await click("#confirm-yes");

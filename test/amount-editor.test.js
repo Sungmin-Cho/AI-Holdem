@@ -132,4 +132,19 @@ test('slider keys move one half big blind at a time and reach the exact ends',()
   assert.equal(stepRaiseTo(37,odd,25,1),38);
   let at=30,seen=[];for(let i=0;i<5;i++){at=stepRaiseTo(at,odd,25,1);seen.push(at);}
   assert.deepEqual(seen,[38,50,63,75,88]);
+  at=88;seen=[];for(let i=0;i<5;i++){at=stepRaiseTo(at,odd,25,-1);seen.push(at);}
+  assert.deepEqual(seen,[75,63,50,38,30]);
+});
+
+test('slider keys stay exact and finite at the largest safe amounts',()=>{
+  // Floating point cannot count past 2^53: the step is integer arithmetic.
+  const huge={minRaiseTo:2,maxRaiseTo:Number.MAX_SAFE_INTEGER};
+  assert.equal(stepRaiseTo(2**52,huge,1,1),2**52+1);
+  assert.equal(stepRaiseTo(2**52,huge,1,-1),2**52-1);
+  assert.equal(stepRaiseTo(Number.MAX_SAFE_INTEGER-1,huge,1,1),Number.MAX_SAFE_INTEGER);
+  assert.equal(stepRaiseTo(Number.MAX_SAFE_INTEGER,huge,1,1),Number.MAX_SAFE_INTEGER);
+  assert.equal(stepRaiseTo(Number.MAX_SAFE_INTEGER,huge,1,-1),Number.MAX_SAFE_INTEGER-1);
+  assert.equal(stepRaiseTo(2**52,huge,2,1),2**52+1);
+  assert.equal(stepRaiseTo(2**52,huge,4,1),2**52+2);
+  assert.equal(stepRaiseTo(3,{minRaiseTo:2,maxRaiseTo:9},3,-1),2);
 });

@@ -19,22 +19,23 @@ export function snapRaiseTo(value, legal, bb) {
 }
 
 /** One slider key press in big-blind mode: the next half big blind above or
- * below `current` (never the same chip amount), ending at the exact legal ends. */
+ * below `current` (never the same chip amount), ending at the exact legal ends.
+ * Half-big-blind point k is round(k·bb/2) = floor((k·bb + 1) / 2); the next and
+ * previous k come from integer division in BigInt, so the step is exact and
+ * bounded for every safe amount. */
 export function stepRaiseTo(current, legal, bb, direction) {
   const max = Math.max(0, Number(legal.maxRaiseTo) || 0);
   const min = Math.min(max, Math.max(0, Number(legal.minRaiseTo) || 0));
   const n = Math.round(Number(current));
-  const step = Number(bb) / 2;
-  if (!Number.isFinite(n) || !(step > 0)) return clampRaiseTo(n, legal);
+  if (!Number.isSafeInteger(n) || !Number.isSafeInteger(bb) || bb <= 0) return clampRaiseTo(n, legal);
+  if (direction > 0 ? n >= max : n <= min) return direction > 0 ? max : min;
+  const big = BigInt(bb), at = BigInt(n);
+  const point = (k) => Number((k * big + 1n) / 2n);
   if (direction > 0) {
-    let k = Math.floor(n / step) + 1;
-    while (Math.round(k * step) <= n) k += 1;
-    const next = Math.round(k * step);
+    const next = point((2n * at + 1n + big - 1n) / big);
     return next >= max ? max : clampRaiseTo(next, legal);
   }
-  let k = Math.ceil(n / step) - 1;
-  while (k > 0 && Math.round(k * step) >= n) k -= 1;
-  const previous = Math.round(k * step);
+  const previous = at >= 1n ? point((2n * at - 2n) / big) : 0;
   return previous <= min ? min : clampRaiseTo(previous, legal);
 }
 

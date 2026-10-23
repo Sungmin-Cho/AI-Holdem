@@ -10,6 +10,8 @@ import {createOwnedTempDir} from './helpers/owned-fixtures.mjs';
 
 const MINUTE = 60_000;
 const readJson = (root, name) => JSON.parse(fs.readFileSync(path.join(root, name), 'utf8'));
+// For waits that may start before the loop wrote the file.
+const peekJson = (root, name) => { try { return readJson(root, name); } catch { return null; } };
 const handLevels = (root) => fs.readdirSync(path.join(root, 'hands')).filter((name) => /^hand-\d+\.json$/.test(name)).sort()
   .map((name) => readJson(path.join(root, 'hands'), name)).map((record) => ({handNo: record.handNo, level: record.level}));
 const parseClock = (value) => {
@@ -58,7 +60,7 @@ async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand =
       }
     } catch { /* the relay may be between states */ } finally { posting = false; }
   }, 20);
-  t.after(() => clearInterval(timer));
+  t.after(async () => { clearInterval(timer); await loop.requestStop().catch(() => {}); });
   return {root, loop, clock, control, publishes, stop: () => { clearInterval(timer); return loop.requestStop(); }};
 }
 
@@ -114,11 +116,11 @@ test('paused time does not count toward the level and the clock resumes after th
   const running = f.loop.run();
   running.catch(() => {});
   // Wait for hand 2, then pause and spend ten minutes parked.
-  for (let i = 0; i < 400 && !(readJson(f.root, 'state.json').handNo >= 2); i++) await new Promise((r) => setTimeout(r, 25));
+  for (let i = 0; i < 400 && !(peekJson(f.root, 'state.json')?.handNo >= 2); i++) await new Promise((r) => setTimeout(r, 25));
   // While the clock runs, checkpoints follow it without any publish: hold the
   // user's turn so the loop only waits, then move the clock.
   f.control.holdUser = true;
-  for (let i = 0; i < 400 && readJson(f.root, 'ui-snapshot.json').view?.toAct !== 'user'; i++) await new Promise((r) => setTimeout(r, 10));
+  for (let i = 0; i < 400 && peekJson(f.root, 'ui-snapshot.json')?.view?.toAct !== 'user'; i++) await new Promise((r) => setTimeout(r, 10));
   await new Promise((r) => setTimeout(r, 50));
   const quietPublishes = f.publishes.length;
   const beforeTick = readJson(f.root, 'loop-state.json').playClockMs;
@@ -150,6 +152,28 @@ test('paused time does not count toward the level and the clock resumes after th
   await running;
   // A stop records the clock it reached.
   assert.ok(readJson(f.root, 'loop-state.json').playClockMs >= engine.levelClock.playMs);
+});
+
+test('a loop whose lock was replaced writes no play time, by timer or by stop', {timeout: 120000}, async (t) => {
+  const f = await timedFixture(t, {managed: true, stepMs: 1000, stopAtHand: 99});
+  const running = f.loop.run();
+  running.catch(() => {});
+  // Hold the user's turn so nothing but the checkpoint timer could write.
+  f.control.holdUser = true;
+  for (let i = 0; i < 400 && !(peekJson(f.root, 'state.json')?.handNo >= 1 && peekJson(f.root, 'ui-snapshot.json')?.view?.toAct === 'user'); i++) await new Promise((r) => setTimeout(r, 10));
+  await new Promise((r) => setTimeout(r, 50));
+  const before = readJson(f.root, 'loop-state.json').playClockMs;
+  assert.ok(Number.isSafeInteger(before));
+  // Another owner takes the game: the lock directory is replaced.
+  const lockDir = path.join(f.root, 'loop.lock.d');
+  fs.renameSync(lockDir, `${lockDir}.replaced`);
+  fs.mkdirSync(lockDir);
+  f.clock.play += 30_000;
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(readJson(f.root, 'loop-state.json').playClockMs, before, 'no checkpoint after the lock was lost');
+  await f.stop().catch(() => {});
+  await running.catch(() => {});
+  assert.equal(readJson(f.root, 'loop-state.json').playClockMs, before, 'the stop of a lock-less loop does not record it');
 });
 
 test('a resumed timed game restores its play time and never runs the clock back', {timeout: 120000}, async (t) => {
