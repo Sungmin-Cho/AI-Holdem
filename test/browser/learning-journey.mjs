@@ -13,6 +13,7 @@ import {
   hashTree,
   NODE26,
 } from '../helpers/learning-browser-fixture.mjs';
+import { formatBbInput } from '../../server/public/amount-editor.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const DEFAULT_USER_STORE = path.join(ROOT, 'game');
@@ -149,9 +150,13 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     const actorBet = firstSnapshot.view.seats.find((row) => row.playerId === 'user').bet;
     assert.equal(firstLegal.canRaise && firstLegal.minRaiseTo <= firstLegal.maxRaiseTo, true);
     await browser(['click', '[data-preset="pot"]']);
-    const amount = await evaluate('Number(document.querySelector("#raise-amount").value.replaceAll(",", ""))');
-    check('pot-sizing', amount === Math.max(firstLegal.minRaiseTo, Math.min(firstLegal.maxRaiseTo,
-      actorBet + firstLegal.callAmount + firstLegal.potTotal + firstLegal.callAmount)));
+    // Amounts show in big blinds by default: the field holds the pot size in BB
+    // and the raise button's chip line holds the exact chips that would be sent.
+    const potChips = Math.max(firstLegal.minRaiseTo, Math.min(firstLegal.maxRaiseTo,
+      actorBet + firstLegal.callAmount + firstLegal.potTotal + firstLegal.callAmount));
+    const fieldText = await evaluate('document.querySelector("#raise-amount").value');
+    const buttonChips = await evaluate('Number(document.querySelector("#btn-raise .amount-secondary").textContent.replace(/[^0-9]/g, ""))');
+    check('pot-sizing', fieldText === formatBbInput(potChips, firstSnapshot.view.blinds[1]) && buttonChips === potChips);
     await browser(['screenshot', path.join(output, 'table-desktop.png')]);
 
     fixture.proxy.arm({ path: '/api/action', kind: 'drop' });
