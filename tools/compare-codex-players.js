@@ -41,6 +41,7 @@ import { newDeck } from '../engine/cards.js';
 import { applyAction, createGame, legalFor, startHand } from '../engine/hand.js';
 import { turnSummary } from '../engine/views.js';
 import { DEFAULT_PLAYER_BUDGET } from '../shared/player-budget.js';
+import { errorClassOf } from './cli-phase-timing.js';
 import { classifyDecision } from './player-decision.js';
 import { benchmarkPlayerPin, buildPlayerPrompt, createPlayerRuntime, RUNTIME_TABLE, spawnCli } from './player-runtime.js';
 
@@ -75,13 +76,7 @@ const TIMELINE_ITEM_TYPES = new Set([
 const TIMELINE_EVENT_LIMIT = 64;
 // 한 줄의 UTF-8 바이트 상한(개행 없이 이어지는 버퍼도 같다). 넘으면 그 줄은 이름을 뽑지 않고 `oversizeLines`로만 센다.
 const TIMELINE_LINE_LIMIT = 64 * 1024;
-// error 계열 메시지는 원문을 남기지 않는다 — 이 닫힌 분류만 남긴다.
-const ERROR_CLASSES = Object.freeze([
-  ['reconnect', /reconnect|retrying|stream disconnected/i],
-  ['rate_limit', /rate.?limit|429|too many requests|usage limit/i],
-  ['code_mode_unavailable', /code mode/i],
-  ['timeout', /timed? ?out|timeout/i],
-]);
+// error 계열 메시지는 원문을 남기지 않는다 — 운영 기록과 같은 닫힌 분류(`cli-phase-timing.js`)만 남긴다.
 
 const SOFT_MS = DEFAULT_PLAYER_BUDGET.softMs;
 const PERSONA = Object.freeze({
@@ -330,12 +325,6 @@ function summarize(variant, samples) {
 
 // ── 자식 타임라인 ────────────────────────────────────────────────────────────
 
-function errorClass(event) {
-  const message = [event?.message, event?.item?.message, event?.error?.message, event?.item?.text]
-    .find((value) => typeof value === 'string') ?? '';
-  return ERROR_CLASSES.find(([, pattern]) => pattern.test(message))?.[0] ?? 'other';
-}
-
 function eventLabel(line) {
   let event;
   try {
@@ -347,7 +336,7 @@ function eventLabel(line) {
   if (type === 'other') return type;
   const itemType = type.startsWith('item.') ? event.item?.type : null;
   const label = itemType == null ? type : `${type}:${TIMELINE_ITEM_TYPES.has(itemType) ? itemType : 'other'}`;
-  return type === 'error' || type === 'turn.failed' || itemType === 'error' ? `${label}[${errorClass(event)}]` : label;
+  return type === 'error' || type === 'turn.failed' || itemType === 'error' ? `${label}[${errorClassOf(event)}]` : label;
 }
 
 /** 실제 자식 하나의 수명 기록. 원문은 줄 단위로 이름만 뽑고 버린다(버퍼는 마지막 미완성 줄뿐). */

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createPhaseTiming, withTiming } from '../tools/cli-phase-timing.js';
+import { createPhaseTiming, ERROR_CLASS_NAMES, errorClassOf, SIGNAL_NAMES, withTiming } from '../tools/cli-phase-timing.js';
 import { createPlayerRuntime, spawnCli } from '../tools/player-runtime.js';
 
 const FAKE_CLI = fileURLToPath(new URL('./helpers/fake-cli.js', import.meta.url));
@@ -36,6 +36,7 @@ test('milestones are the first thread/turn events, read across chunk boundaries'
   assert.deepEqual(view, {
     bootMs: 220, turnStartMs: 220, turnEndMs: 3100, signalMs: null, exitMs: 3400, closeMs: 3410,
     turnMs: 2880, censored: false, exitToCloseMs: 10,
+    turnEnd: 'completed', turnError: null, errorEvents: {}, exitCode: 0, exitSignal: null,
   });
   assert.doesNotMatch(JSON.stringify(view), /th-secret|agent_message/);
 });
@@ -58,6 +59,83 @@ test('a turn cut by a signal is censored; the first signal time is kept', () => 
   assert.equal(view.turnMs, null);
   assert.equal(view.censored, true);
   assert.equal(view.exitToCloseMs, 10);
+  assert.equal(view.turnEnd, null);
+  assert.equal(view.exitCode, null);
+  assert.equal(view.exitSignal, 'SIGKILL');
+});
+
+// #312 L5 1회차의 실패 turn(codex 0.163.0 `exec --json`의 실제 모양: error → turn.failed(error.message) → exit 1).
+test('a failed turn records how it ended, closed error classes and the exit code, never the message', () => {
+  const c = clock();
+  const timing = createPhaseTiming(c.now);
+  const capacity = 'SECRET-7c1 Selected model is at capacity. Please try a different model.';
+  c.set(270);
+  timing.observe({ type: 'stdout', chunk: line({ type: 'thread.started', thread_id: 'th-secret' })
+    + line({ type: 'item.completed', item: { id: 'item_0', type: 'error', message: 'SECRET-a9 code mode is not available' } })
+    + line({ type: 'item.started', item: { id: 'item_1', type: 'error', message: 'SECRET-b4 started, not counted' } }) });
+  c.set(480);
+  timing.observe({ type: 'stdout', chunk: line({ type: 'turn.started' }) });
+  c.set(7300);
+  timing.observe({ type: 'stdout', chunk: line({ type: 'error', message: capacity }) + line({ type: 'turn.failed', error: { message: capacity } }) });
+  c.set(7303);
+  timing.observe({ type: 'stdout', chunk: line({ type: 'error', message: 'SECRET-d2 trailing note' }) });
+  c.set(7477);
+  timing.observe({ type: 'exit', code: 1, signal: null });
+  timing.observe({ type: 'close', code: 1, signal: null });
+  const view = timing.view();
+  assert.equal(view.turnEndMs, 7300);
+  assert.equal(view.turnMs, 6820);
+  assert.equal(view.censored, false);
+  assert.equal(view.turnEnd, 'failed');
+  assert.equal(view.turnError, 'capacity');
+  assert.deepEqual(view.errorEvents, { code_mode_unavailable: 1, capacity: 1, other: 1 });
+  assert.equal(view.exitCode, 1);
+  assert.equal(view.exitSignal, null);
+  assert.doesNotMatch(JSON.stringify(view), /SECRET|th-secret|capacity\.|Please|item_/);
+});
+
+test('only the first turn end counts, an exit is read once, and odd exit values become closed tokens', () => {
+  const timing = createPhaseTiming(() => 0);
+  timing.observe({ type: 'stdout', chunk: line({ type: 'turn.started' }) + line({ type: 'turn.completed' })
+    + line({ type: 'turn.failed', error: { message: 'rate limit' } }) });
+  timing.observe({ type: 'exit', code: 1.5, signal: 'not-a-signal' });
+  timing.observe({ type: 'exit', code: 0, signal: null });
+  const view = timing.view();
+  assert.equal(view.turnEnd, 'completed');
+  assert.equal(view.turnError, null);
+  assert.equal(view.exitCode, null, 'a non-integer code is not a code');
+  assert.equal(view.exitSignal, 'other', 'an unexpected signal value is not copied');
+  for (const odd of ['SIGSECRET', 'SIGKILL\n', 'sigkill', 42]) {
+    const one = createPhaseTiming(() => 0);
+    one.observe({ type: 'exit', code: null, signal: odd });
+    assert.equal(one.view().exitSignal, 'other', `${JSON.stringify(odd)} is not a signal name`);
+  }
+  const fresh = createPhaseTiming(() => 0).view();
+  assert.deepEqual([fresh.turnEnd, fresh.turnError, fresh.errorEvents, fresh.exitCode, fresh.exitSignal], [null, null, {}, null, null]);
+  assert.notEqual(timing.view().errorEvents, timing.view().errorEvents, 'each view gets its own copy');
+});
+
+test('the signal list is closed and holds every signal name of the running platform', () => {
+  for (const name of Object.keys(os.constants.signals)) assert.ok(SIGNAL_NAMES.includes(name), `${name} is missing`);
+  assert.equal(new Set(SIGNAL_NAMES).size, SIGNAL_NAMES.length);
+  assert.ok(SIGNAL_NAMES.every((name) => /^SIG[A-Z0-9]+$/.test(name)));
+});
+
+test('error classes are a closed list where the first match wins; capacity is last so older classes stay the same', () => {
+  assert.deepEqual(ERROR_CLASS_NAMES, ['reconnect', 'rate_limit', 'code_mode_unavailable', 'timeout', 'capacity', 'other']);
+  const cases = [
+    [{ message: 'stream disconnected before completion; retrying 1/5' }, 'reconnect'],
+    [{ error: { message: '429 Too Many Requests' } }, 'rate_limit'],
+    [{ item: { type: 'error', message: 'code mode unavailable' } }, 'code_mode_unavailable'],
+    [{ message: 'request timed out' }, 'timeout'],
+    [{ error: { message: 'Selected model is at capacity. Please try a different model.' } }, 'capacity'],
+    [{ message: 'server overloaded' }, 'capacity'],
+    [{ message: 'Reconnecting... model is at capacity' }, 'reconnect'],
+    [{ message: 'model not supported' }, 'other'],
+    [{}, 'other'],
+    [null, 'other'],
+  ];
+  for (const [event, expected] of cases) assert.equal(errorClassOf(event), expected, JSON.stringify(event));
 });
 
 test('an oversize line (and its remainder) is not read; later lines and an unterminated last line are', () => {
@@ -79,6 +157,7 @@ test('an oversize line (and its remainder) is not read; later lines and an unter
   assert.equal(view.turnEndMs, 950, 'an unterminated last line is read at close');
   assert.equal(view.exitMs, null);
   assert.equal(view.exitToCloseMs, null);
+  assert.deepEqual([view.exitCode, view.exitSignal], [null, null], 'a close without an exit event leaves both unknown');
 });
 
 test('non-JSON and malformed lines are ignored without throwing', () => {
@@ -193,6 +272,73 @@ test('a timed-out call carries the signal and the confirmed close in its timing'
   }
 });
 
+test('a codex decide that fails its turn and exits 1 reports a failed turn, its class and the exit code', async () => {
+  const failed = [
+    { type: 'thread.started', thread_id: 'th-timing-1' },
+    { type: 'turn.started' },
+    { type: 'error', message: 'Selected model is at capacity. Please try a different model.' },
+    { type: 'turn.failed', error: { message: 'Selected model is at capacity. Please try a different model.' } },
+  ].map((event) => JSON.stringify(event)).join('\n') + '\n';
+  const f = fakeRuntime('codex', {
+    matchers: [{ argvIncludes: 'resume', reply: failed, exitCode: 1 }],
+    default: { reply: codexReply('ready') },
+  });
+  try {
+    const warm = await f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 10_000 });
+    assert.equal(warm.timing.turnEnd, 'completed');
+    assert.equal(warm.timing.exitCode, 0);
+    await assert.rejects(
+      f.rt.decide({ playerId: 'p1', sessionId: warm.sessionId, message: 'm', timeoutMs: 10_000 }),
+      (error) => {
+        assert.equal(error.code, 'CLI_FAILED');
+        assert.equal(error.timing.turnEnd, 'failed');
+        assert.equal(error.timing.turnError, 'capacity');
+        assert.deepEqual(error.timing.errorEvents, { capacity: 1 });
+        assert.equal(error.timing.exitCode, 1);
+        assert.doesNotMatch(JSON.stringify(error.timing), /Selected|th-timing/);
+        return true;
+      },
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a codex decide whose completed turn has no answer exits 0 — the timing tells it apart from a failed exit', async () => {
+  const empty = [
+    { type: 'thread.started', thread_id: 'th-timing-1' },
+    { type: 'turn.started' },
+    { type: 'turn.completed', usage: {} },
+  ].map((event) => JSON.stringify(event)).join('\n') + '\n';
+  const f = fakeRuntime('codex', {
+    matchers: [{ argvIncludes: 'resume', reply: empty }],
+    default: { reply: codexReply('ready') },
+  });
+  try {
+    const warm = await f.rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 10_000 });
+    await assert.rejects(
+      f.rt.decide({ playerId: 'p1', sessionId: warm.sessionId, message: 'm', timeoutMs: 10_000 }),
+      (error) => error.code === 'CLI_FAILED' && error.timing.turnEnd === 'completed' && error.timing.exitCode === 0
+        && error.timing.turnError === null,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a CLI that cannot be spawned reports no exit code or signal', async () => {
+  const rt = createPlayerRuntime('codex', { exec: (spec) => spawnCli({ ...spec, command: path.join(os.tmpdir(), 'holdem-no-such-cli', 'codex') }) });
+  try {
+    await assert.rejects(rt.warmup({ playerId: 'p1', prompt: '페르소나', timeoutMs: 10_000 }), (error) => {
+      assert.equal(error.code, 'ENOENT');
+      assert.deepEqual([error.timing.exitCode, error.timing.exitSignal, error.timing.turnEnd], [null, null, null]);
+      return true;
+    });
+  } finally {
+    await rt.dispose?.().catch(() => {});
+  }
+});
+
 test('a claude call has no stream milestones but still reports exit and close', async () => {
   const f = fakeRuntime('claude', { default: { reply: JSON.stringify({ type: 'result', result: 'ready', session_id: 'abc' }) } });
   try {
@@ -202,6 +348,8 @@ test('a claude call has no stream milestones but still reports exit and close', 
     assert.equal(timing.bootMs, null);
     assert.equal(timing.turnStartMs, null);
     assert.ok(Number.isInteger(timing.closeMs));
+    assert.equal(timing.turnEnd, null);
+    assert.equal(timing.exitCode, 0);
   } finally {
     await f.cleanup();
   }

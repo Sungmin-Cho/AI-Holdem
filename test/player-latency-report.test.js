@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { aggregateLatency, buildLatencyReport, findLoopLogs, main, readLoopRecords, REPORT_LIMITS } from '../tools/player-latency-report.js';
+import { aggregateLatency, buildLatencyReport, findLoopLogs, formatLatencyReport, main, projectCallCode, readLoopRecords, REPORT_LIMITS } from '../tools/player-latency-report.js';
 
 function store(sessions, states = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-latency-'));
@@ -77,6 +77,80 @@ test('groups calls by runtime, model, kind and warmup batch size with denominato
   assert.equal(report.outliersTotal, 3);
   const text = JSON.stringify(report);
   assert.doesNotMatch(text, /d-\d+-(preflop|flop|river)|"raw"|b1/, 'no decision id, batch id or unlisted timing field');
+});
+
+// #312 진단: 응답 없는 호출이 어디서 어떻게 끝났는지를 서명별로 세고, error 이벤트를 닫힌 분류별로 더한다.
+test('unanswered calls are counted by where they ended, and error events by closed class, with only allowed values', () => {
+  const t = (extra) => ({ bootMs: 270, turnMs: 6820, exitToCloseMs: 0, signalMs: null, closeMs: 7477, censored: false, ...extra });
+  const capacity = t({ turnEnd: 'failed', turnError: 'capacity', errorEvents: { capacity: 1 }, exitCode: 1, exitSignal: null });
+  const root = store({
+    a: [
+      call(1, 'decision', 6000, { callNo: 1, timing: t({ turnEnd: 'completed', turnError: null, errorEvents: { code_mode_unavailable: 1 }, exitCode: 0, exitSignal: null }) }),
+      call(2, 'decision', 7477, { callNo: 1, code: 'CLI_FAILED', category: 'transport', timing: capacity }),
+      call(3, 'decision', 7400, { callNo: 1, code: 'CLI_FAILED', category: 'transport', timing: capacity }),
+      call(4, 'decision', 300000, { callNo: 1, code: 'TIMEOUT', category: 'timeout', censored: true,
+        timing: t({ turnEnd: null, turnMs: null, censored: true, signalMs: 300000, errorEvents: {}, exitCode: null, exitSignal: 'SIGKILL' }) }),
+      // 옛 행(진단 필드 없음)과 timing 없는 행은 위치를 모른다.
+      call(5, 'decision', 900, { callNo: 1, code: 'CLI_FAILED', category: 'transport', timing: t({}) }),
+      call(6, 'decision', 900, { callNo: 1, code: 'CLI_FAILED', category: 'transport' }),
+      // 코드·분류·신호는 닫힌 목록으로만 남는다: 형식만 맞는 신호, 카드 같은 짧은 문자열, 모르는 분류.
+      call(8, 'decision', 900, { callNo: 1, code: 'As Kd', category: 'SECRET-CAT', timing: t({ exitSignal: 'SIGSECRET' }) }),
+      call(9, 'decision', 900, { callNo: 1, code: 'ENOENT', category: 'transport', timing: t({ exitSignal: 'SIGKILL\n' }) }),
+      // 허용 밖 값은 남지 않는다. timeout은 outliers에 timing째 실리므로 투영 자체를 본다.
+      // `__proto__` 키는 객체 리터럴로는 JSON에 실리지 않으므로 원시 줄에 넣는다.
+      JSON.stringify(call(7, 'decision', 300000, { callNo: 1, code: 'TIMEOUT', category: 'timeout', censored: true, timing: t({
+        turnEnd: 'SECRET-END', turnError: 'SECRET-CLASS', exitCode: '1', exitSignal: 'SECRET-SIG',
+        errorEvents: { capacity: -1, reconnect: 1.5, 'SECRET-KEY': 3, other: 2 } }) }))
+        .replace('"other":2', '"other":2,"__proto__":{"polluted":1},"constructor":4'),
+    ],
+  });
+  const report = buildLatencyReport(root);
+  const [decision] = report.groups;
+  assert.equal(decision.kind, 'decision');
+  assert.deepEqual(decision.outcomes, { answered: 1, timeout: 2, interrupted: 0, failed: { transport: 5, other: 1 } });
+  assert.deepEqual(decision.failureSignatures, [
+    { code: 'CLI_FAILED', category: 'transport', turnEnd: 'failed', turnError: 'capacity', exitCode: 1, exitSignal: null, calls: 2 },
+    { code: 'CLI_FAILED', category: 'transport', turnEnd: null, turnError: null, exitCode: null, exitSignal: null, calls: 2 },
+    { code: 'other', category: 'other', turnEnd: null, turnError: null, exitCode: null, exitSignal: null, calls: 1 },
+    { code: 'other', category: 'transport', turnEnd: null, turnError: null, exitCode: null, exitSignal: null, calls: 1 },
+    { code: 'TIMEOUT', category: 'timeout', turnEnd: null, turnError: null, exitCode: null, exitSignal: 'SIGKILL', calls: 1 },
+    { code: 'TIMEOUT', category: 'timeout', turnEnd: null, turnError: null, exitCode: null, exitSignal: null, calls: 1 },
+  ]);
+  const hostile = report.outliers.find((row) => row.at === at(7));
+  assert.deepEqual(
+    [hostile.timing.turnEnd, hostile.timing.turnError, hostile.timing.exitCode, hostile.timing.exitSignal, hostile.timing.errorEvents],
+    [null, null, null, null, { other: 2 }],
+    'only allowed values survive the projection itself',
+  );
+  assert.deepEqual(Object.keys(hostile.timing.errorEvents), ['other']);
+  assert.deepEqual(decision.errorEvents, { code_mode_unavailable: 1, capacity: 2, other: 2 });
+  const text = JSON.stringify(report);
+  assert.doesNotMatch(text, /SECRET|polluted|As Kd|ENOENT|SIGKILL\\n/);
+  assert.equal({}.polluted, undefined);
+  // 어댑터·격리 홈이 던지는 코드와 루프·결정 분류가 이름으로 아는 코드는 그대로 남는다(새 코드가 생기면 목록도 고쳐야 한다).
+  const source = (rel) => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
+  const codesIn = (text, pattern) => [...text.matchAll(pattern)].map((match) => match[1]);
+  const gameLoop = source('../tools/game-loop.js');
+  const budget = source('../shared/player-budget.js');
+  // 호출이 여러 줄이거나 큰따옴표여도 잡는다.
+  const adapter = codesIn(source('../tools/player-runtime.js'), /\b(?:runtimeError|grokFail)\(\s*['"]([A-Z][A-Z0-9_]+)['"]/g);
+  const home = codesIn(source('../tools/runtime-home.js'), /\bcoded\(\s*['"]([A-Z][A-Z0-9_]+)['"]/g);
+  assert.deepEqual(codesIn('runtimeError(\n  "MULTI_LINE_CODE", x); grokFail( \'SPACED\')', /\b(?:runtimeError|grokFail)\(\s*['"]([A-Z][A-Z0-9_]+)['"]/g),
+    ['MULTI_LINE_CODE', 'SPACED'], 'the scanner reads multi-line, spaced and double-quoted calls');
+  const loopSets = [...gameLoop.matchAll(/const (?:FATAL_RUNTIME_CODES|RESTORED_SESSION_REJECTION_CODES) = new Set\(\[([^\]]*)\]/g)]
+    .flatMap((match) => codesIn(match[1], /'([A-Z_]+)'/g));
+  const classified = codesIn(budget.slice(budget.indexOf('export function playerFailureCategory')), /'([A-Z_]+)'/g);
+  assert.ok(adapter.includes('GROK_SESSION_RECORD_MISSING') && home.includes('RUNTIME_HOME_MISMATCH') && loopSets.length >= 15 && classified.length >= 9,
+    'the source scans found the code sets');
+  for (const code of new Set([...adapter, ...home, ...loopSets, ...classified, 'STOPPING', 'RESPONSE_RECEIVED'])) {
+    assert.equal(projectCallCode(code), code, `${code} must stay a known code`);
+  }
+  const lines = formatLatencyReport(report);
+  assert.doesNotMatch(lines, /SECRET|As Kd|ENOENT/);
+  assert.match(lines, /응답 없음 CLI_FAILED\/transport · turn failed\[capacity\] · exit 1 ×2/);
+  assert.match(lines, /응답 없음 TIMEOUT\/timeout · turn \? · exit SIGKILL ×1/);
+  assert.match(lines, /응답 없음 TIMEOUT\/timeout · turn \? · exit \? ×1/);
+  assert.match(lines, /error 이벤트: code_mode_unavailable 1, capacity 2, other 2/);
 });
 
 test('old sessions without player-call fall back to player-attempt, and get the start warmup upper-bound proxy', () => {

@@ -30,7 +30,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { ownedIdentityStatus, serverProcessStartTime } from '../engine/state.js';
 import { createListenerOwnedBy } from './listener-ownership.js';
-import { buildLatencyReport } from './player-latency-report.js';
+import { buildLatencyReport, formatSignature, projectCallCategory, projectCallCode, projectTiming, WARMUP_PURPOSES } from './player-latency-report.js';
 import { RUNTIME_TABLE } from './player-runtime.js';
 import { inspectStudyService, stopStudyService } from './study-service.js';
 
@@ -55,7 +55,6 @@ const OPTION_KEYS = Object.freeze(['hands', 'ai', 'pace', 'maxPlayerCalls', 'bud
 const CLOSED_CONFLICTS = new Set(['STALE_DECISION', 'DECISION_CLOSED', 'NOT_YOUR_TURN']);
 const LEGALITY = new Set(['illegal_action', 'response_format']);
 const NON_TRANSPORT = new Set(['termination', ...LEGALITY]);
-const TIMING_KEYS = ['bootMs', 'turnMs', 'exitToCloseMs', 'signalMs', 'closeMs'];
 const CAVEATS = Object.freeze([
   '표본은 관측이다. 분포 보장·운영 안정성의 증명이 아니다. 같은 시작 묶음의 warmup은 서로 독립이 아니다.',
   'turn 구간은 CLI가 보고한 이벤트 사이의 관측값이다(provider 대기의 대리값, 직접 측정 아님).',
@@ -274,15 +273,17 @@ export function scanLoopLog(file, { limit = OBSERVATION_LIMITS.failureList } = {
     }
     if (event !== 'player-call') continue;
     if (row.purpose === 'decision' && typeof row.decisionId === 'string') decisions.add(row.decisionId);
-    const timing = row.timing && typeof row.timing === 'object' && !Array.isArray(row.timing)
-      ? Object.fromEntries(TIMING_KEYS.map((key) => [key, finite(row.timing[key])])) : null;
+    // 구간 시각과 실패 위치(turn 종료 종류·닫힌 오류 분류·exit 코드·신호)는 집계 도구와 같은 허용 목록이다.
+    const timing = projectTiming(row.timing);
     if (!timing) out.timingMissing += 1;
     const elapsedMs = finite(row.elapsedMs);
     const over = row.purpose === 'decision' ? elapsedMs !== null && elapsedMs > OBSERVATION_CRITERIA.decisionSoftMs
       : elapsedMs !== null && elapsedMs > OBSERVATION_CRITERIA.warmupReportMs;
     if (row.code !== 'RESPONSE_RECEIVED' || over) {
       if (out.failures.length < limit) {
-        out.failures.push({ at: short(row.at, 40), purpose: short(row.purpose), code: short(row.code), category: short(row.category), elapsedMs, timing });
+        // 호출 종류·code·분류는 닫힌 목록으로만 싣는다(목록 밖은 'other').
+        const purpose = row.purpose == null ? null : ['decision', ...WARMUP_PURPOSES].includes(row.purpose) ? row.purpose : 'other';
+        out.failures.push({ at: short(row.at, 40), purpose, code: projectCallCode(row.code), category: projectCallCategory(row.category), elapsedMs, timing });
       } else out.failuresOmitted += 1;
     }
   }
@@ -840,6 +841,10 @@ export function formatObservation(report) {
     `O4 실패 ${c.o4.pass ? '참' : '거짓'} · O5 합법성 ${c.o5.pass ? '참' : '거짓'}(거절 ${c.o5.decisionRejected})`,
     `판정: ${c.pass ? 'pass' : 'pass 아님'}`,
   ];
+  // #312 진단: 응답 없는 플레이어 호출의 위치(어느 단계에서 어떻게 끝났나). 집계 보고서의 서명을 그대로 옮긴다.
+  for (const group of report.latency?.groups ?? []) {
+    for (const row of group.failureSignatures ?? []) lines.push(`응답 없음(${group.kind}): ${formatSignature(row)} ×${row.calls}`);
+  }
   for (const caveat of report.caveats) lines.push(`주의: ${caveat}`);
   return lines.join('\n');
 }

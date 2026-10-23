@@ -13,12 +13,16 @@
 //   - 시작 warmup의 호출별 기록이 없는 예전 LLM 세션은 `server-spawn` → `bootstrap-playing` 간격을 따로 싣는다. relay 기동이
 //     포함된 **상한 대리값**이지 호출 지연이 아니다. `bootstrap-playing`이 없는 시작은 분위수에 넣지 않고 따로 센다.
 //   - 쓰는 중인 마지막 줄·손상 줄·상한을 넘는 줄과 파일은 건너뛰고 개수만 센다.
+//   - 실패 위치(#312 진단): 응답 없는 호출은 (code, 분류, turn 종료 종류, turn.failed 분류, exit 코드·신호) 서명별로 세고,
+//     error 이벤트는 닫힌 분류별로 더한다. 위치 값은 어댑터 timing에만 있으므로 그 기록이 없는 옛 행은 null이다.
+//     호출의 code·분류도 닫힌 목록으로만 남는다(목록 밖은 `other`).
 // 이 집계는 관측 기록의 요약이다. 분포 보장·안정성 증명이 아니다.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_PLAYER_BUDGET } from '../shared/player-budget.js';
 import { lstatExact, fstatExact } from '../shared/exact-stat.js';
+import { ERROR_CLASS_NAMES, SIGNAL_NAMES } from './cli-phase-timing.js';
 
 export const REPORT_SCHEMA = 'player-latency-report/1';
 export const REPORT_LIMITS = Object.freeze({ fileBytes: 64 * 1024 * 1024, lineBytes: 1024 * 1024, outliers: 20 });
@@ -33,6 +37,55 @@ function reportError(code, message) {
 
 const finite = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
 const text = (value, max = 64) => (typeof value === 'string' && value.length <= max ? value : null);
+const oneOf = (value, allowed) => (allowed.includes(value) ? value : null);
+const TURN_ENDS = Object.freeze(['completed', 'failed']);
+// 플레이어 호출이 끝나는 코드의 닫힌 목록: 응답, 어댑터(`player-runtime.js`의 runtimeError·grokFail)와 격리 홈
+// (`runtime-home.js`)이 던지는 코드 전부, 결정 분류(`shared/player-budget.js`)와 루프(`game-loop.js`의
+// FATAL_RUNTIME_CODES·RESTORED_SESSION_REJECTION_CODES·STOPPING)가 이름으로 아는 코드. 시험이 그 소스를 읽어 빠진
+// 코드가 없는지 확인한다. 분류는 그 함수의 값과 `response`다. 기록에 있는 다른 값(Node 오류 코드 포함)은 `other`,
+// 없으면 null이다 — 길이만 맞는 문자열을 그대로 내보내지 않는다.
+export const PLAYER_CALL_CODES = Object.freeze([
+  'RESPONSE_RECEIVED',
+  // 어댑터
+  'BAD_BENCHMARK_PIN', 'BAD_CALL_BUDGET', 'BAD_PERSONA', 'BAD_PROMPT', 'BAD_REASONING', 'BAD_TIER', 'CANARY_REQUIRED',
+  'CHILD_CLOSE_UNCONFIRMED', 'CHILD_SIGNAL_FAILED', 'CLI_FAILED', 'CWD_NOT_ISOLATED', 'GROK_BINARY_CHANGED',
+  'GROK_SESSION_ID_REUSED', 'GROK_SESSION_RECORD_MISSING', 'INTERRUPTED', 'INVALID_SESSION_ID', 'NOT_READY', 'NO_SESSION',
+  'RUNTIME_AUTH_MISSING', 'RUNTIME_CLOSED', 'RUNTIME_DISPOSING', 'RUNTIME_HOME_REQUIRED', 'RUNTIME_HOME_UNSUPPORTED_PLATFORM',
+  'RUNTIME_NOT_VERIFIED', 'TIMEOUT', 'UNKNOWN_RUNTIME', 'UNSAFE_MODEL_ID',
+  // 격리 홈
+  'RUNTIME_HOME_INVALID', 'RUNTIME_HOME_MISMATCH', 'RUNTIME_HOME_PATH_TOO_LONG',
+  // 결정 분류·루프
+  'CHILD_STOP_UNCONFIRMED', 'CLOSE_UNSETTLED', 'IDENTITY_MISMATCH', 'IDENTITY_UNAVAILABLE', 'IDENTITY_UNVERIFIABLE',
+  'ILLEGAL_ACTION', 'INVALID_DECISION', 'INVALID_SESSION', 'NO_PLAYER_RUNTIME', 'SESSION_EXPIRED', 'SESSION_NOT_FOUND',
+  'SIGNAL_FAILED', 'STOPPING',
+]);
+export const PLAYER_CALL_CATEGORIES = Object.freeze([
+  'response', 'transport', 'timeout', 'interrupted', 'termination', 'session', 'illegal_action', 'response_format',
+]);
+const closedOrOther = (value, allowed) => (value === undefined || value === null ? null : allowed.includes(value) ? value : 'other');
+export const projectCallCode = (value) => closedOrOther(value, PLAYER_CALL_CODES);
+export const projectCallCategory = (value) => closedOrOther(value, PLAYER_CALL_CATEGORIES);
+
+// timing은 숫자·불리언과 닫힌 이름만 남긴다. 분류별 수는 알려진 분류 이름의 양의 정수만이다.
+export function projectTiming(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const errorEvents = {};
+  if (raw.errorEvents && typeof raw.errorEvents === 'object' && !Array.isArray(raw.errorEvents)) {
+    for (const name of ERROR_CLASS_NAMES) {
+      const count = raw.errorEvents[name];
+      if (Number.isSafeInteger(count) && count > 0) errorEvents[name] = count;
+    }
+  }
+  return {
+    ...Object.fromEntries([...TIMING_KEYS, 'signalMs', 'closeMs'].map((key) => [key, finite(raw[key])])),
+    censored: raw.censored === true,
+    turnEnd: oneOf(raw.turnEnd, TURN_ENDS),
+    turnError: oneOf(raw.turnError, ERROR_CLASS_NAMES),
+    errorEvents,
+    exitCode: Number.isSafeInteger(raw.exitCode) ? raw.exitCode : null,
+    exitSignal: raw.exitSignal === 'other' || SIGNAL_NAMES.includes(raw.exitSignal) ? raw.exitSignal : null,
+  };
+}
 
 const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 
@@ -128,7 +181,7 @@ export function readOpponentRuntime(stateFile, parents = null) {
   }
 }
 
-// 허용한 필드만 남긴다. timing은 숫자·불리언만이다.
+// 허용한 필드만 남긴다. timing은 projectTiming의 허용 목록이다.
 function project(raw) {
   const base = { event: raw.event, at: text(raw.at, 40) };
   switch (raw.event) {
@@ -136,9 +189,7 @@ function project(raw) {
       return { ...base, player: { runtime: text(raw.player?.runtime), model: text(raw.player?.model, 128) } };
     case 'player-call':
     case 'player-attempt': {
-      const timing = raw.timing && typeof raw.timing === 'object' && !Array.isArray(raw.timing)
-        ? Object.fromEntries([...TIMING_KEYS, 'signalMs', 'closeMs'].map((key) => [key, finite(raw.timing[key])]).concat([['censored', raw.timing.censored === true]]))
-        : null;
+      const timing = projectTiming(raw.timing);
       return {
         ...base,
         // 결정 단위 대응에만 쓰는 내부 키다. 보고서에는 나가지 않는다.
@@ -147,7 +198,7 @@ function project(raw) {
         purpose: raw.event === 'player-attempt' ? 'decision' : text(raw.purpose),
         runtime: text(raw.runtime), model: text(raw.model, 128),
         timeoutMs: finite(raw.timeoutMs), elapsedMs: finite(raw.elapsedMs),
-        code: text(raw.code), category: text(raw.category), censored: raw.censored === true,
+        code: projectCallCode(raw.code), category: projectCallCategory(raw.category), censored: raw.censored === true,
         batchSize: Number.isSafeInteger(raw.batch?.size) ? raw.batch.size : null,
         timing,
       };
@@ -201,7 +252,17 @@ function emptyGroup(call, kind) {
   return {
     runtime: call.runtime, model: call.model, kind, batchSize: kind === 'decision' ? null : call.batchSize,
     calls: 0, answered: 0, timeout: 0, interrupted: 0, failed: {}, latencies: [], timings: {}, over: {},
-    first: null, last: null,
+    errorEvents: {}, failureSignatures: new Map(), first: null, last: null,
+  };
+}
+
+// 응답 없는 호출의 실패 위치. 어댑터 timing이 없으면 위치 필드는 null이다.
+function failureSignatureOf(call) {
+  const timing = call.timing;
+  return {
+    code: call.code, category: call.category,
+    turnEnd: timing?.turnEnd ?? null, turnError: timing?.turnError ?? null,
+    exitCode: timing?.exitCode ?? null, exitSignal: timing?.exitSignal ?? null,
   };
 }
 
@@ -230,10 +291,18 @@ function addCall(group, call, outliers) {
     const category = call.category ?? 'unknown';
     group.failed[category] = (group.failed[category] ?? 0) + 1;
   }
+  if (call.code !== 'RESPONSE_RECEIVED') {
+    const signature = failureSignatureOf(call);
+    const id = JSON.stringify(Object.values(signature));
+    const row = group.failureSignatures.get(id) ?? { ...signature, calls: 0 };
+    row.calls += 1;
+    group.failureSignatures.set(id, row);
+  }
   if (call.timing) {
     for (const key of TIMING_KEYS) {
       if (call.timing[key] !== null) (group.timings[key] ??= []).push(call.timing[key]);
     }
+    for (const [name, count] of Object.entries(call.timing.errorEvents)) group.errorEvents[name] = (group.errorEvents[name] ?? 0) + count;
   }
 }
 
@@ -339,6 +408,11 @@ export function aggregateLatency(sessions, { since = null } = {}) {
       answeredMs: distribution(group.latencies),
       over: group.over,
       timing: Object.fromEntries(TIMING_KEYS.filter((key) => group.timings[key]?.length).map((key) => [key, distribution(group.timings[key])])),
+      // 응답 없는 호출(timeout·중단·실패)의 위치별 수. 많은 순, 같으면 서명 순이다.
+      failureSignatures: [...group.failureSignatures.values()]
+        .sort((a, b) => b.calls - a.calls || JSON.stringify(Object.values(a)).localeCompare(JSON.stringify(Object.values(b)))),
+      // 모든 호출(응답한 호출 포함)에서 관측한 error 이벤트의 분류별 합. 재연결 뒤 응답한 호출도 여기서 보인다.
+      errorEvents: Object.fromEntries(ERROR_CLASS_NAMES.filter((name) => group.errorEvents[name]).map((name) => [name, group.errorEvents[name]])),
     })).sort(order),
     legacyStartWarmupUpperBound: [...proxyGroups.values()].map((group) => ({
       runtime: group.runtime, model: group.model, sessions: group.values.length, ms: distribution(group.values),
@@ -354,6 +428,7 @@ export function aggregateLatency(sessions, { since = null } = {}) {
       '관측 기록의 요약이다. 분포 보장·안정성 증명이 아니다.',
       'timeout은 상한에서 잘린 검열값이라 응답 지연 분포에 넣지 않았다.',
       'legacyStartWarmupUpperBound는 relay 기동을 포함한 server-spawn→bootstrap-playing 간격이다. 호출 지연이 아니다.',
+      'failureSignatures·errorEvents는 CLI가 낸 이벤트 이름과 메시지의 닫힌 분류다. provider 내부 원인의 증명이 아니다.',
     ],
   };
 }
@@ -367,6 +442,13 @@ export function buildLatencyReport(root, options = {}) {
 
 const fmt = (value) => (value === null || value === undefined ? '-' : `${(value / 1000).toFixed(1)}s`);
 
+/** 실패 서명 한 줄: `CLI_FAILED/transport · turn failed[capacity] · exit 1`. 관측 못 한 위치는 `?`다. */
+export function formatSignature(row) {
+  const turn = row.turnEnd === null ? 'turn ?' : `turn ${row.turnEnd}${row.turnError ? `[${row.turnError}]` : ''}`;
+  const exit = row.exitSignal ? `exit ${row.exitSignal}` : row.exitCode === null ? 'exit ?' : `exit ${row.exitCode}`;
+  return `${row.code ?? '?'}/${row.category ?? '?'} · ${turn} · ${exit}`;
+}
+
 export function formatLatencyReport(report) {
   const lines = [
     `플레이어 호출 지연(읽기 전용 집계) — 기록 ${report.sessions.scanned}개 중 LLM 세션 ${report.sessions.llm}개(호출 있는 세션 ${report.sessions.withPlayerCalls}개)${report.since ? `, ${report.since} 이후` : ''}`,
@@ -377,6 +459,9 @@ export function formatLatencyReport(report) {
     lines.push(`- ${group.runtime}/${group.model} ${group.kind}${group.batchSize ? ` ×${group.batchSize}` : ''}: 호출 ${group.calls}, 응답 ${group.outcomes.answered}, timeout ${group.outcomes.timeout}, 중단 ${group.outcomes.interrupted}, 실패 ${failed}`);
     lines.push(`  응답 경과 중앙값 ${fmt(d.median)} · p90 ${fmt(d.p90)} · p95 ${fmt(d.p95)} · 최대 ${fmt(d.max)}${Object.keys(group.over).length ? ` · 초과 ${JSON.stringify(group.over)}` : ''}`);
     for (const [key, value] of Object.entries(group.timing)) lines.push(`  ${key} 중앙값 ${fmt(value.median)} · 최대 ${fmt(value.max)} (n=${value.n})`);
+    for (const row of group.failureSignatures) lines.push(`  응답 없음 ${formatSignature(row)} ×${row.calls}`);
+    const errors = Object.entries(group.errorEvents).map(([name, n]) => `${name} ${n}`).join(', ');
+    if (errors) lines.push(`  error 이벤트: ${errors}`);
   }
   for (const proxy of report.legacyStartWarmupUpperBound) {
     lines.push(`- ${proxy.runtime}/${proxy.model} 시작 warmup 상한 대리값(relay 기동 포함): 세션 ${proxy.sessions}, 중앙값 ${fmt(proxy.ms.median)} · 최대 ${fmt(proxy.ms.max)} · playing 전 끝난 시작 ${proxy.unfinishedStarts}`);
