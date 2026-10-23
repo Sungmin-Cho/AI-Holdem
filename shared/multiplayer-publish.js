@@ -219,6 +219,23 @@ export function validateResultHold(hold, view) {
   return hold;
 }
 
+/** A timed tournament's public level clock (design D3.8): the level length,
+ * what was left of it at `at`, whether play time was running, and the next
+ * level's blinds. Closed shape; anything else is BAD_LEVEL_CLOCK. */
+export function validateLevelClock(clock) {
+  if (clock === undefined || clock === null) return clock;
+  const keys = ['levelMs', 'remainingMs', 'at', 'running', 'nextBlinds'];
+  if (!isPlain(clock) || ![Object.prototype, null].includes(Object.getPrototypeOf(clock))
+    || Object.keys(clock).length !== keys.length || !keys.every(key => Object.hasOwn(clock, key))
+    || !int(clock.levelMs) || clock.levelMs < 60_000 || clock.levelMs > 3_600_000
+    || !int(clock.remainingMs) || clock.remainingMs < 0 || clock.remainingMs > clock.levelMs
+    || typeof clock.at !== 'string' || !Number.isFinite(Date.parse(clock.at))
+    || typeof clock.running !== 'boolean'
+    || !Array.isArray(clock.nextBlinds) || clock.nextBlinds.length !== 2
+    || !clock.nextBlinds.every(value => int(value) && value > 0) || clock.nextBlinds[0] > clock.nextBlinds[1]) fail('BAD_LEVEL_CLOCK');
+  return clock;
+}
+
 export function validateTurnDeadline(turnDeadline, nextDecision) {
   if (turnDeadline === undefined || turnDeadline === null) return turnDeadline;
   if (!isPlain(turnDeadline) || typeof turnDeadline.decisionId !== 'string'
@@ -533,6 +550,7 @@ export function projectForSeat(payload, seat) {
   if (payload.messages !== undefined) projected.messages = payload.messages;
   if (payload.turnDeadline !== undefined) projected.turnDeadline = payload.turnDeadline;
   if (payload.resultHold !== undefined) projected.resultHold = payload.resultHold;
+  if (payload.levelClock !== undefined) projected.levelClock = payload.levelClock;
   return projected;
 }
 

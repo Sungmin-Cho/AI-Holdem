@@ -137,6 +137,7 @@ import {
 import { createProfileStore } from './training-stores.js';
 import { ensureStudyService } from './study-service.js';
 import { assertNotSessionCatalogTarget, relayMayBeAlive } from '../engine/game-archive.js';
+import { blindsForLevel } from '../engine/hand.js';
 import {
   commitSession,
   ensureSessionStore,
@@ -190,6 +191,7 @@ const RESUMABLE_FINAL_HALTS = new Set([
   'REVIEW_FAILED',
   'REVIEW_GATE_CLOSED',
 ]);
+const PLAY_CLOCK_CHECKPOINT_MS = 10_000;
 const DEFAULT_WAIT_NETWORK_MARGIN_MS = 11_000;
 // 127.0.0.1 왕복 한 번의 상한. health는 실패해도 startup 루프가 다시 돌지만
 // `assertAuthenticatedServer`의 두 프로브는 재시도가 없어서, 느린 기기에서 스냅샷
@@ -1451,6 +1453,67 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (!lockHandle) return;
     releaseOwnedLock(lockHandle);
     lockHandle = null;
+  };
+
+  // Time-based levels (design D3.7): the play clock runs only between leaving
+  // the last park and stopping. Values that leave the loop (engine --play-ms,
+  // loop-state, the published level clock) are whole milliseconds. A crash loses
+  // only the play time since the last checkpoint that was written.
+  const playClock = { baseMs: 0, since: null, timer: null };
+  const playClockNow = opts.playClockNow ?? monotonicNow;
+  let timedLevelMinutes;
+  const timedLevelsOf = () => {
+    if (timedLevelMinutes === undefined) {
+      const config = readJsonOptional(engineStatePath, 'ENGINE_STATE')?.config;
+      if (!config) return null;
+      timedLevelMinutes = Number.isInteger(config.levelMinutes) ? config.levelMinutes : null;
+    }
+    return timedLevelMinutes;
+  };
+  const playNow = () => playClock.baseMs
+    + (playClock.since === null ? 0 : Math.max(0, Math.floor(playClockNow() - playClock.since)));
+  // Only the loop that still owns the game records its clock; closing a clock
+  // and cancelling its timer never depend on that.
+  const checkpointPlayClock = () => {
+    if (stopRequested || lockLostPermanently || !timedLevelsOf()) return;
+    writeLoopState({ playClockMs: playNow() });
+  };
+  const openPlayClock = () => {
+    if (playClock.since !== null || stopRequested || !timedLevelsOf()) return;
+    playClock.since = playClockNow();
+    playClock.timer = setInterval(() => {
+      if (playClock.since === null || stopRequested || lockLostPermanently || !ownedLockStillVerified()) return;
+      // A failed checkpoint only widens what a crash could lose; the next one retries.
+      try { checkpointPlayClock(); } catch (error) { log('play-clock-checkpoint-error', { code: error.code ?? 'ERROR' }); }
+    }, PLAY_CLOCK_CHECKPOINT_MS);
+    playClock.timer.unref?.();
+  };
+  const closePlayClock = ({ persist = true } = {}) => {
+    if (playClock.timer) { clearInterval(playClock.timer); playClock.timer = null; }
+    if (playClock.since === null) return;
+    playClock.baseMs = playNow();
+    playClock.since = null;
+    if (persist) checkpointPlayClock();
+  };
+  const restorePlayClock = () => {
+    const ms = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : 0);
+    const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+    playClock.baseMs = Math.max(playClock.baseMs, ms(readLoopState()?.playClockMs), ms(engine?.levelClock?.playMs));
+  };
+  const newHandStepArgs = () => ['step', '--new-hand', ...(timedLevelsOf() ? ['--play-ms', String(playNow())] : [])];
+  // `levelMs|remainingMs|at|running|sb/bb` for a timed game's live hand view; none
+  // once the game is over, so the relay drops the clock with the last view.
+  const levelClockFlagFor = (envelope) => {
+    const minutes = timedLevelsOf();
+    const view = envelope.view;
+    if (!minutes || envelope.gameOver || view?.gameOver === true || !Number.isSafeInteger(view?.handNo) || view.handNo < 1) return null;
+    const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+    const started = engine?.levelClock?.levelStartedMs;
+    if (!Number.isSafeInteger(started) || !Number.isSafeInteger(engine.level) || !Array.isArray(engine.config?.blinds0)) return null;
+    const levelMs = minutes * 60_000;
+    const remainingMs = Math.min(levelMs, Math.max(0, started + levelMs - playNow()));
+    const [sb, bb] = blindsForLevel(engine.level + 1, engine.config.blinds0);
+    return [levelMs, remainingMs, new Date(paceNow()).toISOString(), playClock.since === null ? 0 : 1, `${sb}/${bb}`].join('|');
   };
 
   const acquireLoopLock = async ({ mode, force = false }) => {
@@ -4297,6 +4360,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         hold = { handNo: envelope.view?.handNo ?? envelope.handNo, startAt: new Date(start).toISOString(), until: new Date(until).toISOString(), runoutStepMs: pace.runoutStepMs, runoutStreets };
         flags = [...flags, '--result-hold', [hold.handNo, hold.startAt, hold.until, hold.runoutStepMs, hold.runoutStreets].join('|')];
       }
+    }
+    if (envelope.view !== undefined && !flags.includes('--retry') && timedLevelsOf()) {
+      checkpointPlayClock();
+      const levelClock = levelClockFlagFor(envelope);
+      if (levelClock) flags = [...flags, '--level-clock', levelClock];
     }
     writeJsonAtomic(turnPath, envelope);
     const timeoutMs = Number(opts.actionTimeoutMs) || 0;
@@ -8008,6 +8076,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       resolvePause?.({state:'finalizing'}); resolvePause = null;
       return out;
     }
+    closePlayClock();
     await retryControlWrite(()=>control.set('paused'));
     if(stopRequested)return out;
     const parked = new Promise(resolve => {parkWake = resolve;});
@@ -8022,6 +8091,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await requestStop();
       return null;
     }
+    openPlayClock();
     return out ? await publishEnvelope(await runCli(['step']), ['--view-only']) : out;
   };
 
@@ -8247,6 +8317,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     if (finalStatePatch !== null) pendingFinalStatePatch = finalStatePatch;
     if (stopPromise) return stopPromise;
     stopRequested = true;
+    closePlayClock({ persist: false });
     if (activeDecision?.identity.runtime === 'jev') activeDecision.controller.abort();
     resultHoldController?.abort();
     policyPaceController?.abort();
@@ -8264,7 +8335,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       } else {
         try {
           if (lifecycleStarted && !preserveLoopState && fs.existsSync(loopStatePath)) {
-            writeLoopState({ stopping: true, stoppedAt: undefined, stopRequestedAt: isoNow(now), ...deferredRecordAtStop() });
+            writeLoopState({ stopping: true, stoppedAt: undefined, stopRequestedAt: isoNow(now), ...deferredRecordAtStop(),
+              ...(timedLevelsOf() ? { playClockMs: playNow() } : {}) });
           }
         } catch (error) {
           stopErrors.push(error);
@@ -9254,6 +9326,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
 
     const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
     if (!engine) throw codedError('NO_GAME', 'engine state가 없습니다.');
+    restorePlayClock();
     if (engine.gameOver) {
       writeLoopState({ phase: 'finalizing', handNo: engine.handNo ?? state.handNo });
       return runFinalization();
@@ -9274,6 +9347,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       await pauseBarrier(current);
       if (stopRequested) return readLoopState();
     }
+    openPlayClock();
     if (resumeEntryPending) {
       const current = await runCli(['step']);
       if (fs.existsSync(path.join(root, '.publish-attempt.json'))) {
@@ -9295,13 +9369,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       if (engine.hand) {
         out = await publishEnvelope(current, ['--view-only', ...waitFlags()]);
       } else {
-        out = await runAtomicStepPublish(['step', '--new-hand'], waitFlags());
+        out = await runAtomicStepPublish(newHandStepArgs(), waitFlags());
       }
     } else if (engine.hand) {
       const synchronized = await runCli(['step']);
       out = await publishEnvelope(synchronized, ['--view-only', ...waitFlags()]);
     } else {
-      out = await runAtomicStepPublish(['step', '--new-hand'], waitFlags());
+      out = await runAtomicStepPublish(newHandStepArgs(), waitFlags());
     }
 
       while (!stopRequested) {
@@ -9312,6 +9386,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         const ending = out.gameOver;
         if (ending) {
           gameOverPending = true;
+          closePlayClock();
           // The last hand explains first. Its pipeline starts here, before the
           // probe and coach waits (outside the finalization clock), and
           // explanations still waiting at the lock yield to it from now on;
@@ -9381,7 +9456,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         out = await pauseBarrier(out);
         if (stopRequested || out === null) break;
         resultHoldState = null;
-        out = await runAtomicStepPublish(['step', '--new-hand'], (started) => {
+        out = await runAtomicStepPublish(newHandStepArgs(), (started) => {
           const narration = started.events?.find((event) => event.type === 'level_up');
           return narration
             ? ['--narration-code', 'LEVEL_UP', '--narration-params', JSON.stringify({ sb: narration.sb, bb: narration.bb }), ...waitFlags()]
@@ -9488,6 +9563,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       } catch (error) {
         noteRunFailure(error);
         throw error;
+      } finally {
+        // No exit leaves the play clock's checkpoint timer behind.
+        closePlayClock({ persist: false });
       }
     },
     coachPipeline,

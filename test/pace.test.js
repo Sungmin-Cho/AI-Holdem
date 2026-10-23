@@ -44,6 +44,19 @@ test('result display time is its own setting and older setups keep the pace dwel
   assert.ok(30000 + 3 * paceFor({pace:'slow'}).runoutStepMs <= 60000);
 });
 
+test('the level clock is a closed public envelope that reaches every seat', async () => {
+  const {validateLevelClock,projectForSeat} = await import('../shared/multiplayer-publish.js');
+  const clock = {levelMs:60000,remainingMs:0,at:'2026-01-01T00:00:00.000Z',running:false,nextBlinds:[25,50]};
+  assert.deepEqual(validateLevelClock(clock), clock);
+  for (const value of [undefined, null]) assert.equal(validateLevelClock(value), value);
+  for (const bad of [[], 'x', {...clock,levelMs:3600001}, {...clock,remainingMs:-1}, {...clock,nextBlinds:[25]}, {...clock,nextBlinds:[25,50,100]}]) {
+    assert.throws(() => validateLevelClock(bad), {code:'BAD_LEVEL_CLOCK'});
+  }
+  assert.deepEqual(projectForSeat({views:{h1:{handNo:1}},levelClock:clock},'h1').levelClock, clock);
+  assert.equal(projectForSeat({views:{h1:{handNo:1}},levelClock:null},'h1').levelClock, null);
+  assert.equal(Object.hasOwn(projectForSeat({views:{h1:{handNo:1}}},'h1'),'levelClock'), false);
+});
+
 test('result hold is a bounded card-free envelope tied to a completed hand', async () => {
   const {validateResultHold} = await import('../shared/multiplayer-publish.js');
   assert.equal(typeof validateResultHold, 'function');
