@@ -118,10 +118,21 @@
                     ><span class="ui-label">시작 스택 (칩)</span>
                     <input class="ui-input ui-num" name="stack" type="number" value="5000" min="1" /></label
                   ><label class="ui-field"
+                    ><span class="ui-label">블라인드 상승 방식</span>
+                    <span class="ui-select-wrap"><select name="levelMode" class="ui-select">
+                      <option value="time" selected>시간</option>
+                      <option value="hands">핸드 수</option>
+                    </select></span></label
+                  ><label class="ui-field" id="level-minutes-field"
+                    ><span class="ui-label">블라인드 상승 주기 (분)</span>
+                    <input class="ui-input ui-num" name="levelMinutes" type="number" value="2" min="1" max="60"
+                  /></label
+                  ><label class="ui-field" id="level-every-field" hidden
                     ><span class="ui-label">블라인드 상승 주기 (핸드)</span>
                     <input class="ui-input ui-num" name="levelEvery" type="number" value="8" min="1"
                   /></label>
                 </div>
+                <p class="ui-help" id="level-time-help">시간 방식은 플레이한 시간으로 잽니다. 일시정지한 동안은 멈추고, 시간이 다 되면 다음 핸드부터 블라인드가 한 단계 오릅니다.</p>
               </section>
               <section class="detail-group" aria-labelledby="group-assist">
                 <h2 id="group-assist" class="ui-eyebrow">연습 보조</h2>
@@ -169,7 +180,11 @@
               </section>
               <section class="detail-group" aria-labelledby="group-pace">
                 <h2 id="group-pace" class="ui-eyebrow">진행 속도</h2>
+                <div class="detail-fields">
                 <label class="ui-field"><span class="ui-label">AI 행동 사이 간격</span><span class="ui-select-wrap"><select name="pace"><option value="instant">즉시</option><option value="fast">빠름</option><option value="normal" selected>보통</option><option value="slow">느림</option></select></span></label>
+                <label class="ui-field"><span class="ui-label">핸드 결과 표시</span><span class="ui-select-wrap"><select name="resultHoldSec" class="ui-select"><option value="0">바로 다음 핸드</option><option value="2">2초</option><option value="4" selected>4초</option><option value="6">6초</option><option value="10">10초</option></select></span></label>
+                </div>
+                <p class="ui-help">핸드가 끝나면 결과를 표시한 시간만큼 보여 준 뒤 다음 핸드를 시작합니다. 혼자 하는 게임에서는 결과 화면의 건너뛰기로 바로 넘어갈 수 있습니다. 올인 런아웃 간격은 AI 행동 간격을 따릅니다.</p>
               </section>
               <section id="llm-settings" class="detail-group" aria-labelledby="group-wait" hidden>
                 <h2 id="group-wait" class="ui-eyebrow">AI 응답 대기</h2>

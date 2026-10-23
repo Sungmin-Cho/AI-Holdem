@@ -47,3 +47,13 @@ test('new lobby games explicitly select normal pace with four Korean labels', ()
   assert.match(html, /<option value="normal" selected>/);
   assert.match(js, /"pace",/);
 });
+
+test('new lobby games choose the hand result display time apart from the AI pace', () => {
+  const html=read('lobby.html'),js=read('lobby.js');
+  assert.match(html, /<select name="resultHoldSec"/);
+  for(const [value,label] of [['0','바로 다음 핸드'],['2','2초'],['4','4초'],['6','6초'],['10','10초']]) {
+    assert.match(html,new RegExp(`<option value="${value}"[^>]*>${label}</option>`));
+  }
+  assert.match(html, /<option value="4" selected>4초<\/option>/);
+  assert.match(js, /setup\.resultHoldSec = Number\(data\.get\("resultHoldSec"\)\)/);
+});

@@ -1,15 +1,17 @@
 // Browser-safe settings. CLI and lobby profiles deliberately differ for tournament.
 import { playerBudget } from './player-budget.js';
-import { PACE_PRESETS } from './pace.js';
+import { PACE_PRESETS, validResultHoldSec } from './pace.js';
 export const SETUP_KEYS = Object.freeze([
   "mode",
   "pace",
+  "resultHoldSec",
   "aiCount",
   "opponentRuntime",
   "stack",
   "stackBb",
   "hands",
   "levelEvery",
+  "levelMinutes",
   "blinds",
   "mirrorSelf",
   "exploitSelf",
@@ -37,7 +39,8 @@ export function cliModeDefaults(args) {
     fresh &&
     next.mode === undefined &&
     next.stack === undefined &&
-    next.levelEvery === undefined
+    next.levelEvery === undefined &&
+    next.levelMinutes === undefined
   )
     next.mode = "cash-training";
   if (!next.resume && next.mode === "cash-training" && next.ai === undefined)
@@ -62,6 +65,7 @@ export function normalizeSetup(input = {}) {
   for (const key of Object.keys(input))
     if (!SETUP_KEYS.includes(key)) throw setupError(key);
   if (input.pace !== undefined && !Object.hasOwn(PACE_PRESETS, input.pace)) throw setupError('pace');
+  if (input.resultHoldSec !== undefined && !validResultHoldSec(input.resultHoldSec)) throw setupError('resultHoldSec');
   const value = {
     mode: "cash-training",
     aiCount: 5,
@@ -93,7 +97,7 @@ export function normalizeSetup(input = {}) {
   }
   for (const key of ["mirrorSelf", "exploitSelf"])
     if (typeof value[key] !== "boolean") throw setupError(key);
-  for (const key of ["aiCount", "stack", "stackBb", "hands", "levelEvery"])
+  for (const key of ["aiCount", "stack", "stackBb", "hands", "levelEvery", "levelMinutes"])
     if (
       value[key] !== undefined &&
       (!Number.isSafeInteger(value[key]) || value[key] < (key === "aiCount" && Array.isArray(value.participants) && value.participants.length >= 1 ? 0 : 1))
@@ -104,13 +108,18 @@ export function normalizeSetup(input = {}) {
     throw setupError("stackBb");
   if (value.mode === "cash-training") {
     if (value.levelEvery !== undefined) throw setupError("levelEvery");
+    if (value.levelMinutes !== undefined) throw setupError("levelMinutes");
     if (value.stack === undefined) value.stackBb ??= 100;
     value.hands ??= 20;
   } else {
     if (value.stackBb !== undefined || value.hands !== undefined)
       throw setupError("hands");
     value.stack ??= 5000;
-    value.levelEvery ??= 8;
+    // Lobby tournaments level up by time unless a hand period is chosen; the
+    // CLI keeps its own default of eight hands (cliModeDefaults adds none).
+    if (value.levelEvery !== undefined && value.levelMinutes !== undefined) throw setupError("levelMinutes");
+    if (value.levelEvery === undefined) value.levelMinutes ??= 2;
+    if (value.levelMinutes !== undefined && value.levelMinutes > 60) throw setupError("levelMinutes");
   }
   value.blinds ??= "25/50";
   if (typeof value.blinds !== "string" || !/^\d+\/\d+$/.test(value.blinds))

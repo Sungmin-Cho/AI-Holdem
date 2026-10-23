@@ -351,6 +351,8 @@ async function refresh() {
       } else if (field.type === "checkbox") field.checked = value;
       else field.value = String(value);
     }
+    if (defaults.levelEvery !== undefined) form.elements.levelMode.value = "hands";
+    else if (defaults.levelMinutes !== undefined) form.elements.levelMode.value = "time";
     if (defaults.mode === "cash-training" && defaults.stack !== undefined) {
       form.elements.cashStackUnit.value = "chips";
       form.elements.cashStack.value = String(defaults.stack);
@@ -751,6 +753,10 @@ form.onchange = () => {
   $("cash-chip-field").hidden = !chips;
   $("cash-bb-field").hidden = chips;
   $("tournament-fields").hidden = mode !== "tournament";
+  const byHands = form.elements.levelMode.value === "hands";
+  $("level-minutes-field").hidden = byHands;
+  $("level-every-field").hidden = !byHands;
+  $("level-time-help").hidden = mode !== "tournament" || byHands;
   const count = Number($("ai-count").value);
   $("seats").textContent = `나 1명 + AI ${count}명 = 총 ${count + 1}명`;
   updateSetupSummary();
@@ -792,6 +798,7 @@ function setupFromForm() {
         "pace",
       ].map((k) => [k, data.get(k)]),
     );
+  setup.resultHoldSec = Number(data.get("resultHoldSec"));
   // The AI wait budget only exists for remote players; policy games use the
   // server defaults (and their hidden inputs can never block a start).
   const remote = data.get("opponentRuntime") !== "policy";
@@ -802,7 +809,7 @@ function setupFromForm() {
       : ["aiCount"]),
     ...(setup.mode === "cash-training"
       ? ["stackBb", "hands"]
-      : ["stack", "levelEvery"]),
+      : ["stack", data.get("levelMode") === "hands" ? "levelEvery" : "levelMinutes"]),
   ])
     setup[k] = Number(data.get(k));
   if (roomIsLive()) {
@@ -830,7 +837,8 @@ function updateSetupSummary() {
     const amount=formatAmount(setup.stack??setup.stackBb*bb,bb);
     $('setup-summary').textContent=`${setup.mode==='cash-training'?'캐시 트레이닝':'토너먼트'} · ${{policy:'로컬 정책',llm:'LLM',jev:'JEV'}[setup.opponentRuntime]} · 총 ${setup.aiCount+1}명 · ${amount.primary} / ${amount.secondary} · ${setup.blinds} 칩${setup.hands?` · ${setup.hands}핸드`:''}`;
     $('setup-assistance').textContent=[setup.dealBias!=='off'?'유리한 딜 · 평가 제외':null,setup.hints==='on'?'행동 전 힌트 켬':null,setup.showdownPolicy==='open'?'쇼다운 모두 공개':null,setup.replayReveal==='all'?'복기 카드 모두 공개':null].filter(Boolean).join(' · ');
-    $('details-value').textContent=`${setup.blinds} · ${amount.primary}${setup.hands?` · ${setup.hands}핸드`:''} · ${PACE_LABELS[setup.pace] ?? ''}`;
+    const levels=setup.levelMinutes?` · ${setup.levelMinutes}분마다 레벨업`:setup.levelEvery?` · ${setup.levelEvery}핸드마다 레벨업`:'';
+    $('details-value').textContent=`${setup.blinds} · ${amount.primary}${setup.hands?` · ${setup.hands}핸드`:''}${levels} · ${PACE_LABELS[setup.pace] ?? ''} · 결과 ${setup.resultHoldSec ? `${setup.resultHoldSec}초` : '바로 다음 핸드'}`;
     if (validationShown) markFieldError(null);
     if ($('error').dataset.kind === 'setup') { $('error').textContent=''; $('error').dataset.kind=''; }
   } catch(e) {if (validationShown) markFieldError(e);$('setup-summary').textContent=`설정 확인 필요 · ${FIELD_ERRORS[e.field] ?? '입력값을 확인하세요.'}`;$('setup-assistance').textContent='유효한 설정을 입력하면 시작 전 요약을 확인할 수 있습니다.';}
@@ -841,6 +849,8 @@ const FIELD_ERRORS = {
   stack: '시작 스택(칩)을 확인하세요.',
   hands: '핸드 수를 확인하세요.',
   levelEvery: '블라인드 상승 주기를 확인하세요.',
+  levelMinutes: '블라인드 상승 시간(1~60분)을 확인하세요.',
+  resultHoldSec: '핸드 결과 표시 시간을 확인하세요.',
   aiCount: 'AI 플레이어 수를 확인하세요.',
   totalSeats: '총 인원을 확인하세요.',
   mirrorSelf: '내 성향 상대 두 종류를 함께 쓰려면 AI가 2명 이상이어야 합니다.',

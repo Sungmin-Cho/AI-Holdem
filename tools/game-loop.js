@@ -17,7 +17,7 @@ import { createHintControl, checkHintResume } from './hint-control.js';
 import fs from 'node:fs';
 import {sealPreparation, readPreparation} from './session-preparation.js';
 import { cliModeDefaults } from '../shared/game-setup.js';
-import { paceFor } from '../shared/pace.js';
+import { paceFor, resultHoldMsFor, RESULT_HOLD_MAX_SEC } from '../shared/pace.js';
 import {checkDealBiasResume} from '../shared/deal-selection.js';
 import { playerBudget, playerFailureCategory } from '../shared/player-budget.js';
 import { createSessionControl, retryControlWrite } from './session-control.js';
@@ -570,6 +570,7 @@ export function engineInitFlags(args = {}) {
   const extra = [];
   if (args.stack !== undefined) extra.push('--stack', String(args.stack));
   if (args.levelEvery !== undefined) extra.push('--level-every', String(args.levelEvery));
+  if (args.levelMinutes !== undefined) extra.push('--level-minutes', String(args.levelMinutes));
   if (args.blinds !== undefined) extra.push('--blinds', String(args.blinds));
   if (args.mode !== undefined) extra.push('--mode', String(args.mode));
   if (args.stackBb !== undefined) extra.push('--stack-bb', String(args.stackBb));
@@ -634,11 +635,13 @@ export function parseGameLoopArgs(argv) {
     ['--ai', 'ai'],
     ['--stack', 'stack'],
     ['--level-every', 'levelEvery'],
+    ['--level-minutes', 'levelMinutes'],
     ['--blinds', 'blinds'],
     ['--player-runtime', 'playerRuntime'],
     ['--practice-focus-file', 'practiceFocusFile'],
     ['--mode', 'mode'],
     ['--pace', 'pace'],
+    ['--result-hold-sec', 'resultHoldSec'],
     ['--stack-bb', 'stackBb'],
     ['--hands', 'hands'],
     ['--opponent-runtime', 'opponentRuntime'],
@@ -668,10 +671,10 @@ export function parseGameLoopArgs(argv) {
     if (value == null || value.startsWith('--')) throw codedError('USAGE', `${arg}의 값이 필요합니다.`);
     index += 1;
     if (valueName === 'gameDir') sawGameDir = true;
-    if (valueName === 'ai' || valueName === 'stack' || valueName === 'levelEvery'
+    if (valueName === 'ai' || valueName === 'stack' || valueName === 'levelEvery' || valueName === 'levelMinutes'
       || valueName === 'stackBb' || valueName === 'hands' || valueName === 'port'
-      || valueName === 'playerSoftMs' || valueName === 'playerHardMs') {
-      parsed[valueName] = integerValue(value, arg, valueName === 'port' ? 0 : 1);
+      || valueName === 'playerSoftMs' || valueName === 'playerHardMs' || valueName === 'resultHoldSec') {
+      parsed[valueName] = integerValue(value, arg, valueName === 'port' || valueName === 'resultHoldSec' ? 0 : 1);
     } else if (valueName === 'gameDir' || valueName === 'storeDir' || valueName === 'practiceFocusFile') {
       parsed[valueName] = path.resolve(value);
     } else {
@@ -688,6 +691,15 @@ export function parseGameLoopArgs(argv) {
     throw codedError('USAGE', '--opponent-runtime는 llm, policy 또는 jev입니다.');
   }
   try { paceFor(parsed); } catch { throw codedError('USAGE', '--pace는 instant, fast, normal 또는 slow입니다.'); }
+  if (parsed.levelMinutes !== undefined && parsed.levelMinutes > 60) {
+    throw codedError('USAGE', '--level-minutes는 1..60 정수입니다.');
+  }
+  if (parsed.levelEvery !== undefined && parsed.levelMinutes !== undefined) {
+    throw codedError('USAGE', '--level-every와 --level-minutes는 함께 쓸 수 없습니다.');
+  }
+  if (parsed.resultHoldSec !== undefined && parsed.resultHoldSec > RESULT_HOLD_MAX_SEC) {
+    throw codedError('USAGE', `--result-hold-sec는 0..${RESULT_HOLD_MAX_SEC} 정수입니다.`);
+  }
   if (parsed.solverAdapterId != null && !/^[a-z0-9-]{1,64}$/.test(parsed.solverAdapterId)) {
     throw codedError('USAGE', '--solver는 [a-z0-9-] 64자 이내 adapterId입니다.');
   }
@@ -828,6 +840,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const lockRoot = path.resolve(lockDir);
   const now = opts.now ?? (() => new Date());
   const pace = paceFor(opts);
+  const resultHoldMs = resultHoldMsFor(opts);
   const paceNow = () => new Date(now()).getTime();
   const requestedPort = opts.port ?? 8877;
   const pollMs = opts.pollMs ?? 20;
@@ -4279,7 +4292,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       const runoutStreets = events.some(event => event.type === 'showdown' || event.type === 'pot_award')
         ? events.filter(event => event.type === 'street').length : 0;
       const start = paceNow();
-      const until = start + pace.handResultDwellMs + runoutStreets * pace.runoutStepMs;
+      const until = start + resultHoldMs + runoutStreets * pace.runoutStepMs;
       if (until > start) {
         hold = { handNo: envelope.view?.handNo ?? envelope.handNo, startAt: new Date(start).toISOString(), until: new Date(until).toISOString(), runoutStepMs: pace.runoutStepMs, runoutStreets };
         flags = [...flags, '--result-hold', [hold.handNo, hold.startAt, hold.until, hold.runoutStepMs, hold.runoutStreets].join('|')];
@@ -8461,6 +8474,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     ai,
     stack,
     levelEvery,
+    levelMinutes,
     blinds,
     mode,
     stackBb,
@@ -8518,7 +8532,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       }
       if (!preinitialized && (opponentRuntime ?? opponentRuntimeOf()) === 'jev' && ai !== 0) await (opts.jevPreflight ?? preflightJev)();
       const initArgs = ['init', '--ai', String(ai), ...engineInitFlags({
-        stack, levelEvery, blinds, mode, stackBb, hands,
+        stack, levelEvery, levelMinutes, blinds, mode, stackBb, hands,
         opponentRuntime: opponentRuntime ?? opponentRuntimeOf(),
         showdownPolicy,
         replayReveal,
@@ -9594,7 +9608,9 @@ async function attachStudyBeforeCommit(storeDir, lockHandle) {
 
 export async function prepareGameSession(args, { resolver, loopOptions = {}, onReserve } = {}) {
   if (!args.resume && args.opponentRuntime === 'jev' && args.ai !== 0) await (loopOptions.jevPreflight ?? preflightJev)();
-  loopOptions = { ...loopOptions, pace:args.pace ?? loopOptions.pace, dealBias:args.dealBias, retryDecisionId: args.retryDecisionId,
+  loopOptions = { ...loopOptions, pace:args.pace ?? loopOptions.pace,
+    ...((args.resultHoldSec ?? loopOptions.resultHoldSec) !== undefined ? { resultHoldSec: args.resultHoldSec ?? loopOptions.resultHoldSec } : {}),
+    dealBias:args.dealBias, retryDecisionId: args.retryDecisionId,
     ...(args.abortUnrecoverableId !== undefined ? {abortUnrecoverable:{operationId:args.abortUnrecoverableId}} : {}),
     ...(args.freshSession ? {freshAuthorization:{source:'legacy',requestId:null}} : {}),
     retryBudget: { ...(args.playerSoftMs !== undefined ? { softMs: args.playerSoftMs } : {}),
@@ -9741,6 +9757,7 @@ async function main() {
       ai: args.ai,
       stack: args.stack,
       levelEvery: args.levelEvery,
+      levelMinutes: args.levelMinutes,
       blinds: args.blinds,
       mode: args.mode,
       stackBb: args.stackBb,

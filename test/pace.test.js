@@ -24,6 +24,26 @@ test('setup preserves pace only when explicitly selected', async () => {
   assert.throws(() => normalizeSetup({pace:'bogus'}), {code:'INVALID_SETUP'});
 });
 
+test('result display time is its own setting and older setups keep the pace dwell', async () => {
+  const {resultHoldMsFor,paceFor} = await import('../shared/pace.js');
+  const {normalizeSetup,setupToArgs} = await import('../shared/game-setup.js');
+  for (const pace of [undefined,'instant','fast','normal','slow']) {
+    assert.equal(resultHoldMsFor({pace}), paceFor({pace}).handResultDwellMs);
+    assert.equal(resultHoldMsFor({pace,resultHoldSec:4}), 4000);
+    assert.equal(resultHoldMsFor({pace,resultHoldSec:0}), 0);
+  }
+  assert.equal(resultHoldMsFor({resultHoldSec:30}), 30000);
+  for (const bad of [-1, 31, 2.5, '4', null]) {
+    assert.throws(() => resultHoldMsFor({resultHoldSec:bad}));
+    assert.throws(() => normalizeSetup({resultHoldSec:bad}), {code:'INVALID_SETUP', field:'resultHoldSec'});
+  }
+  assert.equal(Object.hasOwn(normalizeSetup({}), 'resultHoldSec'), false);
+  assert.equal(normalizeSetup({pace:'instant',resultHoldSec:4}).resultHoldSec, 4);
+  assert.equal(setupToArgs({resultHoldSec:0}, '/store').resultHoldSec, 0);
+  // The longest choice still fits the relay's hold bound with a full slow runout.
+  assert.ok(30000 + 3 * paceFor({pace:'slow'}).runoutStepMs <= 60000);
+});
+
 test('result hold is a bounded card-free envelope tied to a completed hand', async () => {
   const {validateResultHold} = await import('../shared/multiplayer-publish.js');
   assert.equal(typeof validateResultHold, 'function');

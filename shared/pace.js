@@ -10,3 +10,15 @@ export function paceFor(setup) {
   if (!Object.hasOwn(PACE_PRESETS, pace)) throw new Error('INVALID_PACE');
   return PACE_PRESETS[pace];
 }
+
+export const RESULT_HOLD_MAX_SEC = 30;
+export const validResultHoldSec = (value) => Number.isSafeInteger(value) && value >= 0 && value <= RESULT_HOLD_MAX_SEC;
+
+/** How long a finished hand's result stays before the next hand. A setup that
+ * names `resultHoldSec` decides it apart from the AI pace; older setups keep
+ * the pace preset's dwell. The runout steps still follow the pace. */
+export function resultHoldMsFor(setup) {
+  if (setup?.resultHoldSec === undefined) return paceFor(setup).handResultDwellMs;
+  if (!validResultHoldSec(setup.resultHoldSec)) throw new Error('INVALID_RESULT_HOLD');
+  return setup.resultHoldSec * 1000;
+}

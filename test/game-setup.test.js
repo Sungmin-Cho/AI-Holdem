@@ -23,6 +23,28 @@ test("lobby supports both modes and all seat counts without changing CLI default
     "llm",
   );
 });
+test("lobby tournaments level up every two minutes unless a hand period is chosen", () => {
+  const timed = normalizeSetup({ mode: "tournament" });
+  assert.equal(timed.levelMinutes, 2);
+  assert.equal(Object.hasOwn(timed, "levelEvery"), false);
+  assert.deepEqual(normalizeSetup(timed), timed);
+  assert.equal(normalizeSetup({ mode: "tournament", levelMinutes: 5 }).levelMinutes, 5);
+  const byHands = normalizeSetup({ mode: "tournament", levelEvery: 8 });
+  assert.equal(byHands.levelEvery, 8);
+  assert.equal(Object.hasOwn(byHands, "levelMinutes"), false);
+  assert.equal(Object.hasOwn(normalizeSetup({}), "levelMinutes"), false);
+  for (const input of [
+    { mode: "tournament", levelMinutes: 2, levelEvery: 8 },
+    { mode: "tournament", levelMinutes: 0 },
+    { mode: "tournament", levelMinutes: 61 },
+    { mode: "tournament", levelMinutes: 1.5 },
+    { levelMinutes: 2 },
+  ])
+    assert.throws(() => normalizeSetup(input), { code: "INVALID_SETUP", field: "levelMinutes" });
+  // The CLI default stays hand-based: no lobby default is injected there.
+  assert.equal(cliModeDefaults({ storeDir: "game", mode: "tournament" }).levelMinutes, undefined);
+  assert.equal(cliModeDefaults({ storeDir: "game", levelMinutes: 2 }).mode, undefined);
+});
 test("setup rejects invalid, conflicting and unsafe input", () => {
   for (const input of [
     { aiCount: 0 },
