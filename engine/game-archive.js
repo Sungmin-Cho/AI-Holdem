@@ -350,7 +350,7 @@ export function initGameDir(gameDir, flags, deps = {}) {
   const callerPpid = deps.callerPpid ?? process.ppid;
   const startTimeOf = deps.processStartTime ?? processStartTime;
   const {
-    aiCount, startStack, blinds0, levelEvery, force, mode, startStackBb, handLimit,
+    aiCount, startStack, blinds0, levelEvery, levelMinutes, force, mode, startStackBb, handLimit,
     opponentRuntime = 'llm', jevConfig, showdownPolicy, replayReveal, hints, dealBias,
     participants, hostName,
   } = flags;
@@ -407,6 +407,7 @@ export function initGameDir(gameDir, flags, deps = {}) {
       startStack,
       blinds0,
       levelEvery,
+      ...(levelMinutes != null ? { levelMinutes } : {}),
       names: personas.map((persona) => persona.name),
       mode,
       startStackBb,
