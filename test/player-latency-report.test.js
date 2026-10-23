@@ -127,19 +127,21 @@ test('unanswered calls are counted by where they ended, and error events by clos
   const text = JSON.stringify(report);
   assert.doesNotMatch(text, /SECRET|polluted|As Kd|ENOENT|SIGKILL\\n/);
   assert.equal({}.polluted, undefined);
-  // 루프·어댑터·결정 분류가 이름으로 아는 코드는 그대로 남는다.
-  const gameLoop = fs.readFileSync(new URL('../tools/game-loop.js', import.meta.url), 'utf8');
-  const runtime = fs.readFileSync(new URL('../tools/player-runtime.js', import.meta.url), 'utf8');
-  const budget = fs.readFileSync(new URL('../shared/player-budget.js', import.meta.url), 'utf8');
-  const named = new Set([
-    ...[...gameLoop.matchAll(/const (?:FATAL_RUNTIME_CODES|RESTORED_SESSION_REJECTION_CODES) = new Set\(\[([^\]]*)\]/g)]
-      .flatMap((match) => [...match[1].matchAll(/'([A-Z_]+)'/g)].map((code) => code[1])),
-    ...[...budget.slice(budget.indexOf('export function playerFailureCategory')).matchAll(/'([A-Z_]+)'/g)].map((match) => match[1]),
-    ...['CLI_FAILED', 'NO_SESSION', 'INVALID_SESSION_ID', 'NOT_READY', 'TIMEOUT', 'INTERRUPTED', 'CHILD_CLOSE_UNCONFIRMED', 'CHILD_SIGNAL_FAILED']
-      .filter((code) => runtime.includes(`runtimeError('${code}'`)),
-  ]);
-  assert.ok(named.size >= 20, `found ${named.size} named codes`);
-  for (const code of named) assert.equal(projectCallCode(code), code, `${code} must stay a known code`);
+  // 어댑터·격리 홈이 던지는 코드와 루프·결정 분류가 이름으로 아는 코드는 그대로 남는다(새 코드가 생기면 목록도 고쳐야 한다).
+  const source = (rel) => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
+  const codesIn = (text, pattern) => [...text.matchAll(pattern)].map((match) => match[1]);
+  const gameLoop = source('../tools/game-loop.js');
+  const budget = source('../shared/player-budget.js');
+  const adapter = codesIn(source('../tools/player-runtime.js'), /\b(?:runtimeError|grokFail)\('([A-Z][A-Z0-9_]+)'/g);
+  const home = codesIn(source('../tools/runtime-home.js'), /\bcoded\('([A-Z][A-Z0-9_]+)'/g);
+  const loopSets = [...gameLoop.matchAll(/const (?:FATAL_RUNTIME_CODES|RESTORED_SESSION_REJECTION_CODES) = new Set\(\[([^\]]*)\]/g)]
+    .flatMap((match) => codesIn(match[1], /'([A-Z_]+)'/g));
+  const classified = codesIn(budget.slice(budget.indexOf('export function playerFailureCategory')), /'([A-Z_]+)'/g);
+  assert.ok(adapter.includes('GROK_SESSION_RECORD_MISSING') && home.includes('RUNTIME_HOME_MISMATCH') && loopSets.length >= 15 && classified.length >= 9,
+    'the source scans found the code sets');
+  for (const code of new Set([...adapter, ...home, ...loopSets, ...classified, 'STOPPING', 'RESPONSE_RECEIVED'])) {
+    assert.equal(projectCallCode(code), code, `${code} must stay a known code`);
+  }
   const lines = formatLatencyReport(report);
   assert.doesNotMatch(lines, /SECRET|As Kd|ENOENT/);
   assert.match(lines, /응답 없음 CLI_FAILED\/transport · turn failed\[capacity\] · exit 1 ×2/);

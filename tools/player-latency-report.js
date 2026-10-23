@@ -39,16 +39,25 @@ const finite = (value) => (typeof value === 'number' && Number.isFinite(value) ?
 const text = (value, max = 64) => (typeof value === 'string' && value.length <= max ? value : null);
 const oneOf = (value, allowed) => (allowed.includes(value) ? value : null);
 const TURN_ENDS = Object.freeze(['completed', 'failed']);
-// 플레이어 호출이 끝나는 코드의 닫힌 목록: 응답, 어댑터(`player-runtime.js`)가 던지는 코드, 결정 분류
-// (`shared/player-budget.js`)가 이름으로 아는 코드, 루프(`game-loop.js`의 FATAL_RUNTIME_CODES·
-// RESTORED_SESSION_REJECTION_CODES·STOPPING)가 이름으로 아는 코드. 분류는 그 함수의 값과 `response`다.
-// 기록에 있는 다른 값(Node 오류 코드 포함)은 `other`, 없으면 null이다 — 길이만 맞는 문자열을 그대로 내보내지 않는다.
+// 플레이어 호출이 끝나는 코드의 닫힌 목록: 응답, 어댑터(`player-runtime.js`의 runtimeError·grokFail)와 격리 홈
+// (`runtime-home.js`)이 던지는 코드 전부, 결정 분류(`shared/player-budget.js`)와 루프(`game-loop.js`의
+// FATAL_RUNTIME_CODES·RESTORED_SESSION_REJECTION_CODES·STOPPING)가 이름으로 아는 코드. 시험이 그 소스를 읽어 빠진
+// 코드가 없는지 확인한다. 분류는 그 함수의 값과 `response`다. 기록에 있는 다른 값(Node 오류 코드 포함)은 `other`,
+// 없으면 null이다 — 길이만 맞는 문자열을 그대로 내보내지 않는다.
 export const PLAYER_CALL_CODES = Object.freeze([
-  'RESPONSE_RECEIVED', 'CLI_FAILED', 'TIMEOUT', 'INTERRUPTED', 'NOT_READY', 'NO_SESSION', 'INVALID_SESSION', 'INVALID_SESSION_ID',
-  'SESSION_NOT_FOUND', 'SESSION_EXPIRED', 'CHILD_CLOSE_UNCONFIRMED', 'CHILD_SIGNAL_FAILED', 'CHILD_STOP_UNCONFIRMED',
-  'CLOSE_UNSETTLED', 'IDENTITY_UNAVAILABLE', 'IDENTITY_UNVERIFIABLE', 'IDENTITY_MISMATCH', 'SIGNAL_FAILED',
-  'ILLEGAL_ACTION', 'INVALID_DECISION', 'RUNTIME_NOT_VERIFIED', 'RUNTIME_DISPOSING', 'RUNTIME_CLOSED', 'CWD_NOT_ISOLATED',
-  'NO_PLAYER_RUNTIME', 'STOPPING',
+  'RESPONSE_RECEIVED',
+  // 어댑터
+  'BAD_BENCHMARK_PIN', 'BAD_CALL_BUDGET', 'BAD_PERSONA', 'BAD_PROMPT', 'BAD_REASONING', 'BAD_TIER', 'CANARY_REQUIRED',
+  'CHILD_CLOSE_UNCONFIRMED', 'CHILD_SIGNAL_FAILED', 'CLI_FAILED', 'CWD_NOT_ISOLATED', 'GROK_BINARY_CHANGED',
+  'GROK_SESSION_ID_REUSED', 'GROK_SESSION_RECORD_MISSING', 'INTERRUPTED', 'INVALID_SESSION_ID', 'NOT_READY', 'NO_SESSION',
+  'RUNTIME_AUTH_MISSING', 'RUNTIME_CLOSED', 'RUNTIME_DISPOSING', 'RUNTIME_HOME_REQUIRED', 'RUNTIME_HOME_UNSUPPORTED_PLATFORM',
+  'RUNTIME_NOT_VERIFIED', 'TIMEOUT', 'UNKNOWN_RUNTIME', 'UNSAFE_MODEL_ID',
+  // 격리 홈
+  'RUNTIME_HOME_INVALID', 'RUNTIME_HOME_MISMATCH', 'RUNTIME_HOME_PATH_TOO_LONG',
+  // 결정 분류·루프
+  'CHILD_STOP_UNCONFIRMED', 'CLOSE_UNSETTLED', 'IDENTITY_MISMATCH', 'IDENTITY_UNAVAILABLE', 'IDENTITY_UNVERIFIABLE',
+  'ILLEGAL_ACTION', 'INVALID_DECISION', 'INVALID_SESSION', 'NO_PLAYER_RUNTIME', 'SESSION_EXPIRED', 'SESSION_NOT_FOUND',
+  'SIGNAL_FAILED', 'STOPPING',
 ]);
 export const PLAYER_CALL_CATEGORIES = Object.freeze([
   'response', 'transport', 'timeout', 'interrupted', 'termination', 'session', 'illegal_action', 'response_format',
