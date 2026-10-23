@@ -4046,9 +4046,20 @@ test('user waitError restarts a dead server, republishes view-only, and re-waits
   assert.equal(events.includes('user-view-republished'), true);
 });
 
-test('user waitError rejects a foreign healthy listener before any step republish reaches it', { timeout: 15_000 }, async (t) => {
+// #320 D9: the user wait is reached through out-of-process children (resume-check, engine steps,
+// publishes). The engine's random first button chose how many: the user first (one publish), after one
+// AI fold, or after both AIs fold and a whole hand ends (six publishes, three decisions, a coach pass),
+// and the unscaled 3 s wait cut the long path on slow Windows runners. The test proves the foreign
+// listener is refused after the wait, so the button is pinned to the shortest path (the new hand moves
+// it to the user, who acts first three-handed) and the wait for it uses the file's platform scale. The
+// refusal itself is one identity read and two requests (0.2-0.5 s on Windows), so its 5 s bound stays.
+test('user waitError rejects a foreign healthy listener before any step republish reaches it', { timeout: 15_000 * WIN32_SCALE }, async (t) => {
   const gameDir = tmpGame();
   const initialized = await initGame(gameDir);
+  const statePath = path.join(gameDir, 'state.json');
+  const engine = readJson(statePath);
+  assert.deepEqual(engine.seats.map((seat) => seat.playerId), ['user', 'p1', 'p2']);
+  fs.writeFileSync(statePath, JSON.stringify({ ...engine, button: 2 }));
   writeLoopStateFixture(gameDir, initialized.sessionToken);
   const controlPath = path.join(os.tmpdir(), `holdem-wait-control-${process.pid}-${Date.now()}`);
   const requestLog = path.join(os.tmpdir(), `holdem-wait-foreign-${process.pid}-${Date.now()}.log`);
@@ -4058,9 +4069,10 @@ test('user waitError rejects a foreign healthy listener before any step republis
     port: foreign.port,
     sessionToken: initialized.sessionToken,
   }));
+  const adapter = makeAdapter();
   const loop = createGameLoop({
     gameDir,
-    resolver: resolverFor(makeAdapter()),
+    resolver: resolverFor(adapter),
     opts: { port: 0, waitMs: 1_000 },
   });
   t.after(async () => {
@@ -4075,7 +4087,9 @@ test('user waitError rejects a foreign healthy listener before any step republis
     running,
     () => fs.existsSync(requestLog) && fs.readFileSync(requestLog, 'utf8').includes('GET /api/wait-action'),
     'toggle relay did not enter the user wait',
+    3_000 * WIN32_SCALE,
   );
+  assert.equal(adapter.decideCalls.length, 0, 'the pinned button lets the user act first');
   const publishesBeforeForeignMode = fs.readFileSync(requestLog, 'utf8')
     .split('\n').filter((line) => line === 'POST /api/publish').length;
 
