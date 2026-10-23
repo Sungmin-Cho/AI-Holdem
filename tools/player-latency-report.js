@@ -40,13 +40,15 @@ const text = (value, max = 64) => (typeof value === 'string' && value.length <= 
 const oneOf = (value, allowed) => (allowed.includes(value) ? value : null);
 const TURN_ENDS = Object.freeze(['completed', 'failed']);
 // 플레이어 호출이 끝나는 코드의 닫힌 목록: 응답, 어댑터(`player-runtime.js`)가 던지는 코드, 결정 분류
-// (`shared/player-budget.js`)가 이름으로 아는 코드, 루프가 세션 복구에서 던지는 코드. 분류는 그 함수의 값과 `response`다.
+// (`shared/player-budget.js`)가 이름으로 아는 코드, 루프(`game-loop.js`의 FATAL_RUNTIME_CODES·
+// RESTORED_SESSION_REJECTION_CODES·STOPPING)가 이름으로 아는 코드. 분류는 그 함수의 값과 `response`다.
 // 기록에 있는 다른 값(Node 오류 코드 포함)은 `other`, 없으면 null이다 — 길이만 맞는 문자열을 그대로 내보내지 않는다.
 export const PLAYER_CALL_CODES = Object.freeze([
-  'RESPONSE_RECEIVED', 'CLI_FAILED', 'TIMEOUT', 'INTERRUPTED', 'NOT_READY', 'NO_SESSION', 'INVALID_SESSION_ID',
-  'SESSION_NOT_FOUND', 'SESSION_EXPIRED', 'CHILD_CLOSE_UNCONFIRMED', 'CHILD_SIGNAL_FAILED', 'IDENTITY_UNAVAILABLE',
+  'RESPONSE_RECEIVED', 'CLI_FAILED', 'TIMEOUT', 'INTERRUPTED', 'NOT_READY', 'NO_SESSION', 'INVALID_SESSION', 'INVALID_SESSION_ID',
+  'SESSION_NOT_FOUND', 'SESSION_EXPIRED', 'CHILD_CLOSE_UNCONFIRMED', 'CHILD_SIGNAL_FAILED', 'CHILD_STOP_UNCONFIRMED',
+  'CLOSE_UNSETTLED', 'IDENTITY_UNAVAILABLE', 'IDENTITY_UNVERIFIABLE', 'IDENTITY_MISMATCH', 'SIGNAL_FAILED',
   'ILLEGAL_ACTION', 'INVALID_DECISION', 'RUNTIME_NOT_VERIFIED', 'RUNTIME_DISPOSING', 'RUNTIME_CLOSED', 'CWD_NOT_ISOLATED',
-  'NO_PLAYER_RUNTIME',
+  'NO_PLAYER_RUNTIME', 'STOPPING',
 ]);
 export const PLAYER_CALL_CATEGORIES = Object.freeze([
   'response', 'transport', 'timeout', 'interrupted', 'termination', 'session', 'illegal_action', 'response_format',

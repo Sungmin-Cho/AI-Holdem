@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { aggregateLatency, buildLatencyReport, findLoopLogs, formatLatencyReport, main, readLoopRecords, REPORT_LIMITS } from '../tools/player-latency-report.js';
+import { aggregateLatency, buildLatencyReport, findLoopLogs, formatLatencyReport, main, projectCallCode, readLoopRecords, REPORT_LIMITS } from '../tools/player-latency-report.js';
 
 function store(sessions, states = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'holdem-latency-'));
@@ -127,6 +127,19 @@ test('unanswered calls are counted by where they ended, and error events by clos
   const text = JSON.stringify(report);
   assert.doesNotMatch(text, /SECRET|polluted|As Kd|ENOENT|SIGKILL\\n/);
   assert.equal({}.polluted, undefined);
+  // 루프·어댑터·결정 분류가 이름으로 아는 코드는 그대로 남는다.
+  const gameLoop = fs.readFileSync(new URL('../tools/game-loop.js', import.meta.url), 'utf8');
+  const runtime = fs.readFileSync(new URL('../tools/player-runtime.js', import.meta.url), 'utf8');
+  const budget = fs.readFileSync(new URL('../shared/player-budget.js', import.meta.url), 'utf8');
+  const named = new Set([
+    ...[...gameLoop.matchAll(/const (?:FATAL_RUNTIME_CODES|RESTORED_SESSION_REJECTION_CODES) = new Set\(\[([^\]]*)\]/g)]
+      .flatMap((match) => [...match[1].matchAll(/'([A-Z_]+)'/g)].map((code) => code[1])),
+    ...[...budget.slice(budget.indexOf('export function playerFailureCategory')).matchAll(/'([A-Z_]+)'/g)].map((match) => match[1]),
+    ...['CLI_FAILED', 'NO_SESSION', 'INVALID_SESSION_ID', 'NOT_READY', 'TIMEOUT', 'INTERRUPTED', 'CHILD_CLOSE_UNCONFIRMED', 'CHILD_SIGNAL_FAILED']
+      .filter((code) => runtime.includes(`runtimeError('${code}'`)),
+  ]);
+  assert.ok(named.size >= 20, `found ${named.size} named codes`);
+  for (const code of named) assert.equal(projectCallCode(code), code, `${code} must stay a known code`);
   const lines = formatLatencyReport(report);
   assert.doesNotMatch(lines, /SECRET|As Kd|ENOENT/);
   assert.match(lines, /응답 없음 CLI_FAILED\/transport · turn failed\[capacity\] · exit 1 ×2/);
