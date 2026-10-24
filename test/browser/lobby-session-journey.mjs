@@ -181,7 +181,9 @@ export async function runLobbyJourney(outDir) {
     const beforeFault=app.manager.snapshot();
     try {
       fs.writeFileSync(engineFile,JSON.stringify({...JSON.parse(engineBeforeFault),seats:null}));
-      await evaluate("document.querySelector('#table').contentDocument.querySelector('#btn-fold').click()");
+      // #320: the deal is random; with a check available the first fold press only arms it and
+      // sends nothing, so the manager would stay playing until the state wait gives up. Press again.
+      await evaluate("(()=>{const fold=document.querySelector('#table').contentDocument.querySelector('#btn-fold');fold.click();if(fold.classList.contains('is-armed'))fold.click();})()");
       await state('error');
       assert.equal(app.manager.session,null);
       const unavailable=await fetch(`${app.origin}/api/game/${beforeFault.gameId}/events`,{headers:{authorization:`Bearer ${app.token}`,'x-game-epoch':beforeFault.gameEpoch}});
