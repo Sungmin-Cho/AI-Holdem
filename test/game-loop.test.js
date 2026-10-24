@@ -9131,6 +9131,328 @@ test('#194 stale identity at soft deadline does not escape the async decision', 
   assert.equal(readLoopLog(gameDir).some(x=>x.event==='player-soft-wait'),false);
 });
 
+// #325: a decision call the provider failed for capacity (adapter timing: a failed turn of the closed
+// `capacity` class) is retried once per decision generation, on the same session with the same message,
+// after a short wait that an interrupt, stop, pause or a short budget skips.
+const capacityRejection = (timing = {}) => Object.assign(new Error('CLI_FAILED: codex 결정 호출이 실패했습니다.'), {
+  code: 'CLI_FAILED',
+  timing: { turnEnd: 'failed', turnError: 'capacity', errorEvents: { capacity: 1 }, exitCode: 1, exitSignal: null, ...timing },
+});
+const CAPACITY_BUDGET = { softMs: 5_000, hardMs: 60_000 };
+const capacityEvents = (gameDir) => readLoopLog(gameDir).filter((entry) => entry.event.startsWith('player-capacity-retry'));
+
+test('#325 a capacity rejection is retried once on the same session after the wait and the decision is applied', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const seen = [];
+  let gameDir;
+  const adapter = makeAdapter({
+    onDecide: async ({ sessionId, message }, callNo) => {
+      const pending = readJson(path.join(gameDir, 'loop-state.json')).pendingDecision;
+      seen.push({ at: Date.now(), sessionId, message, callNo: pending.diagnostics.callNo });
+      if (callNo === 1) throw capacityRejection();
+      return { raw: JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }) };
+    },
+  });
+  const setup = await setupAiFirst(t, { adapter, loopOpts: { playerBudget: CAPACITY_BUDGET, capacityRetryDelayMs: 300 } });
+  gameDir = setup.gameDir;
+  await runUntilUserBoundary(setup.loop, gameDir);
+  assert.equal(adapter.decideCalls.length, 2);
+  assert.equal(seen[1].sessionId, seen[0].sessionId, 'the same session');
+  assert.equal(seen[1].message, seen[0].message, 'the same message');
+  assert.deepEqual(seen.map((row) => row.callNo), [1, 2], 'the retry call number is stored before the call starts');
+  assert.ok(seen[1].at - seen[0].at >= 300, 'the retry waits first');
+  assert.ok(adapter.decideCalls[1].timeoutMs < adapter.decideCalls[0].timeoutMs, 'the retry uses the remaining budget');
+  const events = capacityEvents(gameDir);
+  assert.deepEqual(events.map((entry) => [entry.event, entry.callNo, entry.delayMs]), [['player-capacity-retry', 2, 300]]);
+  const calls = readLoopLog(gameDir).filter((entry) => entry.event === 'player-call' && entry.purpose === 'decision');
+  assert.deepEqual(calls.map((entry) => [entry.callNo, entry.code]), [[1, 'CLI_FAILED'], [2, 'RESPONSE_RECEIVED']]);
+  assert.equal(readLoopLog(gameDir).some((entry) => entry.event === 'player-recovery-required'), false);
+  const metric = readJson(path.join(gameDir, 'loop-state.json')).metrics.find((entry) => entry.playerId === 'p1');
+  assert.equal(metric.outcome, 'retried_accepted');
+  assert.notEqual(metric.sessionRepaired, true);
+});
+
+test('#325 a second capacity rejection ends the decision in recovery after exactly two calls', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const adapter = makeAdapter({ onDecide: async () => { throw capacityRejection(); } });
+  const { gameDir, loop } = await setupAiFirst(t, { adapter, loopOpts: { playerBudget: CAPACITY_BUDGET, capacityRetryDelayMs: 0 } });
+  await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+  assert.equal(adapter.decideCalls.length, 2, 'one retry per decision generation, not a loop');
+  const pending = readJson(path.join(gameDir, 'loop-state.json')).pendingDecision;
+  assert.deepEqual([pending.status, pending.code, pending.category, pending.diagnostics.callNo], ['recovery_required', 'CLI_FAILED', 'transport', 2]);
+  assert.equal(capacityEvents(gameDir).length, 1);
+});
+
+test('#325 the retry is used once per decision generation, not again for the correction call', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  // Call 1 is rejected for capacity, its retry answers without JSON (a correctable rejection), and the
+  // correction call is rejected for capacity again: the generation already used its capacity retry.
+  const adapter = makeAdapter({ onDecide: async (input, callNo) => {
+    if (callNo === 2) return { raw: 'invalid' };
+    throw capacityRejection();
+  } });
+  const { gameDir, loop } = await setupAiFirst(t, { adapter, loopOpts: { playerBudget: CAPACITY_BUDGET, capacityRetryDelayMs: 0 } });
+  await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+  assert.equal(adapter.decideCalls.length, 3);
+  assert.equal(readLoopLog(gameDir).filter((entry) => entry.event === 'player-correction').length, 1);
+  assert.equal(capacityEvents(gameDir).length, 1);
+  const pending = readJson(path.join(gameDir, 'loop-state.json')).pendingDecision;
+  assert.deepEqual([pending.code, pending.diagnostics.callNo, pending.diagnostics.corrections], ['CLI_FAILED', 3, 1]);
+});
+
+test('#325 failures outside the capacity class are not retried', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  for (const [label, makeError] of [
+    ['a CLI failure without timing', () => Object.assign(new Error('CLI_FAILED'), { code: 'CLI_FAILED' })],
+    ['a completed turn with no answer (exit 0)', () => capacityRejection({ turnEnd: 'completed', turnError: null, errorEvents: {}, exitCode: 0 })],
+    ['a failed turn of another class', () => capacityRejection({ turnError: 'rate_limit' })],
+    ['a timeout', () => Object.assign(capacityRejection(), { code: 'TIMEOUT' })],
+    ['an unconfirmed close (fatal)', () => Object.assign(capacityRejection(), { code: 'CHILD_CLOSE_UNCONFIRMED' })],
+  ]) await t.test(label, async (st) => {
+    const adapter = makeAdapter({ onDecide: async () => { throw makeError(); } });
+    const { gameDir, loop } = await setupAiFirst(st, { adapter, loopOpts: { playerBudget: CAPACITY_BUDGET, capacityRetryDelayMs: 0 } });
+    const fatal = label.includes('fatal');
+    await assert.rejects(loop.run(), { code: fatal ? 'CHILD_CLOSE_UNCONFIRMED' : 'PLAYER_RECOVERY_REQUIRED' });
+    assert.equal(adapter.decideCalls.length, 1);
+    assert.deepEqual(capacityEvents(gameDir), []);
+    const pending = readJson(path.join(gameDir, 'loop-state.json')).pendingDecision;
+    assert.equal(pending.status, fatal ? 'unsafe' : 'recovery_required');
+    assert.equal(pending.diagnostics.callNo, 1);
+  });
+});
+
+test('#325 an interrupt, a stop or a pause during the wait skips the retry and ends the wait', { timeout: 60_000 * WIN32_SCALE }, async (t) => {
+  for (const how of ['interrupt', 'stop', 'pause']) await t.test(how, async (st) => {
+    let failedAt = null;
+    const adapter = makeAdapter({ onDecide: async () => { failedAt = Date.now(); throw capacityRejection(); } });
+    const { gameDir, loop } = await setupAiFirst(st, { adapter, loopOpts: {
+      playerBudget: { softMs: 100, hardMs: 300_000 }, capacityRetryDelayMs: 120_000,
+      ...(how === 'pause' ? { controlProtocolVersion: 1 } : {}),
+    } });
+    const running = startRun(loop);
+    const settled = running.then(() => null, (error) => error);
+    await waitFor(() => failedAt !== null && readJson(path.join(gameDir, 'loop-state.json')).pendingDecision?.softWait === true,
+      'the decision did not reach the capacity wait', 10_000 * WIN32_SCALE);
+    const pending = readJson(path.join(gameDir, 'loop-state.json')).pendingDecision;
+    let afterStop = null;
+    if (how === 'interrupt') {
+      assert.deepEqual(await loop.interruptDecision({ gameEpoch: pending.gameEpoch, decisionId: pending.decisionId, generation: pending.generation }),
+        { interrupted: true });
+    } else if (how === 'stop') {
+      await loop.requestStop();
+      afterStop = fs.readFileSync(path.join(gameDir, 'loop-state.json'));
+    } else await loop.pause();
+    const error = how === 'pause' ? null : await settled;
+    assert.ok(Date.now() - failedAt < 60_000, 'the wait (120 s) ended early');
+    assert.equal(adapter.decideCalls.length, 1);
+    const events = capacityEvents(gameDir);
+    assert.equal(events.some((entry) => entry.event === 'player-capacity-retry'), false);
+    // A stop closes the loop log before the wait may notice it; the skip line is best effort there.
+    if (how !== 'stop') assert.deepEqual(events.map((entry) => [entry.event, entry.reason]), [['player-capacity-retry-skipped', how === 'interrupt' ? 'interrupted' : how]]);
+    const after = readJson(path.join(gameDir, 'loop-state.json')).pendingDecision;
+    assert.equal(after.status, 'recovery_required');
+    // A stop is an owned stop: its final patch records the running decision as interrupted, and the
+    // decision path writes nothing after it.
+    assert.equal(after.code, how === 'pause' ? 'CLI_FAILED' : 'INTERRUPTED');
+    assert.equal(after.diagnostics.callNo, 1, 'a call that never started is not counted');
+    if (how === 'interrupt') assert.equal(error?.code, 'PLAYER_RECOVERY_REQUIRED');
+    if (how === 'stop') {
+      assert.equal(error, null, 'an owned stop ends the run without an error');
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.deepEqual(fs.readFileSync(path.join(gameDir, 'loop-state.json')), afterStop, 'nothing is written after the stop completed');
+    }
+    if (how === 'pause') {
+      assert.equal(loop.playState, 'paused');
+      await loop.endGame('capacity-pause-end');
+      await settled;
+    }
+  });
+});
+
+test('#325 a stop that completes while an interrupted wait is still asleep wins: nothing is written after it', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  let waitEntered = false;
+  let releaseWait;
+  const gate = new Promise((resolve) => { releaseWait = resolve; });
+  const adapter = makeAdapter({ onDecide: async () => { throw capacityRejection(); } });
+  const { gameDir, loop } = await setupAiFirst(t, { adapter, loopOpts: {
+    playerBudget: { softMs: 100, hardMs: 60_000 },
+    capacityRetryWait: async () => { waitEntered = true; await gate; },
+  } });
+  const running = startRun(loop);
+  const settled = running.then(() => null, (error) => error);
+  const statePath = path.join(gameDir, 'loop-state.json');
+  await waitFor(() => waitEntered && readJson(statePath).pendingDecision?.softWait === true, 'the decision did not reach the capacity wait', 10_000 * WIN32_SCALE);
+  const pending = readJson(statePath).pendingDecision;
+  // The interrupt aborts the decision at once, then the stop runs to completion before the wait wakes.
+  const interrupting = loop.interruptDecision({ gameEpoch: pending.gameEpoch, decisionId: pending.decisionId, generation: pending.generation });
+  await loop.requestStop();
+  const afterStop = fs.readFileSync(statePath);
+  releaseWait();
+  assert.deepEqual(await interrupting, { interrupted: true }, 'the stop owner records the interrupted decision');
+  assert.equal(await settled, null);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.deepEqual(fs.readFileSync(statePath), afterStop, 'the decision path wrote after the stop completed');
+  assert.equal(adapter.decideCalls.length, 1);
+  assert.deepEqual([readJson(statePath).pendingDecision.status, readJson(statePath).pendingDecision.code], ['recovery_required', 'INTERRUPTED']);
+});
+
+test('#325 a budget that falls under the repair floor while the call number is stored skips the retry and restores the number', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  let gameDir;
+  // The clock jumps once the retry's call number (2) is on disk: 1.5 s left of a 60 s budget, under the 2 s floor.
+  const clock = () => {
+    try { return readJson(path.join(gameDir, 'loop-state.json')).pendingDecision?.diagnostics?.callNo === 2 ? 58_500 : 0; }
+    catch { return 0; }
+  };
+  const adapter = makeAdapter({ onDecide: async () => { throw capacityRejection(); } });
+  const setup = await setupAiFirst(t, { adapter, loopOpts: { playerBudget: CAPACITY_BUDGET, capacityRetryDelayMs: 0, monotonicNow: () => clock() } });
+  gameDir = setup.gameDir;
+  await assert.rejects(setup.loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+  assert.equal(adapter.decideCalls.length, 1);
+  assert.deepEqual(capacityEvents(gameDir).map((entry) => [entry.event, entry.reason]), [['player-capacity-retry-skipped', 'budget_after_commit']]);
+  assert.equal(readJson(path.join(gameDir, 'loop-state.json')).pendingDecision.diagnostics.callNo, 1);
+});
+
+// A restored session whose first call is rejected as expired (CLI_FAILED without capacity timing).
+async function setupRestoredCapacity(t, onDecide) {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  putAiFirst(gameDir);
+  writeLoopStateFixture(gameDir, init.sessionToken);
+  const oldCreatedAt = '2026-08-29T01:00:00.000Z';
+  fs.writeFileSync(path.join(gameDir, '.player-sessions.json'), JSON.stringify({
+    p1: { runtime: 'fake', sessionId: 'expired-p1', createdAt: oldCreatedAt },
+    p2: { runtime: 'fake', sessionId: 'persisted-p2', createdAt: oldCreatedAt },
+  }));
+  const adapter = makeAdapter({ onDecide });
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(adapter),
+    opts: { port: 0, waitMs: 0, playerBudget: CAPACITY_BUDGET, capacityRetryDelayMs: 0 } });
+  t.after(() => loop.requestStop());
+  await loop.resume();
+  return { gameDir, loop, adapter };
+}
+const expired = () => Object.assign(new Error('remote session expired'), { code: 'CLI_FAILED' });
+const fold = (message) => ({ raw: JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }) });
+
+test('#325 a capacity rejection of the call after a restored-session repair is retried on the repaired session', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const { gameDir, loop, adapter } = await setupRestoredCapacity(t, async ({ sessionId, message }, n) => {
+    if (sessionId === 'expired-p1') throw expired();
+    if (n === 2) throw capacityRejection();
+    return fold(message);
+  });
+  await runUntilUserBoundary(loop, gameDir);
+  assert.deepEqual(adapter.calls.map((call) => call.playerId), ['p1'], 'one repair warmup');
+  assert.deepEqual(adapter.decideCalls.slice(0, 3).map((call) => call.sessionId), ['expired-p1', 'session-p1', 'session-p1']);
+  assert.deepEqual(capacityEvents(gameDir).map((entry) => [entry.event, entry.callNo]), [['player-capacity-retry', 3]]);
+  const metric = readJson(path.join(gameDir, 'loop-state.json')).metrics.find((entry) => entry.playerId === 'p1');
+  assert.deepEqual([metric.outcome, metric.sessionRepaired], ['retried_accepted', true]);
+});
+
+test('#325 when the capacity retry of a restored session fails otherwise, the session is still not recreated', { timeout: 30_000 * WIN32_SCALE }, async (t) => {
+  for (const [label, second] of [
+    ['a CLI failure without timing', () => Object.assign(new Error('CLI_FAILED'), { code: 'CLI_FAILED' })],
+    ['a completed turn with no answer', () => capacityRejection({ turnEnd: 'completed', turnError: null, errorEvents: {}, exitCode: 0 })],
+  ]) await t.test(label, async (st) => {
+    const gameDir = tmpGame();
+    const init = await initGame(gameDir);
+    putAiFirst(gameDir);
+    writeLoopStateFixture(gameDir, init.sessionToken);
+    fs.writeFileSync(path.join(gameDir, '.player-sessions.json'), JSON.stringify({
+      p1: { runtime: 'fake', sessionId: 'persisted-p1', createdAt: '2026-08-29T01:00:00.000Z' },
+      p2: { runtime: 'fake', sessionId: 'persisted-p2', createdAt: '2026-08-29T01:00:00.000Z' },
+    }));
+    const adapter = makeAdapter({ onDecide: async (input, n) => { throw n === 1 ? capacityRejection() : second(); } });
+    const loop = createGameLoop({ gameDir, resolver: resolverFor(adapter),
+      opts: { port: 0, waitMs: 0, playerBudget: CAPACITY_BUDGET, capacityRetryDelayMs: 0 } });
+    st.after(() => loop.requestStop());
+    await loop.resume();
+    await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+    assert.deepEqual(adapter.calls, [], 'no warmup recreated the session');
+    assert.equal(adapter.decideCalls.length, 2);
+    const pending = readJson(path.join(gameDir, 'loop-state.json')).pendingDecision;
+    assert.deepEqual([pending.status, pending.code, pending.sessionRepaired], ['recovery_required', 'CLI_FAILED', false]);
+  });
+});
+
+test('#325 a generation may make four calls: repair, correction and capacity retries once each, and the record stays valid', { timeout: 40_000 * WIN32_SCALE }, async (t) => {
+  for (const lastAnswers of [true, false]) await t.test(lastAnswers ? 'the fourth call answers' : 'the fourth call is rejected', async (st) => {
+    // Call 1 expired → repair → call 2 without JSON → correction call 3 rejected for capacity → call 4.
+    const { gameDir, loop, adapter } = await setupRestoredCapacity(st, async ({ sessionId, message }, n) => {
+      if (sessionId === 'expired-p1') throw expired();
+      if (n === 2) return { raw: 'invalid' };
+      if (n === 3) throw capacityRejection();
+      return n === 4 && !lastAnswers ? { raw: 'invalid' } : fold(message);
+    });
+    if (lastAnswers) {
+      await runUntilUserBoundary(loop, gameDir);
+      const metric = readJson(path.join(gameDir, 'loop-state.json')).metrics.find((entry) => entry.playerId === 'p1');
+      assert.deepEqual([metric.outcome, metric.sessionRepaired, metric.corrected], ['retried_accepted', true, true]);
+    } else {
+      await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+      const pending = readJson(path.join(gameDir, 'loop-state.json')).pendingDecision;
+      assert.deepEqual([pending.code, pending.diagnostics.callNo, pending.diagnostics.corrections, pending.diagnostics.lastRejection.callNo],
+        ['INVALID_DECISION', 4, 1, 4]);
+      await loop.requestStop();
+      const resumed = createGameLoop({ gameDir, resolver: resolverFor(makeAdapter()), opts: { port: 0, waitMs: 0 } });
+      st.after(() => resumed.requestStop().catch(() => {}));
+      await resumed.resume();
+      assert.equal(resumed.pendingDecision.diagnosticsQuarantined, undefined, 'a four-call record is not quarantined');
+      assert.equal(resumed.pendingDecision.diagnostics.callNo, 4);
+    }
+    assert.deepEqual(adapter.decideCalls.slice(0, 4).map((call) => call.sessionId), ['expired-p1', 'session-p1', 'session-p1', 'session-p1']);
+    assert.equal(adapter.calls.length, 1, 'one repair warmup');
+    const p1Calls = readLoopLog(gameDir).filter((entry) => entry.event === 'player-call' && entry.purpose === 'decision' && entry.callNo !== undefined)
+      .slice(0, 4).map((entry) => entry.callNo);
+    assert.deepEqual(p1Calls, [1, 2, 3, 4]);
+  });
+});
+
+test('#325 a remaining budget under the repair floor skips the retry', { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  let clockMs = 0;
+  const adapter = makeAdapter({ onDecide: async () => { clockMs = 60_000 - 1_000; throw capacityRejection(); } });
+  const { gameDir, loop } = await setupAiFirst(t, { adapter, loopOpts: {
+    playerBudget: CAPACITY_BUDGET, capacityRetryDelayMs: 0, monotonicNow: () => clockMs,
+  } });
+  await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+  assert.equal(adapter.decideCalls.length, 1);
+  assert.deepEqual(capacityEvents(gameDir).map((entry) => [entry.event, entry.reason]), [['player-capacity-retry-skipped', 'budget']]);
+});
+
+for (const both of [false, true]) test(`#325 a restored session's capacity rejection is retried without recreating the session${both ? ', also when the retry is rejected' : ''}`, { timeout: 20_000 * WIN32_SCALE }, async (t) => {
+  const gameDir = tmpGame();
+  const init = await initGame(gameDir);
+  putAiFirst(gameDir);
+  writeLoopStateFixture(gameDir, init.sessionToken);
+  const oldCreatedAt = '2026-08-29T01:00:00.000Z';
+  fs.writeFileSync(path.join(gameDir, '.player-sessions.json'), JSON.stringify({
+    p1: { runtime: 'fake', sessionId: 'persisted-p1', createdAt: oldCreatedAt },
+    p2: { runtime: 'fake', sessionId: 'persisted-p2', createdAt: oldCreatedAt },
+  }));
+  let failed = false;
+  const adapter = makeAdapter({
+    onDecide: async ({ message }) => {
+      if (both || !failed) { failed = true; throw capacityRejection(); }
+      return { raw: JSON.stringify({ decisionId: decisionIdOfMessage(message), action: 'fold' }) };
+    },
+  });
+  const loop = createGameLoop({ gameDir, resolver: resolverFor(adapter),
+    opts: { port: 0, waitMs: 0, playerBudget: CAPACITY_BUDGET, capacityRetryDelayMs: 0 } });
+  t.after(() => loop.requestStop());
+  await loop.resume();
+  if (both) {
+    // The session is not at fault, so a second capacity rejection ends the decision without a repair warmup.
+    await assert.rejects(loop.run(), { code: 'PLAYER_RECOVERY_REQUIRED' });
+    assert.deepEqual(adapter.calls, [], 'no warmup recreated a session');
+    assert.deepEqual(adapter.decideCalls.map((call) => call.sessionId), ['persisted-p1', 'persisted-p1']);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(gameDir, '.player-sessions.json'), 'utf8')).p1.sessionId, 'persisted-p1');
+    const pending = readJson(path.join(gameDir, 'loop-state.json')).pendingDecision;
+    assert.deepEqual([pending.status, pending.code, pending.sessionRepaired], ['recovery_required', 'CLI_FAILED', false]);
+    return;
+  }
+  await runUntilUserBoundary(loop, gameDir);
+  assert.deepEqual(adapter.calls, [], 'no warmup recreated a session');
+  assert.deepEqual(adapter.decideCalls.slice(0, 2).map((call) => call.sessionId), ['persisted-p1', 'persisted-p1']);
+  assert.equal(readLoopLog(gameDir).some((entry) => entry.event === 'player-session-repair-failed'), false);
+  const metric = readJson(path.join(gameDir, 'loop-state.json')).metrics.find((entry) => entry.playerId === 'p1');
+  assert.equal(metric.outcome, 'retried_accepted');
+  assert.notEqual(metric.sessionRepaired, true);
+});
+
 test('interruptDecision is identity-bound and waits for confirmed attempt outcome', {timeout:20000*WIN32_SCALE},async t=>{
   let closed=false,loop,gameDir,beforeSoft;
   const adapter=makeAdapter({onDecide:({signal})=>new Promise((resolve,reject)=>{
