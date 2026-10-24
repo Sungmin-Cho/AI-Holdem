@@ -13,7 +13,9 @@ const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);
 const keysWithin = (x, keys) => object(x) && Reflect.ownKeys(x).every(k => keys.includes(k));
 const exactKeys = (x, keys) => keysWithin(x, keys) && keys.every(k => Object.hasOwn(x, k));
 const bad = reason => ({ ok:false, reason });
-const callNumber = n => Number.isInteger(n) && n >= 1 && n <= 3;
+// One generation makes the first call and at most one each of the restored-session repair retry, the
+// correction retry and the capacity retry (#325): four calls at most.
+const callNumber = n => Number.isInteger(n) && n >= 1 && n <= 4;
 
 export function legalFromMessage(message) {
   if (typeof message !== 'string') return null;

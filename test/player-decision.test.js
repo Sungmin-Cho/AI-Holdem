@@ -45,7 +45,10 @@ test('#194 diagnostic validation distinguishes legacy, malformed and valid recor
   assert.equal(d.validateDiagnostics(undefined,{schemaVersion:2}).reason,'missing');
   for(const value of [null,0,'']) assert.equal(d.validateDiagnostics(value,pending({diagnostics:value})).ok,false);
   assert.equal(d.validateDiagnostics(pending().diagnostics,pending()).ok,true);
-  for(const patch of [{callNo:4},{corrections:1},{detail:'no_json'},{extra:'SECRET'},{lastRejection:record({gameEpoch:'other'})}]) {
+  { const p=pending(); p.diagnostics.callNo=4; assert.equal(d.validateDiagnostics(p.diagnostics,p).ok,true,'#325: four calls per generation'); }
+  assert.ok(d.projectRejectionForSink(record({callNo:4}),ctx),'#325: a fourth-call rejection is carried as correction context');
+  assert.equal(d.projectRejectionForSink(record({callNo:5}),ctx),null);
+  for(const patch of [{callNo:5},{callNo:0},{corrections:1},{detail:'no_json'},{extra:'SECRET'},{lastRejection:record({gameEpoch:'other'})}]) {
     const p=pending(); Object.assign(p.diagnostics,patch); assert.equal(d.validateDiagnostics(p.diagnostics,p).ok,false);
   }
   const p=pending({status:'recovery_required',code:'INVALID_DECISION'}); assert.equal(d.retryWillCorrect(p),true);

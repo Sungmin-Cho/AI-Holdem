@@ -250,6 +250,14 @@ function isFatalRepairFailure(error) {
     || code.endsWith('_STOP_UNCONFIRMED');
 }
 
+// #325: a decision call that the provider failed for capacity. Only the adapter timing (#312) says so —
+// the CLI started a turn on this session and reported `turn.failed` with a message of the closed
+// `capacity` class — so the session works and nothing was applied to the engine for this call.
+function isCapacityRejection(error) {
+  const timing = error?.timing;
+  return error?.code === 'CLI_FAILED' && timing?.turnEnd === 'failed' && timing?.turnError === 'capacity';
+}
+
 function codedError(code, message, extra = {}) {
   const error = new Error(message ?? code);
   error.code = code;
@@ -857,6 +865,19 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
   const orphanTerminateKillWaitMs = opts.orphanTerminateKillWaitMs ?? budgetDefaults.orphanTerminateKillWaitMs;
   const resumeReclaimResidualMs = opts.resumeReclaimResidualMs ?? budgetDefaults.resumeReclaimResidualMs;
   const minRepairFloorMs = opts.minRepairFloorMs ?? 2_000;
+  // #325: how long a decision waits before its one retry after a provider capacity rejection. A wait,
+  // not a budget: it is cut short by an interrupt, stop or pause and never runs past the decision's
+  // hard deadline.
+  const capacityRetryDelayMs = opts.capacityRetryDelayMs ?? 3_000;
+  // The wait itself, on the real monotonic clock (not the `monotonicNow` seam, which tests freeze):
+  // slices of at most 100 ms that end early once `skip()` is true. Tests replace it to order the wait
+  // against an interrupt or a stop.
+  const capacityRetryWait = opts.capacityRetryWait ?? (async ({ delayMs, skip }) => {
+    const until = performance.now() + delayMs;
+    while (!skip() && performance.now() < until) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(0, until - performance.now()))));
+    }
+  });
   const lsofPath = opts.lsofPath ?? DEFAULT_LSOF;
   const startTimeOf = opts.processStartTime ?? processStartTime;
   const ownedStartTimeOf = opts.ownedProcessStartTime ?? ownedProcessStartTime;
@@ -3100,6 +3121,49 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let stepMs = 0;
     let sessionRepaired = false;
     let freshSessionUsed = false;
+    // #325: one retry per decision generation after a provider capacity rejection, on the same
+    // session with the same message — after the first call or after a restored-session repair call.
+    // It waits first; an interrupt, pause or a remaining budget under the repair floor skips it
+    // (logged), and then the decision ends as it would have without it. A stop is checked first: a stop
+    // during the wait is an owned stop like one during a call, nothing is written here, and the stop
+    // owner's final patch records the running decision as INTERRUPTED — also when an interrupt came too.
+    // With the restored-session repair and the correction, each also at most once per generation, a
+    // generation makes at most four calls (`callNumber` in player-decision.js).
+    let capacityRetryUsed = false;
+    let capacityRetried = false;
+    const capacitySkip = () => (stopRequested ? 'stop' : signal.aborted ? 'interrupted' : pauseRequested ? 'pause'
+      : deadlineAt - monotonicNow() < floor ? 'budget' : null);
+    const retryAfterCapacity = async (message) => {
+      capacityRetryUsed = true;
+      let skip = capacitySkip();
+      if (!skip) {
+        await capacityRetryWait({ delayMs: capacityRetryDelayMs, skip: () => capacitySkip() !== null });
+        skip = capacitySkip();
+      }
+      const skipped = (reason) => {
+        log('player-capacity-retry-skipped', { decisionId: next.decisionId, generation: record.generation, callNo, reason,
+          remainingMs: Math.ceil(deadlineAt - monotonicNow()) });
+        if (reason === 'stop') return { stop: true };
+        // An interrupt during the wait settles the decision as interrupted, as it would mid-call.
+        return reason === 'interrupted'
+          ? { round: { ok: false, error: codedError('INTERRUPTED', 'INTERRUPTED: 사용자가 결정을 중단했습니다.'), modelMs: 0 } } : null;
+      };
+      if (skip) return skipped(skip);
+      callNo += 1;
+      commitPending({diagnostics:{...record.diagnostics, callNo}});
+      // Persisting the call number consumes budget too. Recheck at the dispatch boundary, and
+      // count only calls that actually start.
+      const remainingForCall = Math.ceil(deadlineAt - monotonicNow());
+      if (remainingForCall <= 0 || remainingForCall < floor) {
+        callNo -= 1;
+        commitPending({diagnostics:{...record.diagnostics, callNo}});
+        return skipped('budget_after_commit');
+      }
+      log('player-capacity-retry', { decisionId: next.decisionId, generation: record.generation, callNo,
+        delayMs: capacityRetryDelayMs, remainingMs: remainingForCall });
+      capacityRetried = true;
+      return { round: await decideOnce({ playerId: next.toAct, signal, sessionId: session.sessionId, message }, remainingForCall, { callNo }) };
+    };
     const applyDecision = async (action) => {
       if (readLoopState()?.pendingDecision?.generation !== record.generation) {
         throw codedError('STALE_PLAYER_DECISION', '이전 세대의 응답은 적용하지 않습니다.');
@@ -3240,6 +3304,21 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         budget: watchdog, elapsedMs: round.modelMs, code: round.ok ? 'RESPONSE_RECEIVED' : failureCode,
         category: round.ok ? 'response' : playerFailureCategory(failureCode),
         closeConfirmed: round.ok || !isFatalRuntimeFailure(round.error), censored: failureCode === 'TIMEOUT' });
+      // #325: true when a stop came during the wait (return without writing).
+      const capacityRetry = async (retryMessage) => {
+        if (round.ok || capacityRetryUsed || isFatalRuntimeFailure(round.error) || !isCapacityRejection(round.error)) return false;
+        // The session resumed and started a turn: like a successful call, that proves a restored
+        // session usable, so a later failure of this decision never recreates it.
+        restoredPlayerSessions.delete(next.toAct);
+        const retried = await retryAfterCapacity(retryMessage);
+        if (retried?.stop) return true;
+        if (retried) {
+          round = retried.round;
+          modelMs += round.modelMs;
+        }
+        return false;
+      };
+      if (await capacityRetry(message)) return { kind: 'recovery_required' };
       if (
         !round.ok
         && !isFatalRuntimeFailure(round.error)
@@ -3281,6 +3360,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
                 message: attemptMessage,
               }, remainingForCall, { callNo });
               modelMs += round.modelMs;
+              if (await capacityRetry(attemptMessage)) return { kind: 'recovery_required' };
             } else {
               callNo -= 1;
               commitPending({diagnostics:{...record.diagnostics, callNo}});
@@ -3324,7 +3404,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         return {
           envelope: applied.envelope,
           atomicUnit: applied.atomicUnit,
-          outcome: attempt === 0 && !sessionRepaired && !previous ? 'accepted' : 'retried_accepted',
+          outcome: attempt === 0 && !sessionRepaired && !capacityRetried && !previous ? 'accepted' : 'retried_accepted',
           sessionRepaired,
           freshSession: freshSessionUsed,
           corrected: Boolean(inherited) || corrections === 1,
