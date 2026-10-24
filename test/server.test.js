@@ -1150,6 +1150,38 @@ test('result hold persists through side frames, snapshot restore and expires on 
   } finally {await closeOf(srv);fs.rmSync(gameDir,{recursive:true,force:true});}
 });
 
+test('level clock is kept by view-less frames, cleared by a view without one and restored after restart', async () => {
+  const gameDir = tmpDir(), token = 'level-clock-contract';
+  let srv = await start(gameDir, token);
+  const clock = {levelMs:120000,remainingMs:45000,at:'2026-01-01T00:00:00.000Z',running:true,nextBlinds:[50,100]};
+  const view = {handNo:3,handInProgress:true};
+  try {
+    const snapshot = () => req(srv.port,'/api/snapshot',{token});
+    // A game without a timed level never shows the key.
+    assert.equal((await publish(srv.port,token,{publishId:1,view})).status,200);
+    assert.equal(Object.hasOwn((await snapshot()).json,'levelClock'),false);
+    assert.equal((await publish(srv.port,token,{publishId:2,view,levelClock:clock})).status,200);
+    assert.deepEqual((await snapshot()).json.levelClock,clock);
+    assert.equal((await publish(srv.port,token,{publishId:3,messages:[]})).status,200);
+    assert.deepEqual((await snapshot()).json.levelClock,clock);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(gameDir,'ui-snapshot.json'))).levelClock,clock);
+    await closeOf(srv); srv = await start(gameDir, token);
+    assert.deepEqual((await snapshot()).json.levelClock,clock);
+    const paused = {...clock,running:false};
+    assert.equal((await publish(srv.port,token,{publishId:4,view,viewOnly:true,levelClock:paused})).status,200);
+    assert.deepEqual((await snapshot()).json.levelClock,paused);
+    // The last view of a game carries no clock: the relay drops it.
+    assert.equal((await publish(srv.port,token,{publishId:5,view:{...view,gameOver:true}})).status,200);
+    assert.equal(Object.hasOwn((await snapshot()).json,'levelClock'),false);
+    assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(path.join(gameDir,'ui-snapshot.json'))),'levelClock'),false);
+    for (const bad of [{...clock,extra:1},{...clock,remainingMs:120001},{...clock,levelMs:59999},{...clock,running:'yes'},
+      {...clock,at:'soon'},{...clock,nextBlinds:[100,50]},{...clock,nextBlinds:[0,50]},{...clock,remainingMs:1.5}]) {
+      assert.equal((await publish(srv.port,token,{publishId:6,view,levelClock:bad})).json.code,'BAD_LEVEL_CLOCK');
+    }
+    assert.equal((await publish(srv.port,token,{publishId:6,levelClock:clock})).json.code,'BAD_LEVEL_CLOCK');
+  } finally {await closeOf(srv);fs.rmSync(gameDir,{recursive:true,force:true});}
+});
+
  test('relay bounds persisted log by whole hands and preserves the remaining hand after restart', async () => {
   const gameDir=tmpDir(), token='tok-bounded-log';
   let srv=await start(gameDir,token);

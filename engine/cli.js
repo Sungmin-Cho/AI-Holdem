@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { newDeck } from './cards.js';
 import { initGameDir, isAlive, readLock } from './game-archive.js';
 import { snapshotDecision } from './decision.js';
-import { applyAction, blindsForLevel, forceDefault, legalFor, startHand } from './hand.js';
+import { applyAction, blindsForLevel, forceDefault, legalFor, MAX_LEVEL_MINUTES, startHand } from './hand.js';
 import {
   loadState, readHand, readOwnedLock, withMutation, writeHandArchive, writeJsonAtomic,
 } from './state.js';
@@ -25,7 +25,7 @@ const VALUE_FLAGS = new Set([
   'expect-version', 'for', 'result', 'deck', 'mode', 'stack-bb', 'hands',
   'opponent-runtime', 'policy-meta', 'jev-config-file',
   'showdown-policy', 'replay-reveal', 'meta-file', 'hints', 'hint-meta-file', 'decision-id', 'deal-bias',
-  'participants-file',
+  'participants-file', 'level-minutes', 'play-ms',
 ]);
 
 const FAIL_MESSAGES = {
@@ -236,6 +236,12 @@ function cmdInit(gameDir, flags) {
   if (cash && flags['level-every'] != null) {
     usage('cash-training은 --level-every를 쓰지 않습니다.');
   }
+  if (cash && flags['level-minutes'] != null) {
+    usage('cash-training은 --level-minutes를 쓰지 않습니다.');
+  }
+  if (flags['level-every'] != null && flags['level-minutes'] != null) {
+    usage('--level-every와 --level-minutes는 함께 쓸 수 없습니다.');
+  }
   if (cash && flags.stack != null && flags['stack-bb'] != null) {
     usage('--stack과 --stack-bb는 함께 쓸 수 없습니다.');
   }
@@ -243,6 +249,7 @@ function cmdInit(gameDir, flags) {
   let startStack;
   let startStackBb;
   let levelEvery;
+  let levelMinutes;
   let handLimit;
   if (cash) {
     if (flags['stack-bb'] != null) {
@@ -254,6 +261,12 @@ function cmdInit(gameDir, flags) {
     }
     levelEvery = null;
     if (flags.hands != null) handLimit = parseSafePositive(flags.hands, '--hands');
+  } else if (flags['level-minutes'] != null) {
+    startStack = flags.stack != null ? parseIntArg(flags.stack, '--stack') : 5000;
+    levelEvery = null;
+    levelMinutes = parseIntArg(flags['level-minutes'], '--level-minutes');
+    if (startStack < 1) usage('--stack은 1 이상이어야 합니다.');
+    if (levelMinutes < 1 || levelMinutes > MAX_LEVEL_MINUTES) usage(`--level-minutes는 1~${MAX_LEVEL_MINUTES} 정수여야 합니다.`);
   } else {
     startStack = flags.stack != null ? parseIntArg(flags.stack, '--stack') : 5000;
     levelEvery = flags['level-every'] != null
@@ -263,7 +276,7 @@ function cmdInit(gameDir, flags) {
     if (levelEvery < 1) usage('--level-every는 1 이상이어야 합니다.');
   }
   const result = initGameDir(gameDir, {
-    aiCount, startStack, blinds0, levelEvery, force: flags.force,
+    aiCount, startStack, blinds0, levelEvery, levelMinutes, force: flags.force,
     mode: cash ? 'cash-training' : undefined,
     startStackBb: cash ? startStackBb : undefined,
     handLimit,
@@ -284,12 +297,29 @@ function cmdInit(gameDir, flags) {
   });
 }
 
+/** `--play-ms`: the loop's play time for a new hand. Required by timed levels. */
+function parsePlayMs(flags) {
+  if (flags['play-ms'] == null) return undefined;
+  if (!/^\d+$/.test(String(flags['play-ms'])) || !Number.isSafeInteger(Number(flags['play-ms']))) {
+    usage('--play-ms는 0 이상의 안전한 정수(ms)여야 합니다.');
+  }
+  return Number(flags['play-ms']);
+}
+
+function newHandOptions(state, deck, playMs) {
+  if (Number.isInteger(state.config?.levelMinutes) && playMs === undefined) {
+    throwCoded('USAGE', '시간 기반 레벨 게임의 새 핸드에는 --play-ms가 필요합니다.');
+  }
+  return { ...(deck ? { deck } : {}), ...(playMs !== undefined ? { playMs } : {}) };
+}
+
 function cmdNewHand(gameDir, flags) {
   const deck = flags.deck != null ? parseDeck(flags.deck) : undefined;
+  const playMs = parsePlayMs(flags);
   const envelope = mutate(gameDir, (state) => {
     requireState(state);
     if (state.hand) throwCoded('ILLEGAL_ACTION', '진행 중인 핸드가 있습니다.');
-    const result = startHand(state, deck ? { deck } : {});
+    const result = startHand(state, newHandOptions(state, deck, playMs));
     return { state: result.state, response: applyEnvelope(result.state, result.events) };
   });
   succeed(envelope);
@@ -389,6 +419,8 @@ function cmdStep(gameDir, flags, rest) {
     usage('step은 --new-hand와 액션을 동시에 받지 않습니다.');
   }
   rejectForceDefaultWithMeta(flags);
+  if (!newHand && flags['play-ms'] != null) usage('--play-ms는 --new-hand와 함께만 씁니다.');
+  const playMs = parsePlayMs(flags);
 
   const expectVersion = flags['expect-version'] != null
     ? parseIntArg(flags['expect-version'], '--expect-version')
@@ -418,7 +450,7 @@ function cmdStep(gameDir, flags, rest) {
     let metaResult = null;
     if (newHand) {
       if (state.hand) throwCoded('ILLEGAL_ACTION', '진행 중인 핸드가 있습니다.');
-      result = startHand(state, deck ? { deck } : {});
+      result = startHand(state, newHandOptions(state, deck, playMs));
     } else if (flags['force-default']) {
       result = forceDefault(state, playerId);
     } else {

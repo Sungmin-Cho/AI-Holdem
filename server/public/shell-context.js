@@ -3,8 +3,11 @@
  * host lobby and the join page; amounts follow the BB/chips preference. */
 import { formatAmount } from './chip-format.js';
 import { currentDisplaySettings } from './display-settings.js';
+import { formatLevelSeconds } from './table-controls.js';
 
-export function paintShellContext(node, context, { doc = globalThis.document, preference = currentDisplaySettings({ doc }).unit } = {}) {
+/** `paused`: the shell knows play is paused, so the level clock is shown as
+ * paused rather than as the last time the table sent. */
+export function paintShellContext(node, context, { doc = globalThis.document, preference = currentDisplaySettings({ doc }).unit, paused = false } = {}) {
   if (!node) return;
   if (!context) { node.hidden = true; node.replaceChildren(); return; }
   const parts = [];
@@ -19,6 +22,8 @@ export function paintShellContext(node, context, { doc = globalThis.document, pr
   };
   if (context.handNo !== null) add('핸드', context.handLimit ? `${context.handNo}/${context.handLimit}` : String(context.handNo));
   if (context.blinds) add(context.level ? `레벨 ${context.level} ·` : '블라인드', `${context.blinds[0].toLocaleString('ko-KR')}/${context.blinds[1].toLocaleString('ko-KR')}`);
+  if (context.levelSecondsLeft != null && !context.gameOver) add('다음 레벨', paused ? '일시정지' : formatLevelSeconds(context.levelSecondsLeft));
+  else if (context.levelLeft != null && !context.gameOver) add('다음 레벨', `${context.levelLeft}핸드`);
   if (context.sessionNet !== null) {
     const net = formatAmount(context.sessionNet, context.blinds?.[1] ?? null, preference, true).primary;
     add('손익', net, context.sessionNet > 0 ? 'ui-pos' : context.sessionNet < 0 ? 'ui-neg' : '');

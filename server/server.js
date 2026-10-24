@@ -35,6 +35,7 @@ import {
   validateViewsAgainstEngine,
   validateTurnDeadline,
   validateResultHold,
+  validateLevelClock,
   validateEventsAgainstEngine,
   validateMessages,
   assertHostText,
@@ -115,6 +116,7 @@ function emptyState() {
     decision: null,
     turnDeadline: null,
     resultHold: null,
+    levelClock: null,
     spectatorView: null,
     projectionAnchor: null,
   };
@@ -801,6 +803,7 @@ export function loadUiState(gameDir, expectedSessionToken, assertRaw = () => {})
       decision,
       turnDeadline: raw.turnDeadline ?? null,
       resultHold: validateResultHold(raw.resultHold, raw.view) ?? null,
+      levelClock: validateLevelClock(raw.levelClock) ?? null,
       ...restoreViewerProjection(engineState, raw),
     };
   } catch (error) {
@@ -982,7 +985,8 @@ export function publicSnapshot(state, hint = null, seat = HOST_ID) {
     return {revision:state.revision, view:state.spectatorView ?? null,
       viewerRole:state.spectatorView?.viewerRole ?? 'unavailable',
       ...(!state.spectatorView ? {code:'VIEW_NOT_READY'} : {}),
-      log:state.log, turnDeadline:state.turnDeadline ?? null, resultHold:state.resultHold ?? null};
+      log:state.log, turnDeadline:state.turnDeadline ?? null, resultHold:state.resultHold ?? null,
+      ...(state.levelClock ? {levelClock:state.levelClock} : {})};
   }
   if (seat && seat !== HOST_ID) {
     return {
@@ -991,6 +995,7 @@ export function publicSnapshot(state, hint = null, seat = HOST_ID) {
       log: state.log,
       turnDeadline: state.turnDeadline ?? null,
     resultHold: state.resultHold ?? null,
+      ...(state.levelClock ? { levelClock: state.levelClock } : {}),
       viewerRole: viewerRole(state.view, seat),
     };
   }
@@ -1010,6 +1015,7 @@ function hostSnapshot(state, hint = null) {
     trainingAnnotations: annotationsToArray(state.trainingAnnotations),
     turnDeadline: state.turnDeadline ?? null,
     resultHold: state.resultHold ?? null,
+    ...(state.levelClock ? { levelClock: state.levelClock } : {}),
     viewerRole: viewerRole(state.view, HOST_ID),
   };
   // #292: the stored review stays as published; the host is shown it through the current rule.
@@ -1048,6 +1054,7 @@ function persistUiStateAtomic(owner, state) {
     decision: state.decision ?? null,
     turnDeadline: state.turnDeadline ?? null,
     resultHold: state.resultHold ?? null,
+    ...(state.levelClock ? { levelClock: state.levelClock } : {}),
     projectionAnchor: state.projectionAnchor ?? null,
   };
   if (state.review !== undefined) file.review = state.review;
@@ -1402,6 +1409,10 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       : nextDecisionFromViews(body.views ?? { [HOST_ID]: body.view });
     try {
       if (body.resultHold !== undefined) validateResultHold(body.resultHold, body.view);
+      if (body.levelClock !== undefined) {
+        if (body.view === undefined) throw Object.assign(new Error('level clock without a view'), { code: 'BAD_LEVEL_CLOCK' });
+        validateLevelClock(body.levelClock);
+      }
       const session = publishRoster(root, token);
       if (!session) {
         sendJson(res, 500, { ok: false, code: 'PRIVATE_LITERAL_INVALID' });
@@ -1455,6 +1466,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       resultHold: body.view !== undefined
         ? (body.resultHold ?? (state.resultHold?.handNo === body.view.handNo && body.view.handInProgress === false ? state.resultHold : null))
         : state.resultHold,
+      levelClock: body.view !== undefined ? (body.levelClock ?? null) : (state.levelClock ?? null),
       log: state.log,
       coach: state.coach,
       training: state.training ?? [],
@@ -1483,6 +1495,9 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
     }
     if (next.turnDeadline !== undefined && next.turnDeadline !== null) payload.turnDeadline = next.turnDeadline;
     if (next.resultHold !== undefined && next.resultHold !== null) payload.resultHold = next.resultHold;
+    // A view either carries the clock or clears one that was shown; games without a
+    // timed level never see the key.
+    if (body.view !== undefined && (next.levelClock !== null || (state.levelClock ?? null) !== null)) payload.levelClock = next.levelClock;
     if (Array.isArray(body.events) && body.events.length) {
       next.log = [...next.log, ...body.events];
       payload.events = body.events;

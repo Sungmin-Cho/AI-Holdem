@@ -70,7 +70,7 @@ function bail(code, message, extra = null) {
 function parseArgs(argv) {
   const out = {
     gameDir: 'game', from: null, narrations: [], narrationCodes: [],
-    turnDeadline: null, resultHold: null,
+    turnDeadline: null, resultHold: null, levelClock: null,
     viewOnly: false, wait: false, waitOnly: false, waitMs: 25_000,
     lockWaitMs: DEFAULT_LOCK_WAIT_MS, retry: false, retireRejected: false,
     expectAttemptSha256: null, expectGameEpoch: null,
@@ -115,6 +115,16 @@ function parseArgs(argv) {
       if (parts.length !== 5) bail('USAGE', '--result-hold 형식이 올바르지 않습니다.');
       const [handNo, startAt, until, runoutStepMs, runoutStreets] = parts;
       out.resultHold = { handNo: Number(handNo), startAt, until, runoutStepMs: Number(runoutStepMs), runoutStreets: Number(runoutStreets) };
+    }
+    else if (arg === '--level-clock') {
+      const parts = needsValue(arg).split('|');
+      const blinds = parts[4]?.split('/') ?? [];
+      if (parts.length !== 5 || !['0', '1'].includes(parts[3]) || blinds.length !== 2
+        || ![parts[0], parts[1], ...blinds].every((value) => /^\d+$/.test(value))) {
+        bail('USAGE', '--level-clock 형식이 올바르지 않습니다.');
+      }
+      out.levelClock = { levelMs: Number(parts[0]), remainingMs: Number(parts[1]), at: parts[2],
+        running: parts[3] === '1', nextBlinds: blinds.map(Number) };
     }
     else if (arg === '--view-only') out.viewOnly = true;
     else if (arg === '--retry') out.retry = true;
@@ -244,6 +254,7 @@ function buildBody(envelope, opts) {
   }
   if (opts.turnDeadline) body.turnDeadline = opts.turnDeadline;
   if (opts.resultHold) body.resultHold = opts.resultHold;
+  if (opts.levelClock) body.levelClock = opts.levelClock;
   // Tells the server this republish re-shows a state rather than acknowledging an
   // action, so a user action whose response was lost survives a dealer's resume.
   if (opts.viewOnly) body.viewOnly = true;

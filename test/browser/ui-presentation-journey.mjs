@@ -12,6 +12,7 @@ import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures,defaultPlayers} from '../helpers/security-fixtures.js';
 import {parseCard,cardLabel} from '../../server/public/card-render.js';
 import {formatSignedAmount} from '../../server/public/chip-format.js';
+import {formatBbInput} from '../../server/public/amount-editor.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
 export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','help-over-replay','help-touch-targets','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-detail','last-result-recap','final-last-hand','seat-status-collapsed','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','embedded-state-matrix','state-matrix','onboarding-timed-turn','final-geometry','plate-status-row','computed-contrast','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
@@ -311,17 +312,24 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.match(await evaluate("document.querySelector('#pots').textContent"),/1.5 BB/);checks.push('pot-total');
     await click('#action-options-toggle');
     await browser(['fill','#intent-note','fixture intention']);
-    await browser(['fill','#raise-amount',String(view.legal.minRaiseTo)]);
+    // Big blinds are the default unit: the field reads and writes BB, the payload stays chips.
+    const bbText=chips=>formatBbInput(chips,view.blinds[1]);
+    assert.equal(await evaluate("document.querySelector('#raise-amount-label').textContent"),'총액 (BB)');
+    assert.equal(await evaluate("document.querySelector('#raise-amount').getAttribute('inputmode')"),'decimal');
+    await browser(['fill','#raise-amount',bbText(view.legal.minRaiseTo)]);
     await browser(['fill','#raise-amount','9999999']);await browser(['press','ArrowUp']);
-    assert.equal(Number((await evaluate("document.querySelector('#raise-amount').value")).replaceAll(',','')),Math.min(view.legal.minRaiseTo+view.blinds[1],view.legal.maxRaiseTo));
-    for(const invalid of ['-5','1e3','1,2','','１２３']) {
+    assert.equal(await evaluate("document.querySelector('#raise-amount').value"),bbText(Math.min(view.legal.minRaiseTo+view.blinds[1],view.legal.maxRaiseTo)));
+    assert.equal(await evaluate("document.querySelector('#btn-raise .amount-secondary').textContent"),`${Math.min(view.legal.minRaiseTo+view.blinds[1],view.legal.maxRaiseTo).toLocaleString('ko-KR')} 칩`);
+    for(const invalid of ['-5','1e3','1,2','','１２３','2.555']) {
       await browser(['fill','#raise-amount',invalid]);await browser(['press','Enter']);await publish();
       assert.equal(await evaluate("document.querySelector('#raise-amount').value"),invalid);
       assert.equal(await evaluate('window.actionBodies.length'),0);
     }
-    await browser(['fill','#raise-amount','2.5']);await browser(['press','Tab']);await publish();
+    // A malformed amount survives the unit toggle as typed and is never sent.
+    await browser(['fill','#raise-amount','2.555']);await browser(['press','Tab']);await publish();
     await browser(['select','#display-unit','chips']);
-    assert.equal(await evaluate("document.querySelector('#raise-amount').value"),'2.5');
+    assert.equal(await evaluate("document.querySelector('#raise-amount').value"),'2.555');
+    assert.equal(await evaluate("document.querySelector('#raise-amount-label').textContent"),'총액 (칩)');
     assert.equal(await evaluate("document.querySelector('#intent-note').value"),'fixture intention');
     await click('#btn-raise');
     const receipt=await fetch(`${origin}/api/action-status?token=${token}`).then(r=>r.json());

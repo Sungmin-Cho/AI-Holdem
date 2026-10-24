@@ -6,6 +6,39 @@ export function clampRaiseTo(value, legal) {
   return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : min;
 }
 
+/** A slider position in big-blind mode: the nearest half big blind, except
+ * that the legal ends stay exact (an all-in is rarely a whole number of BB). */
+export function snapRaiseTo(value, legal, bb) {
+  const max = Math.max(0, Number(legal.maxRaiseTo) || 0);
+  const min = Math.min(max, Math.max(0, Number(legal.minRaiseTo) || 0));
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n) || n <= min) return min;
+  if (n >= max) return max;
+  const step = Number(bb) / 2;
+  return step > 0 ? clampRaiseTo(Math.round(n / step) * step, legal) : clampRaiseTo(n, legal);
+}
+
+/** One slider key press in big-blind mode: the next half big blind above or
+ * below `current` (never the same chip amount), ending at the exact legal ends.
+ * Half-big-blind point k is round(k·bb/2) = floor((k·bb + 1) / 2); the next and
+ * previous k come from integer division in BigInt, so the step is exact and
+ * bounded for every safe amount. */
+export function stepRaiseTo(current, legal, bb, direction) {
+  const max = Math.max(0, Number(legal.maxRaiseTo) || 0);
+  const min = Math.min(max, Math.max(0, Number(legal.minRaiseTo) || 0));
+  const n = Math.round(Number(current));
+  if (!Number.isSafeInteger(n) || !Number.isSafeInteger(bb) || bb <= 0) return clampRaiseTo(n, legal);
+  if (direction > 0 ? n >= max : n <= min) return direction > 0 ? max : min;
+  const big = BigInt(bb), at = BigInt(n);
+  const point = (k) => Number((k * big + 1n) / 2n);
+  if (direction > 0) {
+    const next = point((2n * at + 1n + big - 1n) / big);
+    return next >= max ? max : clampRaiseTo(next, legal);
+  }
+  const previous = at >= 1n ? point((2n * at - 2n) / big) : 0;
+  return previous <= min ? min : clampRaiseTo(previous, legal);
+}
+
 export function potRaiseTo(legal, actorBet, fraction) {
   return clampRaiseTo(actorBet + legal.callAmount + fraction * (legal.potTotal + legal.callAmount), legal);
 }
@@ -46,6 +79,24 @@ export const PRIMARY_VERB_LABEL = Object.freeze({ bet: '벳', raise: '레이즈'
 
 export function reviewDismissalAfterUpdate(dismissed) {
   return dismissed === true;
+}
+
+/** Whole seconds left in a timed level at server time `serverNow`: the clock
+ * only runs down while play time runs (`running`), and stops at zero — the
+ * next hand then starts the next level. Null without a valid clock. */
+export function levelSecondsLeft(clock, serverNow = Date.now()) {
+  if (!clock || !Number.isSafeInteger(clock.remainingMs)) return null;
+  const at = Date.parse(clock.at);
+  if (!Number.isFinite(at)) return null;
+  const left = clock.running ? clock.remainingMs - Math.max(0, serverNow - at) : clock.remainingMs;
+  return Math.max(0, Math.ceil(left / 1000));
+}
+
+/** "1:05" for the next level; "다음 핸드" once the level's time is up. */
+export function formatLevelSeconds(seconds) {
+  if (!Number.isSafeInteger(seconds) || seconds < 0) return null;
+  if (seconds === 0) return '다음 핸드';
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
 export function formatTurnDeadline(deadline, now = Date.now()) {

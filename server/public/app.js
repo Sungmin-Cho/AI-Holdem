@@ -14,12 +14,12 @@ import { DISPLAY_KEYS, currentDisplaySettings, saveDisplaySetting } from './disp
 
 import { decisionAid, decisionAidText } from './decision-aid.js';
 import { compareGuesses, GUESS_CHOICES, hudLine, readOpponentNotes, saveOpponentNote } from './opponent-notes.js';
-import { clampRaiseTo, potRaiseTo, bbRaiseTo, defaultRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
+import { levelSecondsLeft, formatLevelSeconds, clampRaiseTo, snapRaiseTo, stepRaiseTo, potRaiseTo, bbRaiseTo, defaultRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
 import { createActionController, formatActionNotice } from './action-controller.js';
 import {formatAmount, formatSignedAmount, readPreference} from './chip-format.js';
 import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint, viewerId, isSpectating, lastActionsBySeat} from './seat-format.js';
 import {aggregatePot, showPotBreakdown, logBlindContexts} from './table-presentation.js';
-import {createAmountEditor, parseChipInput} from './amount-editor.js';
+import {createAmountEditor} from './amount-editor.js';
 import {createDialogController} from './dialog-controller.js';
 import {captureHandPrior, updateHandResult, handResultFrame, trackLatestResult} from './hand-result.js';
 import {renderHandResultCard} from './hand-result-view.js';
@@ -47,7 +47,7 @@ const shellEmbed = createShellEmbed({
 });
 let shellConn = 'retry';
 let shellRetries = 0;
-const ui = { sessionEnded: false, handResult: null, lastHandResult: null, resultHold: null, handPrior: null, turnDeadline: null, hint: null, view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined, handReplays: Object.create(null) };
+const ui = { sessionEnded: false, handResult: null, lastHandResult: null, resultHold: null, levelClock: null, handPrior: null, turnDeadline: null, hint: null, view: null, log: [], coach: [], training: [], trainingAnnotations: [], review: undefined, handReplays: Object.create(null) };
 let serverOffsetMs = 0;
 let announcedDeadline = null;
 let renderedDeadlineKey = null;
@@ -232,6 +232,12 @@ function handsUntilLevel(view) {
   return every - ((view.handNo - 1) % every);
 }
 
+// A timed tournament's level clock, in whole seconds (null for other games).
+function levelSecondsOf(view) {
+  if (!ui.levelClock || view?.mode === 'cash-training' || view?.gameOver) return null;
+  return levelSecondsLeft(ui.levelClock, Date.now() + serverOffsetMs);
+}
+
 function setConn(on, text = null) {
   if(!on)hideHint();
   const box = $('conn');
@@ -254,6 +260,7 @@ function shellContext(view) {
     level: view && !cash && Number.isSafeInteger(view.level) ? view.level + 1 : null,
     blinds: Array.isArray(view?.blinds) && view.blinds.length === 2 ? [view.blinds[0], view.blinds[1]] : null,
     levelLeft: view && !cash ? handsUntilLevel(view) : null,
+    levelSecondsLeft: view && !cash ? levelSecondsOf(view) : null,
     sessionNet: cash && !isSpectating(view) && Number.isSafeInteger(net) ? net : null,
     conn: ui.sessionEnded ? 'ended' : shellConn,
     retryCount: shellRetries,
@@ -462,8 +469,14 @@ function paintTop(view) {
     : '토너먼트는 15BB 이하 푸시/폴드와 80~150BB 깊이의 프리플랍을 기준표 v3와 비교합니다. 그 사이 깊이는 투영 참고(점수 제외)이고, 포스트플랍은 사실 카드로 복기하세요.';
   $('level').textContent = view == null ? '—' : String((view.level ?? 0) + 1);
   $('blinds').textContent = view?.blinds ? `${formatChip(view.blinds[0])} / ${formatChip(view.blinds[1])} 칩 · 1 BB = ${formatChip(view.blinds[1])} 칩` : '—';
+  paintLevelLeft(view);
+}
+
+function paintLevelLeft(view = ui.view) {
+  const seconds = view ? levelSecondsOf(view) : null;
   const left = view ? handsUntilLevel(view) : null;
-  $('level-left').textContent = left == null ? '—' : String(left);
+  $('level-left').textContent = seconds !== null ? formatLevelSeconds(seconds) : left == null ? '—' : String(left);
+  $('level-left-unit').hidden = seconds !== null;
 }
 
 function paintBoard(view) {
@@ -794,7 +807,8 @@ function writeAmountField(value) {
 function markAmountValid(valid) {
   $('raise-amount').closest('.amount-field').classList.toggle('is-invalid', !valid);
   $('raise-amount').setAttribute('aria-invalid', String(!valid));
-  $('amount-error').textContent = !valid ? '칩 정수와 합법 범위를 확인해 주세요.' : amountEditor.state.pendingCorrection ? '합법 범위로 보정했습니다. 레이즈를 눌러 금액을 확인해 주세요.' : amountEditor.state.confirmedCorrection ? `보정된 ${amountEditor.state.value.toLocaleString('ko-KR')} 칩을 확인했습니다. 레이즈를 다시 눌러 제출하세요.` : '';
+  const malformed = amountEditor.state.unit === 'bb' ? 'BB 숫자(소수 둘째 자리까지)와 합법 범위를 확인해 주세요.' : '칩 정수와 합법 범위를 확인해 주세요.';
+  $('amount-error').textContent = !valid ? malformed : amountEditor.state.pendingCorrection ? '합법 범위로 보정했습니다. 레이즈를 눌러 금액을 확인해 주세요.' : amountEditor.state.confirmedCorrection ? `보정된 금액(${amountText(amountEditor.state.value)})을 확인했습니다. 레이즈를 다시 눌러 제출하세요.` : '';
   if ($('amount-error').textContent && matchMedia('(max-width:600px)').matches) {
     $('action-bar').classList.add('options-expanded');
     $('action-options-toggle').setAttribute('aria-expanded','true');
@@ -819,6 +833,25 @@ function commitAmount() {
   $('raise-slider').value = String(raiseTo);
   setBtnLabel($('btn-raise'), raiseLabel(raiseTo), raiseTo);
   markAmountValid(!state.invalid);
+}
+
+// The field reads and writes the display unit: big blinds when this view has one.
+function syncAmountUnit(legal, view = ui.view) {
+  const before = amountEditor.state.unit;
+  const state = amountEditor.setUnit(displayUnit, view?.blinds?.[1], legal);
+  if (state.unit !== before && legal.decisionId === lastDecisionId) {
+    // Same decision, new unit: the amount is unchanged, its text and the
+    // malformed-input message follow the unit.
+    if (!state.invalid) raiseTo = state.value;
+    const input = $('raise-amount');
+    if (document.activeElement !== input || !state.invalid) input.value = state.text;
+    markAmountValid(!state.invalid);
+  }
+  const unit = state.unit === 'bb' ? 'BB' : '칩';
+  const input = $('raise-amount');
+  $('raise-amount-label').textContent = `총액 (${unit})`;
+  input.setAttribute('aria-label', `이번 스트리트 레이즈 총액 직접 입력 (${unit})`);
+  input.setAttribute('inputmode', unit === 'BB' ? 'decimal' : 'numeric');
 }
 
 function adoptDecision(legal, view = ui.view) {
@@ -878,6 +911,7 @@ function paintActionBar(view) {
   const cards=(view.myCards??[]).map(code=>cardLabel(formatCard(code))).join(', ');
   $('action-summary').textContent = `내 스택 ${amountText(hero?.stack)} · 팟 ${pot.kind==='ready' ? amountText(pot.total) : '정보 확인 중'} · 내 카드 ${cards}`;
   paintDecisionAid(view);
+  syncAmountUnit(legal, view);
   adoptDecision(legal, view);
 
   const shortAllIn = legal.minRaiseTo > legal.maxRaiseTo;
@@ -1677,7 +1711,10 @@ function paintTurnDeadline() {
     if(announcement)announcement.textContent = `행동 제한 시간이 ${seconds}초 남았습니다.`;
   }
 }
-setInterval(()=>{paintTurnDeadline();paintThinking(ui.view);if(typeof paintPlateThinking==='function')paintPlateThinking();}, 1000);
+setInterval(()=>{
+  paintTurnDeadline();paintThinking(ui.view);if(typeof paintPlateThinking==='function')paintPlateThinking();
+  if(ui.levelClock){paintLevelLeft();shellEmbed.send(shellContext(ui.view));}
+}, 1000);
 
 function renderSnapshot(snap) {
   // Initial load, reconnect, and terminal records jump; they never animate or award.
@@ -1687,6 +1724,7 @@ function renderSnapshot(snap) {
   const sameRevision = ui.view != null && Number.isInteger(snap.revision) && snap.revision === revision;
   if (!sameRevision) { motionInput = { source: 'snapshot', contiguous: false }; awardBaseline = null; }
   ui.resultHold=snap.resultHold ?? null;
+  ui.levelClock=snap.levelClock ?? null;
   ui.turnDeadline = retainTurnDeadline(ui.turnDeadline, snap.turnDeadline ?? null, ui.view, snap.view);
   const becameSpectator = !isSpectating(ui.view) && isSpectating(snap.view);
   if (isSpectating(snap.view)) {
@@ -1718,6 +1756,8 @@ function render(m, contiguous = true) {
   motionInput = { source: 'live', contiguous };
   if(m.resultHold!==undefined)ui.resultHold=m.resultHold;
   else if(m.view && (m.view.handInProgress || m.view.handNo!==ui.resultHold?.handNo))ui.resultHold=null;
+  // Present with a view: the clock now (null clears it); absent: unchanged.
+  if(m.levelClock!==undefined)ui.levelClock=m.levelClock;
   ui.turnDeadline = retainTurnDeadline(ui.turnDeadline, m.turnDeadline, ui.view, m.view ?? ui.view);
   ui.hint=hintState.accept(m.hint,m.view??ui.view,{generation:m.hintGeneration??-1,canRestore:m.hint?.status==='supported'&&m.revision>revisionAtHintClear});
   if (m.view !== undefined) {
@@ -1836,8 +1876,21 @@ $('btn-raise').addEventListener('click', () => {
 $('btn-allin-only').addEventListener('click', () => sendAction('raise', ui.view?.legal?.maxRaiseTo));
 
 $('raise-slider').addEventListener('input', (ev) => {
-  if (!ui.view?.legal || pendingAction) return;
-  setRaiseTo(ev.target.value);
+  const legal = ui.view?.legal;
+  if (!legal || pendingAction) return;
+  setRaiseTo(amountEditor.state.unit === 'bb' ? snapRaiseTo(ev.target.value, legal, ui.view.blinds?.[1]) : ev.target.value);
+  markAmountValid(true);
+});
+
+// Arrow keys on the big-blind slider step half a big blind: the native one-chip
+// step would be snapped straight back to where it was.
+$('raise-slider').addEventListener('keydown', (ev) => {
+  const legal = ui.view?.legal;
+  if (!legal || pendingAction || amountEditor.state.unit !== 'bb') return;
+  const direction = ev.key === 'ArrowRight' || ev.key === 'ArrowUp' ? 1 : ev.key === 'ArrowLeft' || ev.key === 'ArrowDown' ? -1 : 0;
+  if (!direction) return;
+  ev.preventDefault();
+  setRaiseTo(stepRaiseTo(raiseTo, legal, ui.view.blinds?.[1], direction));
   markAmountValid(true);
 });
 
@@ -1862,7 +1915,7 @@ $('raise-panel').addEventListener('click', (ev) => {
 
 // 직접 입력 — 유효 값은 전체 선택하고, 잘못된 원문과 보정 확인 상태는 보존한다.
 $('raise-amount').addEventListener('focus', (ev) => {
-  if(amountEditor.state.invalid || parseChipInput(ev.target.value)!==raiseTo)return;
+  if(amountEditor.state.invalid || amountEditor.read(ev.target.value)!==raiseTo)return;
   ev.target.value = amountEditor.state.text;
   ev.target.select();
 });
@@ -1888,7 +1941,7 @@ $('raise-amount').addEventListener('keydown', (ev) => {
   if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
   ev.preventDefault();
   const step = ui.view?.blinds?.[1] ?? 1;
-  const base = amountEditor.state.invalid ? raiseTo : (parseChipInput(ev.target.value) ?? raiseTo);
+  const base = amountEditor.state.invalid ? raiseTo : (amountEditor.read(ev.target.value) ?? raiseTo);
   setRaiseTo(base + (ev.key === 'ArrowUp' ? step : -step));
   markAmountValid(true);
 });

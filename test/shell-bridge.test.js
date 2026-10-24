@@ -78,7 +78,7 @@ test('an accepted context keeps only allowlisted public fields', () => {
     data: context({ holeCards: ['As', 'Kd'], token: 'secret', decisionId: 'd-1', blinds: [25, 'x'] }) });
   assert.equal(seen.length, 1);
   assert.deepEqual(Object.keys(seen[0]).sort(), ['blinds', 'conn', 'gameEpoch', 'gameId', 'gameOver', 'handInProgress', 'handLimit',
-    'handNo', 'level', 'levelLeft', 'mode', 'retryCount', 'sessionNet'].sort());
+    'handNo', 'level', 'levelLeft', 'levelSecondsLeft', 'mode', 'retryCount', 'sessionNet'].sort());
   assert.equal(seen[0].blinds, null, 'malformed optional fields become null, not partial values');
   assert.equal(bridge.context.handNo, 7);
   assert.doesNotMatch(JSON.stringify(seen), /secret|As|d-1/);
@@ -141,4 +141,39 @@ test('the header context shows hand, blinds, net and a lost connection, and clea
   paintShellContext(node, null, { doc });
   assert.equal(node.hidden, true);
   assert.equal(node.textContent, '');
+});
+
+test('the header shows the next level as time for a timed tournament, hands otherwise, and paused while the game is', async () => {
+  const { createMiniDocument } = await import('./helpers/mini-dom.js');
+  const { paintShellContext } = await import('../server/public/shell-context.js');
+  const doc = createMiniDocument();
+  const node = doc.createElement('p');
+  const base = { handNo: 4, handLimit: null, level: 2, blinds: [50, 100], sessionNet: null, conn: 'on', gameOver: false };
+  paintShellContext(node, { ...base, levelLeft: null, levelSecondsLeft: 65 }, { doc, preference: 'bb' });
+  assert.match(node.textContent, /다음 레벨 1:05/);
+  paintShellContext(node, { ...base, levelLeft: null, levelSecondsLeft: 65 }, { doc, preference: 'bb', paused: true });
+  assert.match(node.textContent, /다음 레벨 일시정지/);
+  assert.doesNotMatch(node.textContent, /1:05/);
+  paintShellContext(node, { ...base, levelLeft: null, levelSecondsLeft: 0 }, { doc, preference: 'bb' });
+  assert.match(node.textContent, /다음 레벨 다음 핸드/);
+  paintShellContext(node, { ...base, levelLeft: 3, levelSecondsLeft: null }, { doc, preference: 'bb' });
+  assert.match(node.textContent, /다음 레벨 3핸드/);
+  paintShellContext(node, { ...base, gameOver: true, levelLeft: null, levelSecondsLeft: 30 }, { doc, preference: 'bb' });
+  assert.doesNotMatch(node.textContent, /다음 레벨/);
+});
+
+test('a timed level counts down only while play time runs and stops at zero', async () => {
+  const { levelSecondsLeft, formatLevelSeconds } = await import('../server/public/table-controls.js');
+  const at = Date.parse('2026-01-01T00:00:00.000Z');
+  const clock = { levelMs: 120000, remainingMs: 65000, at: new Date(at).toISOString(), running: true, nextBlinds: [50, 100] };
+  assert.equal(levelSecondsLeft(clock, at), 65);
+  assert.equal(levelSecondsLeft(clock, at + 4500), 61);
+  assert.equal(levelSecondsLeft(clock, at + 90000), 0);
+  assert.equal(levelSecondsLeft(clock, at - 5000), 65, 'a server clock behind the stamp never adds time');
+  assert.equal(levelSecondsLeft({ ...clock, running: false }, at + 90000), 65);
+  for (const bad of [null, { ...clock, at: 'later' }, { ...clock, remainingMs: undefined }]) assert.equal(levelSecondsLeft(bad, at), null);
+  assert.equal(formatLevelSeconds(65), '1:05');
+  assert.equal(formatLevelSeconds(600), '10:00');
+  assert.equal(formatLevelSeconds(0), '다음 핸드');
+  assert.equal(formatLevelSeconds(null), null);
 });

@@ -522,6 +522,7 @@ export function createSessionManager({
         startPaused: recover,
         appSetup: setup,
         pace: setup?.pace ?? "instant",
+        ...(setup?.resultHoldSec !== undefined ? { resultHoldSec: setup.resultHoldSec } : {}),
         actionTimeoutMs: actionTimeoutMsFor(setup),
       },
       onReserve: (previous) => {
@@ -574,6 +575,7 @@ export function createSessionManager({
           startPaused: true,
           actionTimeoutMs: actionTimeoutMsFor(setup),
           pace: setup?.pace ?? "instant",
+          ...(setup?.resultHoldSec !== undefined ? { resultHoldSec: setup.resultHoldSec } : {}),
         },
       },
     );

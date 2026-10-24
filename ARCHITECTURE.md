@@ -30,7 +30,7 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 | `tools/training-stores.js` | R12의 주입자 — `tools/training-store.js`의 fs helper를 `training/`의 저장 모듈에 넘긴다. |
 | `tools/fake-solver-adapter.js`, `tools/solver-adapter.js` | solver adapter 레지스트리와 fake adapter. 프로세스 spawn은 tools 책임이다. |
 | `tools/build-preflop-baseline.js` | 데이터셋 빌드 스크립트. |
-| `engine/hand.js` | 핸드 상태 전이의 본체 — 블라인드 레벨(`blindsForLevel`), `createGame`, `startHand`, `legalFor`, `applyAction`, `forceDefault`. `mode: cash-training`이면 고정 블라인드·핸드 간 top-up·`result: completed`. |
+| `engine/hand.js` | 핸드 상태 전이의 본체 — 블라인드 레벨(`blindsForLevel`), `createGame`, `startHand`, `legalFor`, `applyAction`, `forceDefault`. `mode: cash-training`이면 고정 블라인드·핸드 간 top-up·`result: completed`. 토너먼트 레벨은 핸드 주기(`levelEvery`) 또는 플레이 시간(`levelMinutes`, `state.levelClock`, 새 핸드마다 루프가 주는 `--play-ms`)으로 오른다. |
 | `engine/positions.js` | 버튼부터의 생존 좌석 순서와 엔진 포지션 라벨(`seatedFromButton`/`positionsOf`). |
 | `engine/decision.js` | 액션 적용 전 canonical decision snapshot(`snapshotDecision`). 영속화는 user만, redacted view는 viewer 스냅샷만. |
 | `training/` | 엔진 밖 학습 계층. Preflop baseline lookup과 frequency grade. **순수 계층 — 파일 I/O도 `tools/` import도 없다**(R12). fs helper와 데이터셋은 주입받는다. |
@@ -189,11 +189,17 @@ Schema 1~5 derived profile을 `show` 등으로 읽어 schema 6으로 재구축�
 
 ### 진행 속도와 결과 대기
 
-`shared/pace.js`의 프리셋을 game-loop가 적용한다. policy 결정 전에 액션 간격을 기다리고, 마지막 액션 게시 뒤 다음 `--new-hand` 전에 결과 대기를 기다린다. 두 대기는 별도 AbortController를 쓰며 반환 직후 stop/pause를 다시 확인한다. pause는 현재 결과 대기를 소진한 것으로 취급한다.
+`shared/pace.js`의 프리셋을 game-loop가 적용한다. policy 결정 전에 액션 간격을 기다리고, 마지막 액션 게시 뒤 다음 `--new-hand` 전에 결과 대기를 기다린다. 결과 대기 길이는 setup `resultHoldSec`(0~30초)가 있으면 그 값, 없으면(기존 게임) pace의 결과 대기이고, 올인 런아웃 간격은 늘 pace를 따른다. 두 대기는 별도 AbortController를 쓰며 반환 직후 stop/pause를 다시 확인한다. pause는 현재 결과 대기를 소진한 것으로 취급한다.
 
 `resultHold {handNo,startAt,until,runoutStepMs,runoutStreets}`는 `turnDeadline`과 같은 envelope 층의 절대 시각 메타데이터다. relay는 검증·보관·전달만 하며, 부가 게시와 같은 완료 핸드 재게시에도 유지하고 새 핸드에는 지운다. 스냅샷과 영속 파일에도 들어가므로 재접속자의 기준 시각이 같다. 지난 `until`은 무해하다. 게시 재시도는 최초 시각을 유지한다.
 
 호스트 전용 `POST /api/game/:id/skip-result`는 게임 epoch와 handNo를 검사한다. 이는 durable 게임 명령이 아닌 활성 타이머 해제이므로 명령 저널 밖에 있고, 현재 결과 대기만 끊으며 policy 간격에는 영향을 주지 않는다. 사람 좌석이 둘 이상이면 적용하지 않는다.
+
+### 시간 기반 블라인드 레벨
+
+토너먼트의 `levelMinutes`(1~60, 로비 기본 2) 게임은 루프가 재는 **플레이 시간**으로 레벨을 올린다. 플레이 시계는 루프가 마지막 park에서 깨어난 뒤 정지 전까지만 흐르고(일시정지·정지·앱 종료 동안 멈춤), 바깥으로 나가는 값은 정수 ms다. 레벨은 적용된 핸드 시작부터 `levelMinutes`분 동안 유지되고, 시간이 다 되면 다음 핸드에서 한 단계만 오른다(긴 핸드가 레벨을 건너뛰지 않음). 엔진이 `state.levelClock {levelStartedMs, playMs}`를 단조로 보관하고, 루프는 `loop-state.playClockMs`를 게시 전·10초마다·park 때 기록한다(정지와 잠금을 잃은 인스턴스는 기록하지 않음). 재시작은 두 값 중 큰 쪽에서 이어 간다.
+
+`levelClock {levelMs, remainingMs, at, running, nextBlinds}`는 `resultHold`와 같은 envelope 층의 공개 메타데이터다. 루프가 진행 중 핸드의 view 게시에만 싣고(재전송 `--retry` 제외), 종료 view에는 싣지 않아 relay가 지운다. relay는 view 없는 부가 게시에 유지하고, 시간 방식이 아닌 게임에는 키 자체를 보이지 않는다. 임베드된 테이블은 상단바를 숨기므로 남은 시간은 셸 헤더 컨텍스트(`levelSecondsLeft`)로 올리고, 일시정지는 그것을 아는 로비·참가 페이지가 `일시정지`로 표시한다.
 
 ## 결과 표시와 제어 경계
 

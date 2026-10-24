@@ -8,15 +8,19 @@ import {createOwnedTempDir} from './helpers/owned-fixtures.mjs';
 
 test('CLI accepts explicit pace and rejects unknown presets', () => {
   assert.equal(parseGameLoopArgs(['--pace','normal']).pace,'normal');
+  assert.equal(parseGameLoopArgs(['--result-hold-sec','0']).resultHoldSec,0);
+  assert.equal(parseGameLoopArgs(['--result-hold-sec','30']).resultHoldSec,30);
+  assert.equal(Object.hasOwn(parseGameLoopArgs([]),'resultHoldSec'),false);
+  for(const bad of ['31','-1','2.5','x'])assert.throws(()=>parseGameLoopArgs(['--result-hold-sec',bad]),{code:'USAGE'});
   assert.throws(()=>parseGameLoopArgs(['--pace','unexpected']),{code:'USAGE'});
   assert.equal(parseGameLoopArgs([]).pace,undefined);
 });
 
-for (const scenario of [{pace:'normal'}, {pace:'instant'}, {}, {pace:'normal',error:'LOCK_TIMEOUT'}, {pace:'normal',error:'ATTEMPT_PENDING'}, {pace:'normal',error:'BAD_ATTEMPT'}]) {
-test(`pace ${scenario.pace ?? 'legacy'} preserves publish timing with ${scenario.error ?? 'no retry'}`, {timeout:process.platform==='win32'?300000:60000}, async t => {
+for (const scenario of [{pace:'normal'}, {pace:'instant'}, {}, {pace:'instant',resultHoldSec:4}, {pace:'normal',resultHoldSec:0}, {pace:'normal',error:'LOCK_TIMEOUT'}, {pace:'normal',error:'ATTEMPT_PENDING'}, {pace:'normal',error:'BAD_ATTEMPT'}]) {
+test(`pace ${scenario.pace ?? 'legacy'}${scenario.resultHoldSec!==undefined?` result ${scenario.resultHoldSec}s`:''} preserves publish timing with ${scenario.error ?? 'no retry'}`, {timeout:process.platform==='win32'?300000:60000}, async t => {
   const root=createOwnedTempDir('holdem-pace-loop');
   let clock=Date.now();const waits=[],publishes=[];let injected=false;
-  const {loop}=await prepareGameSession({gameDir:root,port:0,pace:scenario.pace,opponentRuntime:'policy'}, {resolver:async()=>({player:null,upper:null,notices:[]}),loopOptions:{
+  const {loop}=await prepareGameSession({gameDir:root,port:0,pace:scenario.pace,...(scenario.resultHoldSec!==undefined?{resultHoldSec:scenario.resultHoldSec}:{}),opponentRuntime:'policy'}, {resolver:async()=>({player:null,upper:null,notices:[]}),loopOptions:{
     waitMs:0,now:()=>new Date(clock),
     onPublishInvoke:args=>{
       publishes.push([...args]);
@@ -56,12 +60,14 @@ test(`pace ${scenario.pace ?? 'legacy'} preserves publish timing with ${scenario
   try {await loop.run();} finally {clearInterval(timer);}
 
   const holds=waits.filter(w=>w.kind==='result');
-  const expectedHold=scenario.pace==='normal' && scenario.error!=='BAD_ATTEMPT';
+  const holdMs=scenario.resultHoldSec!==undefined?scenario.resultHoldSec*1000:scenario.pace==='normal'?3500:0;
+  const runoutMs=scenario.pace==='normal'?800:0;
+  const expectedHold=holdMs>0 && scenario.error!=='BAD_ATTEMPT';
   assert.equal(holds.length,expectedHold?1:0);
   const holdArgs=publishes.filter(args=>args.includes('--result-hold')).map(args=>args[args.indexOf('--result-hold')+1]);
   if (expectedHold) {
     assert.equal(holds[0].hold.handNo,1);
-    assert.equal(Date.parse(holds[0].hold.until)-Date.parse(holds[0].hold.startAt),3500+800*holds[0].hold.runoutStreets);
+    assert.equal(Date.parse(holds[0].hold.until)-Date.parse(holds[0].hold.startAt),holdMs+runoutMs*holds[0].hold.runoutStreets);
     assert.ok(holdArgs.length>0);
     assert.equal(new Set(holdArgs).size,1,'retry preserves the original absolute deadline');
     if(scenario.error && scenario.error!=='ATTEMPT_PENDING')assert.ok(holdArgs.length>=2);
@@ -73,7 +79,9 @@ test(`pace ${scenario.pace ?? 'legacy'} preserves publish timing with ${scenario
     assert.equal(publishes[index+1].includes('--result-hold'),false);
   } else {
     assert.equal(holdArgs.length,0);
-    assert.equal(waits.length,0);
+    // Only the policy action interval can wait without a result hold.
+    assert.equal(waits.filter(w=>w.kind!=='policy').length,0);
+    if(scenario.pace!=='normal')assert.equal(waits.length,0);
   }
   for(const args of publishes.filter(args=>args.includes('--view-only')))assert.equal(args.includes('--result-hold'),false);
   assert.equal(JSON.parse(fs.readFileSync(path.join(root,'ui-snapshot.json'))).resultHold,null);

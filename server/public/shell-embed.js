@@ -7,7 +7,7 @@
  * it was. Messages go to this origin only and carry no cards, decisions or
  * tokens; the parent validates them again. */
 
-const FIELDS = ['handNo', 'handLimit', 'level', 'blinds', 'levelLeft', 'sessionNet', 'conn', 'retryCount', 'gameOver', 'handInProgress', 'mode'];
+const FIELDS = ['handNo', 'handLimit', 'level', 'blinds', 'levelLeft', 'levelSecondsLeft', 'sessionNet', 'conn', 'retryCount', 'gameOver', 'handInProgress', 'mode'];
 
 export function createShellEmbed({
   win = globalThis.window,

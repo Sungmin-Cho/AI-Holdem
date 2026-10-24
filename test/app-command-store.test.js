@@ -576,17 +576,19 @@ test("lobby notices an external loop owner has exited", async () => {
   await manager.close();
 });
 
-for (const pace of [undefined, 'normal']) {
-  test(`pace ${pace ?? 'legacy'} survives app restart and same-settings restart`, {timeout:process.platform==='win32'?300000:60000}, async t => {
+for (const [pace, resultHoldSec] of [[undefined], ['normal'], ['instant', 2]]) {
+  test(`pace ${pace ?? 'legacy'}${resultHoldSec!==undefined?` result ${resultHoldSec}s`:''} survives app restart and same-settings restart`, {timeout:process.platform==='win32'?300000:60000}, async t => {
     const expectSuccess=requestId=>succeeded(manager,requestId);
     const root=createOwnedTempDir('lobby-pace');
     let manager=createSessionManager({storeDir:root,resolver});
     t.after(()=>manager.close());
     await manager.initialize();
-    const start={...payload(manager),setup:{aiCount:1,hands:2,...(pace?{pace}:{})}};
+    const start={...payload(manager),setup:{aiCount:1,hands:2,...(pace?{pace}:{}),...(resultHoldSec!==undefined?{resultHoldSec}:{})}};
+    const holdMs=resultHoldSec!==undefined?resultHoldSec*1000:pace==='normal'?3500:0,runoutMs=pace==='normal'?800:0;
     manager.command(start);await expectSuccess(start.requestId);
     let pause=payload(manager,'pause');manager.command(pause);await expectSuccess(pause.requestId);
     assert.equal(manager.snapshot().setup.pace,pace);
+    assert.equal(manager.snapshot().setup.resultHoldSec,resultHoldSec);
     await manager.close();
     manager=createSessionManager({storeDir:root,resolver});await manager.initialize();
     const resume=payload(manager,'resume');manager.command(resume);await expectSuccess(resume.requestId);
@@ -595,8 +597,8 @@ for (const pace of [undefined, 'normal']) {
     while(Date.now()<deadline) {
       const snap=JSON.parse(fs.readFileSync(path.join(dir,'ui-snapshot.json')));
       if(snap.resultHold) {
-        holdSeen=true;assert.equal(pace,'normal');
-        assert.equal(Date.parse(snap.resultHold.until)-Date.parse(snap.resultHold.startAt),3500+800*snap.resultHold.runoutStreets);
+        holdSeen=true;assert.ok(holdMs>0);
+        assert.equal(Date.parse(snap.resultHold.until)-Date.parse(snap.resultHold.startAt),holdMs+runoutMs*snap.resultHold.runoutStreets);
         manager.session.loop.skipHandResult(snap.resultHold.handNo);
       }
       if(snap.view.handNo>=2)break;
@@ -610,11 +612,12 @@ for (const pace of [undefined, 'normal']) {
       await new Promise(r=>setTimeout(r,10));
     }
     assert.ok(JSON.parse(fs.readFileSync(path.join(dir,'state.json'))).handNo>=2);
-    assert.equal(holdSeen,pace==='normal');
+    assert.equal(holdSeen,holdMs>0);
     pause=payload(manager,'pause');manager.command(pause);await expectSuccess(pause.requestId);
     const restart=payload(manager,'restart');manager.command(restart);await expectSuccess(restart.requestId);
     assert.notEqual(manager.current.sessionDir,dir);
     assert.equal(manager.snapshot().setup.pace,pace);
+    assert.equal(manager.snapshot().setup.resultHoldSec,resultHoldSec);
   });
 }
 

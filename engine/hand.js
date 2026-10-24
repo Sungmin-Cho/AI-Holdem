@@ -62,7 +62,8 @@ export function createGame({
   aiCount,
   startStack = 5000,
   blinds0 = DEFAULT_BLINDS,
-  levelEvery = 8,
+  levelEvery: requestedLevelEvery,
+  levelMinutes,
   names,
   mode,
   startStackBb,
@@ -76,16 +77,27 @@ export function createGame({
   button,
 } = {}) {
   const resolvedMode = mode ?? 'tournament';
+  const timed = levelMinutes != null;
+  // A missing period keeps the old default of eight hands, unless the game
+  // levels up by time instead.
+  const levelEvery = requestedLevelEvery === undefined && !timed ? 8 : requestedLevelEvery;
   if (dealBias !== undefined && !DEAL_BIAS_MODES.includes(dealBias)) throwBadConfig('dealBias는 off/light/strong이어야 합니다.');
   if (resolvedMode !== 'tournament' && resolvedMode !== 'cash-training') {
     throwBadConfig('mode는 tournament 또는 cash-training이어야 합니다.');
   }
-  if (resolvedMode === 'tournament') {
+  if (resolvedMode === 'tournament' && timed) {
+    if (!Number.isInteger(levelMinutes) || levelMinutes < 1 || levelMinutes > MAX_LEVEL_MINUTES) {
+      throwBadConfig(`tournament의 levelMinutes는 1~${MAX_LEVEL_MINUTES} 정수여야 합니다.`);
+    }
+    if (levelEvery != null) throwBadConfig('levelEvery와 levelMinutes는 함께 쓸 수 없습니다.');
+  } else if (resolvedMode === 'tournament') {
     if (!Number.isInteger(levelEvery) || levelEvery < 1) {
       throwBadConfig('tournament의 levelEvery는 1 이상 정수여야 합니다.');
     }
   } else if (levelEvery != null) {
     throwBadConfig('cash-training의 levelEvery는 null이어야 합니다.');
+  } else if (timed) {
+    throwBadConfig('cash-training의 levelMinutes는 null이어야 합니다.');
   }
   if (handLimit != null && (!Number.isSafeInteger(handLimit) || handLimit < 1)) {
     throwBadConfig('handLimit은 양의 안전 정수여야 합니다.');
@@ -159,10 +171,11 @@ export function createGame({
     aiCount,
     startStack,
     blinds0: [...blinds0],
-    levelEvery: resolvedMode === 'cash-training' ? null : levelEvery,
+    levelEvery: resolvedMode === 'cash-training' || timed ? null : levelEvery,
     showdownPolicy: resolvedShowdown,
     replayReveal: resolvedReplay,
   };
+  if (timed) config.levelMinutes = levelMinutes;
   if (K >= 1) config.humanCount = 1 + K;
   if (dealBias !== undefined) { config.dealBias=dealBias; config.dealSelectionContractVersion=1; }
   if (hints !== undefined) {
@@ -220,6 +233,29 @@ function emit(events, visibility, type, payload) {
   events.push({ seq: events.length, visibility, type, ...payload });
 }
 
+export const MAX_LEVEL_MINUTES = 60;
+
+function isTimedLevels(state) {
+  return Number.isInteger(state.config?.levelMinutes);
+}
+
+/** Time-based levels: a level lasts `levelMinutes` of play time from the hand
+ * it took effect. A new hand raises at most one level, so a long hand never
+ * skips levels; the play time the loop reports never moves the clock back. */
+function advanceTimedLevel(next, playMs) {
+  if (!Number.isSafeInteger(playMs) || playMs < 0) throwBadConfig('시간 기반 레벨은 플레이 시간(playMs)이 필요합니다.');
+  const clock = next.levelClock;
+  const at = Math.max(playMs, clock?.playMs ?? 0);
+  if (!clock) {
+    next.levelClock = { levelStartedMs: at, playMs: at };
+  } else if (at - clock.levelStartedMs >= next.config.levelMinutes * 60_000) {
+    next.level += 1;
+    next.levelClock = { levelStartedMs: at, playMs: at };
+  } else {
+    next.levelClock = { levelStartedMs: clock.levelStartedMs, playMs: at };
+  }
+}
+
 function isCashTraining(state) {
   return state.config?.mode === 'cash-training';
 }
@@ -246,7 +282,9 @@ export function startHand(state, options = {}) {
   const next = structuredClone(state);
   next.handNo += 1;
   const previousLevel = next.level;
-  next.level = cash ? 0 : Math.floor((next.handNo - 1) / next.config.levelEvery);
+  if (cash) next.level = 0;
+  else if (isTimedLevels(next)) advanceTimedLevel(next, options.playMs);
+  else next.level = Math.floor((next.handNo - 1) / next.config.levelEvery);
   const [sb, bb] = blindsForLevel(next.level, next.config.blinds0);
 
   next.button = nextLiveIndex(next.seats, next.button);

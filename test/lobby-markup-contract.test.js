@@ -47,3 +47,26 @@ test('new lobby games explicitly select normal pace with four Korean labels', ()
   assert.match(html, /<option value="normal" selected>/);
   assert.match(js, /"pace",/);
 });
+
+test('new lobby games choose the hand result display time apart from the AI pace', () => {
+  const html=read('lobby.html'),js=read('lobby.js');
+  assert.match(html, /<select name="resultHoldSec"/);
+  for(const [value,label] of [['0','대기 없음'],['2','2초'],['4','4초'],['6','6초'],['10','10초']]) {
+    assert.match(html,new RegExp(`<option value="${value}"[^>]*>${label}</option>`));
+  }
+  assert.match(html, /<option value="4" selected>4초<\/option>/);
+  assert.match(js, /if \(data\.get\("resultHoldSec"\) !== null\) setup\.resultHoldSec = Number\(data\.get\("resultHoldSec"\)\)/);
+  // A valid prefill outside the listed choices is added, never mapped to another one.
+  assert.match(js, /key === "resultHoldSec" && field\.options/);
+});
+
+test('lobby tournaments level up by time by default with a hand-period alternative', () => {
+  const html=read('lobby.html'),js=read('lobby.js');
+  assert.match(html, /<select name="levelMode"[^>]*>\s*<option value="time" selected>시간<\/option>\s*<option value="hands">핸드 수<\/option>/);
+  assert.match(html, /name="levelMinutes" type="number" value="2" min="1" max="60"/);
+  assert.match(html, /id="level-every-field" hidden/);
+  assert.match(html, /name="levelEvery" type="number" value="8" min="1"/);
+  // Only the chosen period reaches the setup, so the other default never conflicts.
+  assert.match(js, /data\.get\("levelMode"\) === "hands" \? "levelEvery" : "levelMinutes"/);
+  assert.match(js, /defaults\.levelEvery !== undefined\) form\.elements\.levelMode\.value = "hands"/);
+});
