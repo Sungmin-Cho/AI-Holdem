@@ -312,25 +312,44 @@ export async function createLearningBrowserFixture({ stackBb = 100, stackChips =
   } catch (error) { try { await close(); } catch (cleanup) { throw new AggregateError([error, cleanup]); } throw error; }
 }
 
+// #320: the engine deals the first button at random. On the big blind the user either never acts
+// (every AI folds: a walk) or may check, and then the first press only arms the fold button
+// ("체크 가능 — 다시 누르면 폴드"), so the journey's one press sent nothing and the loop waited for the
+// user until the 30 s guard. startHand advances the button once, so pinning it four seats before the
+// user seats the user first to act preflop, facing the big blind, before any AI decision.
+function seatUserFirstToAct(gameDir) {
+  const statePath = path.join(gameDir, 'state.json');
+  const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  const seats = state.seats.length;
+  assert.ok(seats >= 4, 'first to act ahead of both blinds needs four or more seats');
+  const user = state.seats.findIndex((seat) => seat.playerId === 'user');
+  assert.ok(user >= 0);
+  fs.writeFileSync(statePath, JSON.stringify({ ...state, button: (user - 4 + seats) % seats }));
+}
+
 export async function createReviewBrowserFixture() {
   const workspace = createBrowserWorkspace();
   const gameDir = path.join(workspace.root, 'review-game');
   let loop; let runPromise = null;
   try {
     fs.mkdirSync(gameDir, { mode: 0o700 });
-    const { createGameLoop } = await import(pathToFileURL(path.join(ROOT, 'tools/game-loop.js')).href);
+    const { createGameLoop, initializePreparedSession } = await import(pathToFileURL(path.join(ROOT, 'tools/game-loop.js')).href);
     loop = createGameLoop({ gameDir,
       resolver: async ({ need }) => {
         assert.equal(need, 'upper-only');
         return { player: null, upper: null, notices: ['상위 모델 런타임 없음 — production machine review'] };
       },
       opts: { port: 0, opponentRuntime: 'policy', trainingEnabled: false, waitMs: 5_000 } });
-    const state = await loop.bootstrap({ ai: 5, mode: 'cash-training', stackBb: 100,
-      hands: 1, opponentRuntime: 'policy' });
+    const setup = { ai: 5, mode: 'cash-training', stackBb: 100, hands: 1, opponentRuntime: 'policy' };
+    // The button is pinned before bootstrap, so neither the relay nor the loop sees another one.
+    const preinitialized = await initializePreparedSession(gameDir, setup);
+    seatUserFirstToAct(gameDir);
+    const state = await loop.bootstrap({ ...setup, preinitialized });
     const engine = JSON.parse(fs.readFileSync(path.join(gameDir, 'state.json'), 'utf8'));
     assert.ok(Number.isSafeInteger(state.port) && state.port > 0);
     return { gameDir,
       tableUrl: `http://127.0.0.1:${state.port}/?${new URLSearchParams({ token: engine.sessionToken })}`,
+      async snapshot() { return (await fetch(`http://127.0.0.1:${state.port}/api/snapshot?${new URLSearchParams({ token: engine.sessionToken })}`)).json(); },
       start() {
         assert.equal(runPromise, null);
         runPromise = loop.run();
@@ -340,7 +359,11 @@ export async function createReviewBrowserFixture() {
       async waitDone() {
         assert.ok(runPromise);
         let timer;
-        const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('review loop timeout')), 30_000); });
+        const timeout = new Promise((_, reject) => { timer = setTimeout(() => {
+          let phase = 'unreadable';
+          try { phase = JSON.parse(fs.readFileSync(path.join(gameDir, 'loop-state.json'), 'utf8')).phase; } catch { /* keep unreadable */ }
+          reject(new Error(`review loop timeout (loop phase: ${phase})`));
+        }, 30_000); });
         const done = await Promise.race([runPromise, timeout]).finally(() => clearTimeout(timer));
         assert.equal(done.phase, 'done'); return done;
       },

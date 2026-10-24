@@ -416,7 +416,13 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     await browser(['open', reviewFixture.tableUrl]);
     await browser(['wait', '#btn-fold:not([disabled])']);
     await browser(['snapshot', '-i']);
+    // #320: one press folds only when no check is free; otherwise it arms the button and the
+    // loop waits for the user past waitDone. The fixture seats the user first to act.
+    const reviewLegal = (await reviewFixture.snapshot()).view?.legal;
+    assert.equal(reviewLegal?.canCheck, false, 'the review hand must face the big blind so one press folds');
     await browser(['click', '#btn-fold']);
+    assert.equal(await evaluate("document.querySelector('#btn-fold').classList.contains('is-armed')"), false,
+      'the review fold press armed the button instead of folding');
     await reviewFixture.waitDone();
     await reviewRun;
     await browser(['wait', '#review-overlay:not([hidden])']);
