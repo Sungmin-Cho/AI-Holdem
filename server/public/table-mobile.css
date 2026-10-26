@@ -57,11 +57,17 @@
   .action-feedback .btn { min-height: 44px; }
   /* On the user's turn the buttons say whose turn it is; the status line stays
      for screen readers unless it carries a recovery button. */
-  .action-area:has(> #action-bar:not([hidden])) .action-feedback.is-routine { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .action-area:has(> #action-bar:not([hidden])) .action-feedback.is-routine { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   /* A status or notice takes the dock's first line; the aid stays in the sheet. */
   .action-area:has(> .action-feedback:not(.is-routine) #action-status:not(:empty), > #action-notice:not([hidden])) .action-bar:not(.options-expanded) .decision-aid { display: none; }
   #action-notice { text-align: center; color: var(--c-info-text); }
   .result-dock { flex: 1 1 auto; min-height: 0; overflow: auto; display: block; }
+  /* The dock is narrow whatever the stage width: the result is one column. */
+  .result-dock .hand-result-body { grid-template-columns: minmax(0, 1fr); }
+  .result-dock .hand-result-body > * { grid-column: 1; justify-self: start; text-align: left; }
+  .result-dock .hand-result-board { justify-content: flex-start; max-width: none; }
+  /* While a result shows, a plain waiting line would only push it down. */
+  .action-area:has(#hand-result:not([hidden])) .action-feedback:not(:has(button:not([hidden]))) { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .result-dock .hand-result { max-width: none; padding: 6px 10px 8px; font-size: 13px; box-shadow: none; }
   .result-dock .hand-result-head { position: sticky; top: -6px; z-index: 1; margin: -6px -10px 0; padding: 6px 10px 2px; background: var(--c-surface-1); }
   .hand-result .hand-result-skip { min-height: 44px; height: 44px; padding: 0 12px; font-size: 12px; }
@@ -105,6 +111,9 @@
   .action-bar.options-expanded .action-summary { position: static; width: auto; height: auto; overflow: hidden; clip-path: none; grid-column: 1 / 6; grid-row: 1; color: var(--c-text); align-self: center; white-space: normal; overflow-wrap: anywhere; }
   .action-bar.options-expanded #action-options-toggle { grid-column: 6; grid-row: 1; border-color: var(--c-info); color: var(--c-info-text); }
   .action-bar.options-expanded .decision-aid { grid-column: 1 / -1; grid-row: 2; white-space: normal; overflow-wrap: anywhere; color: var(--c-text-2); }
+  /* An online deadline shares the aid's row in the sheet (the first row holds the summary). */
+  .action-bar.options-expanded:has(#turn-deadline:not([hidden])) .decision-aid { grid-column: 1 / 5; }
+  .action-bar.options-expanded #turn-deadline { grid-row: 2; align-self: start; }
   /* Sizes, then [− amount ＋], then the slider: the raise-top and raise-slide
      wrappers dissolve so their parts share one grid. */
   .action-bar.options-expanded .raise-panel { grid-column: 1 / -1; grid-row: 3; display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-content: start; gap: 8px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
@@ -208,8 +217,9 @@
   .table .plate-info { display: flex; flex-direction: column; align-items: center; gap: 0; width: 100%; min-width: 0; flex: none; }
   .table .plate-name { max-width: 100%; font-size: 12px; line-height: 15px; text-align: center; }
   .table .plate-stack, .table .seat.is-hero .plate-stack { font-size: 14px; line-height: 17px; }
-  .table .plate .amount-pair { align-items: center; gap: 0; white-space: nowrap; }
-  .table .plate .amount-primary { white-space: nowrap; }
+  /* Normal stacks fit one line; an extreme one wraps inside the tile, never past it. */
+  .table .plate .amount-pair { align-items: center; gap: 0; max-width: 100%; white-space: normal; }
+  .table .plate .amount-primary { white-space: normal; overflow-wrap: anywhere; text-align: center; }
   .table .plate .amount-secondary { display: none; }
   .table .plate-status { flex: none; width: 100%; margin-top: 2px; }
   .table .plate .plate-tag, .table .plate .plate-action { width: auto; max-width: 100%; padding: 0 3px; font-size: 12px; line-height: 16px; text-align: center; white-space: normal; }
@@ -273,13 +283,13 @@
 
   /* The table: a wide oval; seats on the desktop oval coordinates, compact plates. */
   .table, .table.is-crowded {
-    position: absolute; inset: 4px 6px 4px max(6px, env(safe-area-inset-left, 0px)); width: auto; height: auto; max-height: none; aspect-ratio: auto; margin: 0;
-    --tw: 100cqw; --cw: clamp(24px, 6.4cqw, 40px); --ch: calc(var(--cw) * 1.4); --card-gap: 3px;
-    --hero-cw: clamp(32px, 7cqw, 46px); --hero-ch: calc(var(--hero-cw) * 1.4);
+    position: absolute; inset: 4px 6px 8px max(6px, env(safe-area-inset-left, 0px)); width: auto; height: auto; max-height: none; aspect-ratio: auto; margin: 0;
+    --tw: 100cqw; --cw: clamp(22px, min(6.4cqw, 11cqh), 40px); --ch: calc(var(--cw) * 1.4); --card-gap: 3px;
+    --hero-cw: clamp(30px, min(7cqw, 12.5cqh), 46px); --hero-ch: calc(var(--hero-cw) * 1.4);
   }
   .bets { display: none; }
-  .table .center { top: 47%; width: auto; min-width: 0; gap: 6px; }
-  .table .board { --cw: clamp(24px, 6.4cqw, 40px); --ch: calc(var(--cw) * 1.4); }
+  .table .center { top: 48%; width: auto; min-width: 0; gap: 6px; }
+  .table .board { --cw: clamp(22px, min(6.4cqw, 11cqh), 40px); --ch: calc(var(--cw) * 1.4); }
   .table .pots { flex-wrap: nowrap; width: auto; gap: 6px; padding: 3px 10px; border-radius: 999px; }
   .table .pot-chip { display: block; width: 14px; height: 14px; }
   .table .pot-label { width: auto; font-size: 12px; }
@@ -296,7 +306,8 @@
   .table .plate-info { display: flex; flex-direction: column; gap: 0; min-width: 0; flex: 0 1 auto; width: auto; }
   .table .plate-name { max-width: 84px; font-size: 12px; line-height: 14px; }
   .table .plate-stack, .table .seat.is-hero .plate-stack { font-size: 13px; line-height: 16px; }
-  .table .plate .amount-pair { gap: 0; white-space: nowrap; }
+  .table .plate .amount-pair { gap: 0; max-width: 100%; white-space: normal; }
+  .table .plate .amount-primary { white-space: normal; overflow-wrap: anywhere; }
   .table .plate .amount-secondary { display: none; }
   .table .plate-status { flex: 0 1 auto; width: auto; min-width: 0; max-width: 76px; margin: 0; }
   .table .plate-status:empty { display: none; }
@@ -307,6 +318,8 @@
   .table .seat.is-out .plate { padding: 3px 8px; }
   /* Opponent cards on the plate's top edge; shown cards above it. */
   .table .seat:not(.is-hero) .seat-cards { position: absolute; z-index: 4; top: -9px; right: -6px; display: flex; pointer-events: none; }
+  /* Left-hand seats carry their backs on the outer corner, away from the seat beside. */
+  .table .seat[data-side="left"]:not(.is-hero) .seat-cards { right: auto; left: -6px; }
   .table .seat:not(.is-hero) .card--back.card--sm { --cw: 12px; --ch: 17px; }
   .table .seat:not(.is-hero) .seat-cards .card--back + .card--back { margin-left: -5px; }
   .table .seat:not(.is-hero) .seat-cards:has(.card:not(.card--back)) { top: auto; bottom: calc(100% + 2px); right: auto; left: 50%; transform: translateX(-50%); gap: 2px; }
@@ -314,21 +327,27 @@
   .table .seat:not(.is-hero) .seat-cards .card--sm + .card--sm { margin-left: 0; }
   /* Chips toward the pot: below the upper seats, above the lower ones, inward at the sides. */
   .table .plate .bet-marker { display: flex; position: absolute; top: calc(100% + 3px); left: 50%; right: auto; bottom: auto; transform: translateX(-50%); width: max-content; max-width: 84px; padding: 1px 7px 1px 3px; gap: 3px; pointer-events: none; }
-  .table .seat[data-bet-band="lower"] .bet-marker { top: auto; bottom: calc(100% + 3px); }
+  /* Lower seats: above the plate, opening toward the middle from the plate's centre
+     (straight above would meet the seat over it). */
+  .table .seat[data-bet-band="lower"]:not(.is-hero) .bet-marker { top: auto; bottom: calc(100% + 3px); }
+  .table .seat[data-bet-band="lower"][data-side="left"]:not(.is-hero) .bet-marker { left: 50%; right: auto; transform: none; }
+  .table .seat[data-bet-band="lower"][data-side="right"]:not(.is-hero) .bet-marker { left: auto; right: 50%; transform: none; }
   .table .seat[data-bet-band="middle"][data-side="left"] .bet-marker { top: 50%; left: calc(100% + 4px); transform: translateY(-50%); }
   .table .seat[data-bet-band="middle"][data-side="right"] .bet-marker { top: 50%; left: auto; right: calc(100% + 4px); transform: translateY(-50%); }
   .table .bet-chip { width: 12px; height: 12px; }
   .table .bet-amount { font-size: 12px; white-space: nowrap; }
   /* The viewer: cards over the plate at the bottom. */
   .table .seat.is-hero, .table.is-crowded .seat.is-hero[data-slot] { left: 50% !important; top: 100% !important; transform: translate(-50%, -100%); display: flex; flex-direction: column; align-items: center; }
-  .table .seat.is-hero .seat-cards { position: static; display: flex; margin-bottom: -4px; z-index: 2; }
+  .table .seat.is-hero .seat-cards { position: static; display: flex; margin-bottom: -12px; z-index: 2; }
   .table .card--hero { --cw: var(--hero-cw); --ch: var(--hero-ch); }
   .table .seat.is-hero .card--hero:first-child { transform: rotate(-5deg) translate(2px, 2px); }
   .table .seat.is-hero .card--hero:last-child { margin-left: -3px; transform: rotate(5deg); }
   .table .seat.is-hero .plate { max-width: 220px; padding: 4px 10px 4px 6px; gap: 6px; }
   .table .seat.is-hero .avatar { width: 28px; height: 28px; }
   .table .seat.is-hero .plate-status { max-width: 84px; }
-  .table .seat.is-hero .bet-marker { top: auto; bottom: calc(100% + var(--hero-ch) - 2px); }
+  /* The viewer's chips sit over their cards, under the pot (the seats beside the
+     plate are too close sideways). */
+  .table .seat.is-hero .bet-marker { top: auto; bottom: calc(100% + var(--hero-ch) - 10px); left: 50%; right: auto; transform: translateX(-50%); }
   .hero-hand { display: block; position: absolute; z-index: 3; left: 50%; top: -10px; transform: translate(-50%, -50%); width: max-content; max-width: min(220px, 60cqw); padding: 2px 8px; border: 1px solid var(--c-info); border-radius: 999px; background: var(--c-surface-1); color: var(--c-info-text); font-size: 12px; font-weight: 700; line-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: var(--sh-1); pointer-events: none; }
 
   /* The rail: aid, sizes, then [adjust | fold | call] and the raise at the bottom. */

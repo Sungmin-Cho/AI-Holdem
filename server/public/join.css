@@ -112,6 +112,9 @@ body.has-game #final { flex: none; max-height: 45vh; overflow: auto; margin: 0; 
   body.has-game .shell-context { order: 10; flex: 1 0 100%; flex-wrap: nowrap; overflow: hidden; white-space: nowrap; font-size: var(--fs-12); gap: 0 var(--sp-3); padding-bottom: var(--sp-1); }
   body.has-game #help-menu { width: var(--tap); padding: 0; }
   body.has-game #help-menu::before { content: "?" / ""; font-size: var(--fs-16); }
+  /* The table's HUD row holds its tools on the right: the pause note takes the
+     left half (where the head count is), clear of the tools and the seats. */
+  .pause-banner { top: var(--sp-1); left: var(--sp-2); max-width: calc(50% - var(--sp-2)); transform: none; white-space: normal; text-align: center; }
 }
 @media (max-width: 420px) {
   .member-controls { flex-wrap: wrap; }

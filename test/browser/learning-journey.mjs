@@ -221,8 +221,12 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     }
     await setViewport(390, 844);
     await waitForExpression('!document.querySelector("#unread-training").hidden', 'training unread badge');
-    const unreadMobile = await evaluate(`document.querySelector('#unread-training').textContent.length > 0
-      && document.documentElement.scrollWidth <= 390`);
+    // On a phone the panels sit in the closed records sheet: the count must show on
+    // its button, where the user can see it.
+    const unreadMobile = await evaluate(`(() => { const badge = document.querySelector('#unread-total');
+      return document.querySelector('#unread-training').textContent.length > 0 && !badge.hidden
+        && badge.getClientRects().length > 0 && getComputedStyle(badge).display !== 'none' && Number(badge.textContent) > 0
+        && document.documentElement.scrollWidth <= 390; })()`);
     await browser(['screenshot', path.join(output, 'training-unread-mobile.png')]);
     await setViewport(1280, 900);
     const unreadObserved = await evaluate('document.querySelector("#unread-training").textContent.length > 0');

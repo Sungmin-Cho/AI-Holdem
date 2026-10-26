@@ -1679,6 +1679,9 @@ function paintFrame() {
   paintPlateThinking();
   paintActionBar(view);
   placeSheet();
+  // Off the phone layout the records sheet does not exist; a hidden page gets the
+  // media query's change event late, so each paint also settles it.
+  if (sideOpen && !compactLayout()) setSideOpen(false, { focus: false });
   settleLastResult(view);
   paintHint();
   paintLog();
@@ -2049,9 +2052,10 @@ selectTab('log');
 $('side-open').addEventListener('click', () => setSideOpen(!sideOpen));
 $('side-close').addEventListener('click', () => setSideOpen(false));
 $('side-scrim').addEventListener('click', () => setSideOpen(false));
-// Esc closes the sheet unless a dialog above it owns the key.
+// Esc closes the sheet unless a dialog above it owns the key (the dialog
+// controller, registered first, marks the Esc it used with preventDefault).
 document.addEventListener('keydown', (ev) => {
-  if (ev.key !== 'Escape' || !sideOpen || dialogs.active || document.querySelector('dialog[open]')) return;
+  if (ev.key !== 'Escape' || ev.defaultPrevented || !sideOpen || dialogs.active || document.querySelector('dialog[open]')) return;
   ev.preventDefault();
   setSideOpen(false);
 });
