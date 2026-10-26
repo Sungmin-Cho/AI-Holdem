@@ -377,7 +377,7 @@
   .action-bar.options-expanded { position: static; flex: none; height: auto; min-height: 0; top: auto; overflow: visible; padding: 0; border: 0; border-radius: 0; box-shadow: none; background: none; grid-template-rows: none; grid-auto-rows: max-content; }
   .action-bar.options-expanded .action-summary { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   /* The rail does not cover the dock's status lines, so nothing is repeated. */
-  .action-bar.options-expanded .sheet-status { display: none; }
+  .action-bar.options-expanded .sheet-status, .action-bar.options-expanded .sheet-status:not([hidden]) { display: none; }
   .action-bar.options-expanded .raise-panel { overflow: visible; min-height: auto; }
   /* The two button rows stay at the rail's bottom while the rest scrolls. */
   .action-bar.options-expanded :is(#btn-raise, #btn-allin-only) { position: sticky; bottom: 0; z-index: 1; box-shadow: 0 0 0 6px var(--c-surface-1); }

@@ -353,9 +353,13 @@ export async function runUiJourney(outDir,{ci=false}={}) {
         const press=n=>{n.scrollIntoView({block:'center'});const q=n.getBoundingClientRect(),h=document.elementFromPoint(q.left+q.width/2,q.top+q.height/2);return !!h&&n.contains(h);};
         const reach=['#raise-amount','#intent-note','#btn-fold','#btn-raise'].map(sel=>press(document.querySelector(sel)));
         const panel=document.querySelector('.raise-panel').getBoundingClientRect().height;
+        const mirror=document.querySelector('#sheet-status'),mirrorSaved={text:mirror.textContent,hidden:mirror.hidden};
+        mirror.textContent=notice.textContent;mirror.hidden=false;const mirrorDisplay=getComputedStyle(mirror).display;
+        mirror.textContent=mirrorSaved.text;mirror.hidden=mirrorSaved.hidden;
         status.textContent=saved.text;fb.classList.toggle('is-routine',saved.routine);notice.textContent=saved.notice;notice.hidden=saved.hidden;area.scrollTop=0;
-        return {reach,panel};})()`);
-      assert.ok(crowded.reach.every(Boolean)&&crowded.panel>=120,JSON.stringify({width,height,crowded}));
+        return {reach,panel,mirrorDisplay};})()`);
+      // Sideways the rail leaves the dock's own lines in view, so the mirror stays hidden.
+      assert.ok(crowded.reach.every(Boolean)&&crowded.panel>=120&&crowded.mirrorDisplay==='none',JSON.stringify({width,height,crowded}));
       await browser(['screenshot',path.join(outDir,`mobile-landscape-sheet-${width}x${height}.png`)]);
       await evaluate("document.querySelector('#action-options-toggle').click()");
     }
@@ -441,6 +445,12 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.ok(raiseSheet.open&&raiseSheet.inside&&raiseSheet.covered.length===0&&raiseSheet.summaryShown&&raiseSheet.controls&&raiseSheet.pressable.every(Boolean)&&raiseSheet.table===phoneTables['390x667'],JSON.stringify(raiseSheet));
     assert.ok(raiseSheet.summary.includes(sheetHero.stack.toLocaleString('ko-KR'))&&raiseSheet.summary.includes(cardLabel(parseCard(view.myCards[0]))),raiseSheet.summary);
     await browser(['screenshot',path.join(outDir,'mobile-raise-sheet-390x667.png')]);
+    // Upright the sheet covers the dock's status line, so a status shows in its own row.
+    const mirrorRow=await evaluate(`(()=>{const m=document.querySelector('#sheet-status'),saved={text:m.textContent,hidden:m.hidden};m.textContent='액션이 거부됐습니다. 현재 가능한 액션을 다시 고르세요.';m.hidden=false;
+      const R=n=>n.getBoundingClientRect(),hit=(a,b)=>a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1,r=R(m);
+      const out={display:getComputedStyle(m).display,clear:[...document.querySelectorAll('#action-summary,#decision-aid,#action-options-toggle,.raise-panel')].filter(n=>n.getClientRects().length).every(n=>!hit(r,R(n)))};
+      m.textContent=saved.text;m.hidden=saved.hidden;return out;})()`);
+    assert.deepEqual(mirrorRow,{display:'block',clear:true},JSON.stringify(mirrorRow));
     const fieldChips=()=>evaluate("Number(document.querySelector('#raise-amount').value.replaceAll(',',''))");
     await evaluate("document.querySelector('#raise-inc').click()");
     assert.equal(await fieldChips(),view.legal.maxRaiseTo,'＋ at the maximum stays there');
