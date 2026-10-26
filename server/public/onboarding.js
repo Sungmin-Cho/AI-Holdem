@@ -9,8 +9,8 @@ import { DISPLAY_KEYS } from './display-settings.js';
 
 export const ONBOARDING_STEPS = Object.freeze([
   { target: 'seat', title: '내 좌석과 스택', text: '아래 가운데가 내 자리입니다. 명판의 숫자가 남은 스택이고, 내 카드는 명판 위에 있습니다.' },
-  { target: 'actions', title: '액션 바와 금액', text: '폴드·체크/콜·벳/레이즈를 고릅니다. 레이즈 금액은 그 스트리트의 총액이며, 금액·메모에서 바꿀 수 있습니다.' },
-  { target: 'side', title: '로그·코치·학습', text: '오른쪽 탭에서 진행 기록, 코치 노트, 학습 카드를 봅니다. 일시정지와 설정은 위쪽 메뉴에 있습니다.' },
+  { target: 'actions', title: '액션 바와 금액', text: '폴드·체크/콜·벳/레이즈를 고릅니다. 레이즈 금액은 그 스트리트의 총액이며, 크기 버튼이나 금액·메모(폰에서는 \'조정\')에서 바꿀 수 있습니다.' },
+  { target: 'side', title: '로그·코치·학습', text: '로그·코치·학습 탭(폰에서는 위쪽 \'기록\' 버튼)에서 진행 기록, 코치 노트, 학습 카드를 봅니다. 일시정지와 설정은 위쪽 메뉴에 있습니다.' },
 ]);
 
 function storageOf(storage) { try { return storage ?? globalThis.localStorage ?? null; } catch { return null; } }
@@ -20,7 +20,7 @@ function storageOf(storage) { try { return storage ?? globalThis.localStorage ??
 export const PARTICIPANT_ONBOARDING_STEPS = Object.freeze([
   ONBOARDING_STEPS[0],
   { target: 'actions', title: '액션 바와 금액', text: '폴드·체크/콜·벳/레이즈를 고릅니다. 레이즈 금액은 그 스트리트의 총액입니다. 온라인 게임은 차례마다 제한 시간이 있습니다.' },
-  { target: 'side', title: '로그와 참가자', text: '탭에서 진행 기록과 참가자를 봅니다. 도움말과 나가기는 페이지 위쪽 헤더에 있습니다.' },
+  { target: 'side', title: '로그와 참가자', text: '탭(폰에서는 위쪽 \'기록\' 버튼)에서 진행 기록과 참가자를 봅니다. 도움말과 나가기는 페이지 위쪽 헤더에 있습니다.' },
 ]);
 
 export function createOnboarding({ doc = globalThis.document, storage, container, targets, steps = ONBOARDING_STEPS }) {

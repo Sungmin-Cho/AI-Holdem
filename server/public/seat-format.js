@@ -23,9 +23,12 @@ export function participantSummary(view) {
 }
 const POINTS = {H:[50,100],L3:[0,78],L2:[0,54],L1:[0,29],T1:[28,4],T2:[72,4],TC:[50,4],R1:[100,29],R2:[100,54],R3:[100,78]};
 const SLOTS = {2:['TC'],3:['T1','T2'],4:['L2','TC','R2'],5:['L2','T1','T2','R2'],6:['L3','L1','TC','R1','R3'],7:['L3','L1','T1','T2','R1','R3'],8:['L3','L2','L1','TC','R1','R2','R3'],9:['L3','L2','L1','T1','T2','R1','R2','R3']};
+// The slot name also places the seat on a phone (table-mobile.css, `data-slot`);
+// x/y keep the scrolling tablet layout's coordinates.
 export function mobileSeatSlot(index, count) {
-  const [x,y] = POINTS[index === 0 ? 'H' : SLOTS[count]?.[index-1]] ?? POINTS.H;
-  return {x,y};
+  const slot = index === 0 ? 'H' : SLOTS[count]?.[index-1] ?? 'H';
+  const [x,y] = POINTS[slot];
+  return {x,y,slot};
 }
 
 // Stadium rail coordinates, clockwise from the hero at the bottom.

@@ -1,0 +1,396 @@
+/*
+  Phone table (mobile table design): an app shell on a phone held upright (P)
+  or sideways (L). Loaded after table.css and replay.css so it settles the
+  tablet-width rules those files apply to phones too. Colours only from the
+  semantic tokens in design-tokens.css. The media queries are the strings in
+  layout-mode.js (test/layout-mode.test.js compares them).
+
+  The table never moves: the dock under it keeps one height in every state, and
+  the raise sheet, the records sheet and the floating cards lie on top.
+*/
+
+/* ===== P and L: the shared app shell ===================================== */
+@media (max-width: 600px) and (orientation: portrait), (max-width: 600px) and (min-height: 501px), (orientation: landscape) and (max-height: 500px) and (max-width: 1023px) {
+  :root { --dock-h: 148px; --hud-h: 44px; --safe-b: env(safe-area-inset-bottom, 0px); }
+  /* No overflow:hidden — the shell fits the viewport exactly, and a zoomed page
+     (the list fallback below) must still scroll to everything. */
+  html, body { height: 100%; min-height: 0; }
+  body, body:has(.pre-action-hint:not([hidden])) { height: 100dvh; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); overscroll-behavior: none; }
+  body.embedded { grid-template-rows: minmax(0, 1fr); }
+  main, main:has(.pre-action-hint:not([hidden])) { position: relative; display: block; min-width: 0; min-height: 0; height: 100%; }
+
+  /* Stand-alone top bar: one row, the facts scroll sideways inside it. */
+  .topbar { flex-wrap: nowrap; min-height: 44px; height: auto; padding: env(safe-area-inset-top, 0px) 6px 0 12px; gap: 10px; background: var(--c-bg); }
+  .brand-name, .table-context .unit-label, #conn-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .topbar-sep { display: none; }
+  .topbar .meta { order: 0; flex: 1 1 auto; width: auto; min-width: 0; flex-wrap: nowrap; gap: 14px; overflow-x: auto; scrollbar-width: none; }
+  .topbar .meta::-webkit-scrollbar { display: none; }
+  .topbar .meta-seg { flex-direction: row; align-items: baseline; gap: 4px; flex: none; white-space: nowrap; }
+  .topbar .meta-label, .topbar .meta-value { font-size: 12px; }
+  .conn { flex: none; padding: 0; width: 24px; height: 24px; justify-content: center; border-radius: 50%; }
+  .topbar .study-link { margin-left: 0; min-height: 44px; display: inline-flex; align-items: center; padding: 0 6px; font-size: 12px; }
+
+  /* The table HUD: who is left, the last result, the unit and the records sheet. */
+  .table-context { flex: none; display: flex; align-items: center; flex-wrap: nowrap; gap: 6px; height: var(--hud-h); padding: 0 6px 0 12px; border-bottom: 1px solid var(--c-line); background: var(--c-bg); color: var(--c-text-2); font-size: 12px; }
+  #participants-summary { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .table-context-tools { flex: none; flex-wrap: nowrap; gap: 4px; }
+  .table-context label { gap: 0; font-size: 12px; }
+  .table-context select { height: 44px; min-height: 44px; padding: 0 4px; font-size: 12px; }
+  .table-context .btn { height: 44px; min-height: 44px; padding: 0 10px; font-size: 12px; }
+  #side-open { display: inline-flex; gap: 6px; }
+  .spectator-banner { flex: none; margin: 0; padding: 6px 12px; border-width: 0 0 1px; border-radius: 0; font-size: 12px; }
+
+  /* The stage: HUD, table, dock. */
+  .stage, .stage:has(> .pre-action-hint:not([hidden])) { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; padding: 0; gap: 0; }
+  .stage > * { flex-shrink: 0; }
+  .table-wrap { position: relative; flex: 1 1 auto; min-height: 0; display: block; padding: 0; container-type: size; }
+
+  /* ---- Dock: one height whatever it shows ---- */
+  .action-area { position: static; display: flex; flex-direction: column; justify-content: flex-end; gap: 6px; height: calc(var(--dock-h) + var(--safe-b)); padding: 6px 8px calc(6px + var(--safe-b)); overflow-y: auto; overscroll-behavior: contain; background: var(--c-surface-1); border-top: 1px solid var(--c-line-strong); }
+  .action-area > * { flex-shrink: 0; }
+  .thinking, .idle-hint { margin: 0; font-size: 13px; }
+  /* Waiting: the status lines sit together in the middle of the reserved dock. */
+  .action-area:not(:has(> #action-bar:not([hidden]))) { justify-content: center; }
+  .action-feedback { min-height: 0; margin: 0; padding: 0; gap: 6px; flex-wrap: wrap; text-align: center; }
+  .action-feedback p, #action-status, #action-notice { margin: 0; font-size: 12px; }
+  .action-feedback:has(#action-status:empty):not(:has(button:not([hidden]))) { display: none; }
+  .action-feedback .btn { min-height: 44px; }
+  /* On the user's turn the buttons say whose turn it is; the status line stays
+     for screen readers unless it carries a recovery button. */
+  .action-area:has(> #action-bar:not([hidden])) .action-feedback.is-routine { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  /* A status or notice takes the dock's first line; the aid stays in the sheet. */
+  .action-area:has(> .action-feedback:not(.is-routine) #action-status:not(:empty), > #action-notice:not([hidden])) .action-bar:not(.options-expanded) .decision-aid { display: none; }
+  #action-notice { text-align: center; color: var(--c-info-text); }
+  .result-dock { flex: 1 1 auto; min-height: 0; overflow: auto; display: block; }
+  .result-dock .hand-result { max-width: none; padding: 6px 10px 8px; font-size: 13px; box-shadow: none; }
+  .result-dock .hand-result-head { position: sticky; top: -6px; z-index: 1; margin: -6px -10px 0; padding: 6px 10px 2px; background: var(--c-surface-1); }
+  .hand-result .hand-result-skip { min-height: 44px; height: 44px; padding: 0 12px; font-size: 12px; }
+  .plate-action-amount { display: none; }
+
+  /* The learning hint sits on the table just above the dock. */
+  .pre-action-hint { position: absolute; z-index: 20; left: 8px; right: 8px; bottom: calc(var(--dock-h) + var(--safe-b) + 8px); max-height: 34%; margin: 0; overflow: auto; box-shadow: var(--sh-2); }
+
+  /* ---- Action bar in the dock ---- */
+  .action-bar, .action-bar:not(.options-expanded) { position: static; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); align-items: stretch; gap: 6px; width: 100%; margin: 0; padding: 0; background: none; border: 0; border-radius: 0; box-shadow: none; }
+  .action-summary { grid-column: 1 / -1; grid-row: 1; margin: 0; font-size: 12px; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--c-text-2); }
+  .decision-aid { grid-column: 1 / -1; grid-row: 1; font-size: 12px; line-height: 16px; }
+  .action-bar:has(#turn-deadline:not([hidden])) :is(.decision-aid, .action-summary) { grid-column: 1 / 5; }
+  #turn-deadline { grid-column: 5 / -1; grid-row: 1; margin: 0; font-size: 12px; line-height: 16px; text-align: right; white-space: nowrap; }
+  .act-group { display: contents; }
+  .act-sep { display: none; }
+  #btn-fold { grid-column: 1 / 3; grid-row: 3; }
+  #btn-check, #btn-call { grid-column: 3 / 5; grid-row: 3; }
+  #btn-raise, #btn-allin-only { grid-column: 5 / -1; grid-row: 3; width: auto; }
+  .action-bar .act-group .btn, #btn-raise, #btn-allin-only { min-width: 0; height: 52px; min-height: 52px; padding: 0 6px; gap: 6px; font-size: 14px; }
+  #btn-fold.is-armed { white-space: normal; line-height: 1.2; font-size: 12px; }
+  .action-bar .btn .amount-pair { gap: 1px; }
+  .action-bar .btn .amount-primary { font-size: 14px; }
+  #action-options-toggle { display: flex; grid-column: 6; grid-row: 2; min-width: 0; height: 44px; min-height: 44px; padding: 0 2px; font-size: 12px; }
+  .action-bar:has(#raise-panel[hidden]) #action-options-toggle { display: none; }
+  /* Collapsed: the raise panel shows only its size presets — at most five. */
+  .raise-panel { grid-column: 1 / 6; grid-row: 2; min-width: 0; padding: 0; gap: 8px; }
+  .action-bar:not(.options-expanded) .raise-panel, .action-bar:not(.options-expanded) .raise-top { display: block; }
+  .action-bar:not(.options-expanded) .raise-panel > :not(.raise-top),
+  .action-bar:not(.options-expanded) .amount-field,
+  .action-bar:not(.options-expanded) .intent-note-wrap { display: none; }
+  .presets { display: flex; flex-wrap: nowrap; gap: 4px; width: 100%; }
+  .preset { flex: 1 1 0; min-width: 0; height: 44px; min-height: 44px; padding: 0 2px; font-size: 12px; white-space: nowrap; }
+  .action-bar:not(.options-expanded) .presets:has([data-preset="third"]:not([hidden])) :is([data-preset="min"], [data-preset="twothird"]),
+  .action-bar:not(.options-expanded) .presets:not(:has([data-preset="third"]:not([hidden]))) [data-preset="half"] { display: none; }
+
+  /* Expanded: the same bar becomes a sheet over the table; the buttons keep their row. */
+  /* From just under the board and pot (--sheet-top, measured by app.js) to the
+     bottom; only the middle row scrolls, so the buttons never leave the bottom. */
+  .action-bar.options-expanded { position: absolute; z-index: 65; left: 0; right: 0; top: var(--sheet-top, 46%); bottom: 0; height: auto; grid-template-rows: auto auto minmax(0, 1fr) auto auto; overflow: hidden; padding: 12px 8px calc(6px + var(--safe-b)); background: var(--c-surface-1); border-top: 1px solid var(--c-line-strong); border-radius: 18px 18px 0 0; box-shadow: var(--sh-3); }
+  .action-bar.options-expanded .action-summary { position: static; width: auto; height: auto; overflow: hidden; clip-path: none; grid-column: 1 / 6; grid-row: 1; color: var(--c-text); align-self: center; white-space: normal; overflow-wrap: anywhere; }
+  .action-bar.options-expanded #action-options-toggle { grid-column: 6; grid-row: 1; border-color: var(--c-info); color: var(--c-info-text); }
+  .action-bar.options-expanded .decision-aid { grid-column: 1 / -1; grid-row: 2; white-space: normal; overflow-wrap: anywhere; color: var(--c-text-2); }
+  /* Sizes, then [− amount ＋], then the slider: the raise-top and raise-slide
+     wrappers dissolve so their parts share one grid. */
+  .action-bar.options-expanded .raise-panel { grid-column: 1 / -1; grid-row: 3; display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-content: start; gap: 8px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+  .action-bar.options-expanded :is(.raise-top, .raise-slide) { display: contents; }
+  .action-bar.options-expanded .presets { grid-column: 1 / -1; grid-row: 1; display: flex; gap: 4px; }
+  .action-bar.options-expanded #raise-dec { grid-column: 1; grid-row: 2; }
+  .action-bar.options-expanded .amount-field { grid-column: 2; grid-row: 2; }
+  .action-bar.options-expanded #raise-inc { grid-column: 3; grid-row: 2; }
+  .action-bar.options-expanded .slider { grid-column: 1 / -1; grid-row: 3; }
+  .action-bar.options-expanded .raise-range { grid-column: 1 / -1; grid-row: 4; }
+  .action-bar.options-expanded .amount-error { grid-column: 1 / -1; grid-row: 5; margin: 0; }
+  .action-bar.options-expanded :is(#btn-fold, #btn-check, #btn-call, #btn-raise, #btn-allin-only) { grid-row: 5; }
+  .action-bar.options-expanded .amount-field { width: 100%; height: 44px; margin: 0; justify-content: space-between; }
+  .action-bar.options-expanded .amount-input { width: 50%; min-height: 40px; font-size: 18px; }
+  .action-bar.options-expanded .raise-step { display: inline-flex; flex: none; width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; font-size: 20px; }
+  .action-bar.options-expanded .slider { width: 100%; min-width: 0; min-height: 44px; margin: 0; }
+  .action-bar.options-expanded .raise-range { display: block; margin: 0; font-size: 12px; text-align: left; }
+  .action-bar.options-expanded .intent-note-wrap { grid-column: 1 / -1; grid-row: 4; display: flex; }
+  .action-bar.options-expanded .intent-note-field { display: flex; font-size: 12px; }
+  .intent-tags, .action-bar.options-expanded .intent-tags, .intent-note-toggle { display: none; }
+
+  /* ---- Records sheet and the floating layer ---- */
+  .side { position: absolute; z-index: 30; top: 4px; left: 0; right: 0; bottom: auto; display: flex; flex-direction: column; align-items: stretch; gap: 6px; min-width: 0; min-height: 0; padding: 0 8px; background: none; border: 0; pointer-events: none; }
+  main > .side { top: calc(var(--hud-h) + 4px); }
+  .side:not(.is-open) > :is(.side-head, .tabs, .panel) { display: none; }
+  .side > :is(.study-entry, .coach-toast, .onboarding-card) { pointer-events: auto; }
+  .study-entry { align-self: center; padding: 0; border: 0; }
+  .study-entry .btn { min-height: 44px; padding: 0 16px; background: var(--c-surface-1); box-shadow: var(--sh-2); font-size: 13px; }
+  .coach-toast { margin: 0; padding: 4px 4px 4px 12px; box-shadow: var(--sh-2); background: var(--c-surface-1); }
+  .coach-toast .btn { min-height: 44px; }
+  .side .onboarding-card { margin: 0; background: var(--c-surface-1); box-shadow: var(--sh-3); }
+  .side .onboarding-card .ui-btn, .side .onboarding-card button { min-height: 44px; }
+  .side.is-open { position: absolute; z-index: 60; top: var(--hud-h); bottom: calc(var(--dock-h) + var(--safe-b)); height: auto; padding: 0; gap: 0; background: var(--c-surface-1); border-top: 1px solid var(--c-line-strong); border-radius: 18px 18px 0 0; box-shadow: var(--sh-3); pointer-events: auto; }
+  .side.is-open > .side-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px 0 16px; }
+  .side-title { margin: 0; font-size: 16px; font-weight: 700; }
+  .side.is-open > .study-entry { margin-top: 6px; }
+  .side.is-open > .tabs { margin: 8px 12px 6px; }
+  .side.is-open .tab { min-height: 44px; }
+  .side.is-open > .panel { flex: 1 1 auto; min-height: 0; max-height: none; overflow: auto; padding: 0 12px 12px; }
+  .side.is-open > #panel-log { display: flex; flex-direction: column; overflow: hidden; }
+  .side.is-open #log-new { flex-shrink: 0; }
+  .side.is-open .log-list { flex: 1 1 auto; min-height: 0; max-height: none; overflow: auto; }
+  .side-scrim { display: block; position: absolute; z-index: 55; left: 0; right: 0; top: var(--hud-h); bottom: calc(var(--dock-h) + var(--safe-b)); background: var(--c-scrim); }
+  .side-head .btn { min-height: 44px; }
+
+  /* Dialogs stand above the records sheet. */
+  .overlay { z-index: 70; padding: 12px 12px calc(12px + var(--safe-b)); }
+  .review-card { padding: 18px 16px 20px; max-height: calc(100dvh - 24px - var(--safe-b)); }
+  .review-card--tight { overflow: auto; }
+  .review-head, .replay-head { flex-wrap: wrap; }
+  .final-content { padding: 0 0 8px; }
+  .final-links { flex-wrap: wrap; gap: 8px 16px; }
+}
+
+/* ===== P: a phone held upright =========================================== */
+@media (max-width: 600px) and (orientation: portrait), (max-width: 600px) and (min-height: 501px) {
+  /* Dialogs rise from the bottom, within the thumb's reach. */
+  .overlay:not(#replay-overlay) { place-items: end center; }
+  /* ---- The table: a tall rounded felt filling the zone ---- */
+  .table, .table.is-crowded {
+    position: absolute; inset: 6px 6px 4px; width: auto; height: auto; max-height: none; aspect-ratio: auto; margin: 0;
+    --tw: 100cqw; --seat-pad-x: 44px; --seat-pad-t: 46px; --seat-pad-b: 4px;
+    --cw: clamp(26px, 9cqw, 44px); --ch: calc(var(--cw) * 1.4); --card-gap: 4px;
+    --hero-cw: clamp(40px, 12.4cqw, 58px); --hero-ch: calc(var(--hero-cw) * 1.4);
+  }
+  .table.is-crowded { --seat-pad-t: 34px; }
+  .table .rail { border-radius: 44% / 26%; }
+  .table .rail-line { inset: 1.2% 2.4%; border-radius: 44% / 26%; }
+  .table .felt { inset: 2% 3.4%; border-radius: 42% / 25%; }
+  .table .felt-line { inset: 3.5% 5.5%; border-radius: 40% / 24%; }
+  .table .felt-mark { width: 30%; }
+  .bets { display: none; }
+  .table .center { top: 42%; width: auto; min-width: 0; gap: 8px; }
+  .table .board { --cw: clamp(26px, 9cqw, 44px); --ch: calc(var(--cw) * 1.4); }
+  .table .pots { flex-wrap: nowrap; width: auto; max-width: calc(100cqw - 2 * var(--seat-pad-x) - 40px); gap: 6px; padding: 4px 12px; border-radius: 999px; }
+  .table .pot-chip { display: block; width: 16px; height: 16px; }
+  .table .pot-label { width: auto; font-size: 12px; }
+  .table .pot-amount { font-size: 16px; }
+  .table .pots .amount-secondary { display: none; }
+
+  /* ---- Seats: placed by slot name inside the seat box ---- */
+  .table .seats, .table.is-crowded .seats { inset: var(--seat-pad-t) var(--seat-pad-x) var(--seat-pad-b); }
+  .table .seat, .table.is-crowded .seat { display: block; width: max-content; gap: 0; transform: translate(-50%, -50%); }
+  .table .seat[data-slot="TC"] { left: 50% !important; top: 0 !important; }
+  .table .seat[data-slot="T1"] { left: 26% !important; top: 0 !important; }
+  .table .seat[data-slot="T2"] { left: 74% !important; top: 0 !important; }
+  .table .seat[data-slot="L1"] { left: 0 !important; top: 25% !important; }
+  .table .seat[data-slot="L2"] { left: 0 !important; top: 50% !important; }
+  .table .seat[data-slot="L3"] { left: 0 !important; top: 75% !important; }
+  .table .seat[data-slot="R1"] { left: 100% !important; top: 25% !important; }
+  .table .seat[data-slot="R2"] { left: 100% !important; top: 50% !important; }
+  .table .seat[data-slot="R3"] { left: 100% !important; top: 75% !important; }
+
+  /* An opponent: avatar over a name/stack/status tile. */
+  .table .plate, .table.is-crowded .plate {
+    position: relative; display: flex; flex-direction: column; align-items: center; flex-wrap: nowrap; justify-content: flex-start;
+    width: 82px; min-width: 0; max-width: none; padding: 20px 3px 4px; gap: 0; margin-top: 16px; border-radius: 12px;
+  }
+  .table .plate .avatar-wrap { display: block; position: absolute; top: -16px; left: 50%; transform: translateX(-50%); }
+  .table .plate .avatar { width: 32px; height: 32px; font-size: 13px; border: 2px solid var(--c-plate-line); }
+  .table .plate-info { display: flex; flex-direction: column; align-items: center; gap: 0; width: 100%; min-width: 0; flex: none; }
+  .table .plate-name { max-width: 100%; font-size: 12px; line-height: 15px; text-align: center; }
+  .table .plate-stack, .table .seat.is-hero .plate-stack { font-size: 14px; line-height: 17px; }
+  .table .plate .amount-pair { align-items: center; gap: 0; white-space: nowrap; }
+  .table .plate .amount-primary { white-space: nowrap; }
+  .table .plate .amount-secondary { display: none; }
+  .table .plate-status { flex: none; width: 100%; margin-top: 2px; }
+  .table .plate .plate-tag, .table .plate .plate-action { width: auto; max-width: 100%; padding: 0 3px; font-size: 12px; line-height: 16px; text-align: center; white-space: normal; }
+  .table .plate .plate-deadline { font-size: 12px; }
+  .table .dealer-btn { top: -6px; left: -6px; right: auto; width: 20px; height: 20px; font-size: 12px; z-index: 3; }
+  .table .dealer-btn.is-sb, .table .dealer-btn.is-bb { width: auto; min-width: 24px; }
+  .table .seat-bet { display: none; }
+  /* Crowded tables (7–9): no avatar, so five tiers fit a short phone. */
+  .table.is-crowded .seat:not(.is-hero) .plate { width: 80px; padding-top: 4px; margin-top: 0; }
+  .table.is-crowded .seat:not(.is-hero) .avatar-wrap { display: none; }
+  /* Eliminated: name and status only. */
+  .table .seat.is-out .plate { width: 76px; padding: 4px; margin-top: 0; }
+
+  /* Opponent cards: small backs on the tile's corner; shown cards cover its top. */
+  .table .seat:not(.is-hero) .seat-cards { position: absolute; z-index: 4; top: 8px; right: -8px; display: flex; pointer-events: none; }
+  .table.is-crowded .seat:not(.is-hero) .seat-cards { top: -8px; }
+  .table .seat:not(.is-hero) .card--back.card--sm { --cw: 14px; --ch: 20px; }
+  .table .seat:not(.is-hero) .seat-cards .card--back + .card--back { margin-left: -6px; }
+  .table .seat:not(.is-hero) .seat-cards:has(.card:not(.card--back)) { top: -12px; right: auto; left: 50%; transform: translateX(-50%); gap: 2px; }
+  .table .seat:not(.is-hero) .card--sm:not(.card--back) { --cw: 26px; --ch: 36px; }
+  .table .seat:not(.is-hero) .seat-cards .card--sm + .card--sm { margin-left: 0; }
+  .table .seat:not(.is-hero) .seat-cards > .plate-tag { position: static; font-size: 12px; }
+
+  /* Committed chips: under the opponent's tile, toward the pot. */
+  .table .plate .bet-marker { display: flex; position: absolute; top: calc(100% + 3px); left: 50%; right: auto; bottom: auto; transform: translateX(-50%); width: max-content; max-width: 84px; padding: 1px 7px 1px 3px; gap: 3px; pointer-events: none; }
+  .table .bet-chip { width: 13px; height: 13px; }
+  .table .bet-amount { font-size: 12px; white-space: nowrap; }
+
+  /* ---- The viewer: cards over a wide plate at the bottom ---- */
+  .table .seat.is-hero { left: 50% !important; top: 100% !important; transform: translate(-50%, -100%); display: flex; flex-direction: column; align-items: center; }
+  .table .seat.is-hero .seat-cards { position: static; display: flex; margin-bottom: -4px; z-index: 2; }
+  .table .card--hero { --cw: var(--hero-cw); --ch: var(--hero-ch); }
+  .table .seat.is-hero .card--hero:first-child { transform: rotate(-5deg) translate(3px, 2px); }
+  .table .seat.is-hero .card--hero:last-child { margin-left: -4px; transform: rotate(5deg); }
+  .table .seat.is-hero .plate, .table.is-crowded .seat.is-hero .plate { flex-direction: row; align-items: center; width: auto; min-width: 124px; max-width: 220px; margin-top: 0; padding: 6px 10px 6px 8px; gap: 8px; }
+  .table .seat.is-hero .avatar-wrap, .table.is-crowded .seat.is-hero .avatar-wrap { display: block; position: relative; top: auto; left: auto; transform: none; }
+  .table .seat.is-hero .avatar { width: 34px; height: 34px; }
+  .table .seat.is-hero .plate-info { align-items: flex-start; width: auto; flex: 0 1 auto; }
+  .table .seat.is-hero .plate-name { text-align: left; }
+  .table .seat.is-hero .plate-stack .amount-primary, .table .seat.is-hero .amount-primary { font-size: 16px; }
+  .table .seat.is-hero .plate-status { flex: none; width: auto; max-width: 84px; margin: 0; }
+  .table .seat.is-hero .plate-status:empty { display: none; }
+  .table .seat.is-hero .dealer-btn { left: -8px; top: -8px; }
+  .table .seat.is-hero .bet-marker { top: auto; bottom: calc(100% + var(--hero-ch) - 2px); }
+  .hero-hand { display: block; position: absolute; z-index: 3; left: 50%; top: -12px; transform: translate(-50%, -50%); width: max-content; max-width: min(220px, 90cqw); padding: 3px 8px; border: 1px solid var(--c-info); border-radius: 999px; background: var(--c-surface-1); color: var(--c-info-text); font-size: 12px; font-weight: 700; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: var(--sh-1); pointer-events: none; }
+}
+
+/* ===== L: a phone held sideways ========================================= */
+/* The table on the left, the dock as a rail on the right (the right thumb). */
+@media (orientation: landscape) and (max-height: 500px) and (max-width: 1023px) {
+  :root { --hud-h: 40px; --rail-w: clamp(212px, 30vw, 268px); }
+  .topbar { min-height: 40px; }
+  .stage, .stage:has(> .pre-action-hint:not([hidden])) { display: grid; grid-template-columns: minmax(0, 1fr) var(--rail-w); grid-template-rows: var(--hud-h) auto minmax(0, 1fr); }
+  .table-context { grid-column: 1; grid-row: 1; height: var(--hud-h); padding-left: max(12px, env(safe-area-inset-left, 0px)); }
+  .table-context .btn, .table-context select { height: 40px; min-height: 40px; }
+  .spectator-banner { grid-column: 1; grid-row: 2; }
+  .table-wrap { grid-column: 1; grid-row: 3; }
+  /* contain:size — the rail's content must not grow the grid rows it spans. */
+  .action-area { grid-column: 2; grid-row: 1 / -1; height: auto; min-height: 0; contain: size; padding: 8px max(8px, env(safe-area-inset-right, 0px)) calc(8px + var(--safe-b)) 8px; border-top: 0; border-left: 1px solid var(--c-line-strong); }
+  .pre-action-hint { left: max(8px, env(safe-area-inset-left, 0px)); right: calc(var(--rail-w) + 8px); bottom: 8px; max-height: 45%; }
+
+  /* The table: a wide oval; seats on the desktop oval coordinates, compact plates. */
+  .table, .table.is-crowded {
+    position: absolute; inset: 4px 6px 4px max(6px, env(safe-area-inset-left, 0px)); width: auto; height: auto; max-height: none; aspect-ratio: auto; margin: 0;
+    --tw: 100cqw; --cw: clamp(24px, 6.4cqw, 40px); --ch: calc(var(--cw) * 1.4); --card-gap: 3px;
+    --hero-cw: clamp(32px, 7cqw, 46px); --hero-ch: calc(var(--hero-cw) * 1.4);
+  }
+  .bets { display: none; }
+  .table .center { top: 47%; width: auto; min-width: 0; gap: 6px; }
+  .table .board { --cw: clamp(24px, 6.4cqw, 40px); --ch: calc(var(--cw) * 1.4); }
+  .table .pots { flex-wrap: nowrap; width: auto; gap: 6px; padding: 3px 10px; border-radius: 999px; }
+  .table .pot-chip { display: block; width: 14px; height: 14px; }
+  .table .pot-label { width: auto; font-size: 12px; }
+  .table .pot-amount { font-size: 15px; }
+  .table .pots .amount-secondary { display: none; }
+  .table .seats, .table.is-crowded .seats { inset: 0; }
+  .table .seat, .table.is-crowded .seat, .table.is-crowded .seat[data-slot] { left: var(--desktop-seat-x) !important; top: var(--desktop-seat-y) !important; display: block; width: max-content; gap: 0; transform: translate(-50%, -50%); }
+  .table.is-crowded { height: auto; }
+  .table .plate, .table.is-crowded .plate { position: relative; display: flex; flex-direction: row; align-items: center; flex-wrap: nowrap; justify-content: flex-start; width: auto; min-width: 0; max-width: 168px; padding: 3px 8px 3px 4px; gap: 5px; border-radius: 10px; }
+  .table .plate .avatar-wrap { display: block; }
+  .table .plate .avatar { width: 24px; height: 24px; font-size: 12px; }
+  .table.is-crowded .seat:not(.is-hero) .avatar-wrap { display: none; }
+  .table.is-crowded .seat:not(.is-hero) .plate { padding-left: 8px; }
+  .table .plate-info { display: flex; flex-direction: column; gap: 0; min-width: 0; flex: 0 1 auto; width: auto; }
+  .table .plate-name { max-width: 84px; font-size: 12px; line-height: 14px; }
+  .table .plate-stack, .table .seat.is-hero .plate-stack { font-size: 13px; line-height: 16px; }
+  .table .plate .amount-pair { gap: 0; white-space: nowrap; }
+  .table .plate .amount-secondary { display: none; }
+  .table .plate-status { flex: 0 1 auto; width: auto; min-width: 0; max-width: 76px; margin: 0; }
+  .table .plate-status:empty { display: none; }
+  .table .plate .plate-tag, .table .plate .plate-action { width: auto; padding: 0 3px; font-size: 12px; line-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .table .dealer-btn { top: -7px; left: -7px; right: auto; width: 18px; height: 18px; font-size: 12px; z-index: 3; }
+  .table .dealer-btn.is-sb, .table .dealer-btn.is-bb { width: auto; min-width: 22px; }
+  .table .seat-bet { display: none; }
+  .table .seat.is-out .plate { padding: 3px 8px; }
+  /* Opponent cards on the plate's top edge; shown cards above it. */
+  .table .seat:not(.is-hero) .seat-cards { position: absolute; z-index: 4; top: -9px; right: -6px; display: flex; pointer-events: none; }
+  .table .seat:not(.is-hero) .card--back.card--sm { --cw: 12px; --ch: 17px; }
+  .table .seat:not(.is-hero) .seat-cards .card--back + .card--back { margin-left: -5px; }
+  .table .seat:not(.is-hero) .seat-cards:has(.card:not(.card--back)) { top: auto; bottom: calc(100% + 2px); right: auto; left: 50%; transform: translateX(-50%); gap: 2px; }
+  .table .seat:not(.is-hero) .card--sm:not(.card--back) { --cw: 22px; --ch: 31px; }
+  .table .seat:not(.is-hero) .seat-cards .card--sm + .card--sm { margin-left: 0; }
+  /* Chips toward the pot: below the upper seats, above the lower ones, inward at the sides. */
+  .table .plate .bet-marker { display: flex; position: absolute; top: calc(100% + 3px); left: 50%; right: auto; bottom: auto; transform: translateX(-50%); width: max-content; max-width: 84px; padding: 1px 7px 1px 3px; gap: 3px; pointer-events: none; }
+  .table .seat[data-bet-band="lower"] .bet-marker { top: auto; bottom: calc(100% + 3px); }
+  .table .seat[data-bet-band="middle"][data-side="left"] .bet-marker { top: 50%; left: calc(100% + 4px); transform: translateY(-50%); }
+  .table .seat[data-bet-band="middle"][data-side="right"] .bet-marker { top: 50%; left: auto; right: calc(100% + 4px); transform: translateY(-50%); }
+  .table .bet-chip { width: 12px; height: 12px; }
+  .table .bet-amount { font-size: 12px; white-space: nowrap; }
+  /* The viewer: cards over the plate at the bottom. */
+  .table .seat.is-hero, .table.is-crowded .seat.is-hero[data-slot] { left: 50% !important; top: 100% !important; transform: translate(-50%, -100%); display: flex; flex-direction: column; align-items: center; }
+  .table .seat.is-hero .seat-cards { position: static; display: flex; margin-bottom: -4px; z-index: 2; }
+  .table .card--hero { --cw: var(--hero-cw); --ch: var(--hero-ch); }
+  .table .seat.is-hero .card--hero:first-child { transform: rotate(-5deg) translate(2px, 2px); }
+  .table .seat.is-hero .card--hero:last-child { margin-left: -3px; transform: rotate(5deg); }
+  .table .seat.is-hero .plate { max-width: 220px; padding: 4px 10px 4px 6px; gap: 6px; }
+  .table .seat.is-hero .avatar { width: 28px; height: 28px; }
+  .table .seat.is-hero .plate-status { max-width: 84px; }
+  .table .seat.is-hero .bet-marker { top: auto; bottom: calc(100% + var(--hero-ch) - 2px); }
+  .hero-hand { display: block; position: absolute; z-index: 3; left: 50%; top: -10px; transform: translate(-50%, -50%); width: max-content; max-width: min(220px, 60cqw); padding: 2px 8px; border: 1px solid var(--c-info); border-radius: 999px; background: var(--c-surface-1); color: var(--c-info-text); font-size: 12px; font-weight: 700; line-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: var(--sh-1); pointer-events: none; }
+
+  /* The rail: aid, sizes, then [adjust | fold | call] and the raise at the bottom. */
+  .action-bar, .action-bar:not(.options-expanded) { flex: 1 1 auto; grid-template-columns: repeat(6, minmax(0, 1fr)); align-content: end; }
+  .action-bar .decision-aid { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+  .action-bar:has(#turn-deadline:not([hidden])) :is(.decision-aid, .action-summary) { grid-column: 1 / -1; }
+  #turn-deadline { grid-column: 1 / -1; grid-row: 6; text-align: center; }
+  .action-bar:not(.options-expanded) .raise-panel { grid-column: 1 / -1; grid-row: 2; }
+  .action-bar:not(.options-expanded) .presets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  #action-options-toggle { grid-column: 1 / 3; grid-row: 4; }
+  #btn-fold { grid-column: 3 / 5; grid-row: 4; }
+  #btn-check, #btn-call { grid-column: 5 / -1; grid-row: 4; }
+  .action-bar:has(#raise-panel[hidden]) #btn-fold { grid-column: 1 / 4; }
+  .action-bar:has(#raise-panel[hidden]) :is(#btn-check, #btn-call) { grid-column: 4 / -1; }
+  #btn-raise, #btn-allin-only { grid-column: 1 / -1; grid-row: 5; }
+  .action-bar .act-group .btn { padding: 0 4px; font-size: 13px; }
+  /* Expanded: the rail itself holds the sheet (the table stays in view, so no
+     summary row); only the amount panel scrolls. */
+  .action-bar.options-expanded { position: static; height: 100%; min-height: 0; top: auto; padding: 0; border: 0; border-radius: 0; box-shadow: none; background: none; grid-template-rows: auto minmax(0, 1fr) auto auto auto; }
+  .action-bar.options-expanded .action-summary { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .action-bar.options-expanded .decision-aid { grid-row: 1; -webkit-line-clamp: 2; line-clamp: 2; }
+  .action-bar.options-expanded .raise-panel { grid-row: 2; }
+  .action-bar.options-expanded .presets { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .action-bar.options-expanded .intent-note-wrap { grid-row: 3; }
+  .action-bar.options-expanded #action-options-toggle { grid-column: 1 / 3; grid-row: 4; }
+  .action-bar.options-expanded #btn-fold { grid-row: 4; }
+  .action-bar.options-expanded :is(#btn-check, #btn-call) { grid-row: 4; }
+  .action-bar.options-expanded :is(#btn-raise, #btn-allin-only) { grid-row: 5; }
+
+  /* Records sheet from the right edge of the table, the rail stays usable. */
+  main > .side { top: calc(var(--hud-h) + 4px); right: var(--rail-w); }
+  .side.is-open { top: 0; bottom: 0; left: auto; right: var(--rail-w); width: min(380px, 62vw); border-top: 0; border-left: 1px solid var(--c-line-strong); border-radius: 18px 0 0 18px; }
+  .side-scrim { top: 0; bottom: 0; right: var(--rail-w); }
+}
+
+/* ===== Zoom and very narrow frames: the list fallback ==================== */
+/* At 200% zoom (or a frame under 300px) the stage cannot hold the phone table.
+   table.css turns the seats into an ordered list; here the app shell lets go —
+   the table and dock flow, and the page scrolls to every seat and button. */
+@media (max-width: 600px) and (orientation: portrait), (max-width: 600px) and (min-height: 501px), (orientation: landscape) and (max-height: 500px) and (max-width: 1023px) {
+  @container stage (max-width: 300px) {
+    .table-context { height: auto; min-height: var(--hud-h); flex-wrap: wrap; padding: 4px 8px; }
+    .table-wrap { flex: none; height: auto; container-type: normal; }
+    .table, .table.is-crowded { position: static; inset: auto; height: auto; display: flex; flex-direction: column; gap: 16px; padding: 10px 0; }
+    .table .rail, .table .rail-line { display: none; }
+    .table .center { position: static; transform: none; width: 100%; }
+    .table .board { flex-wrap: wrap; justify-content: center; }
+    .table .pots { max-width: 100%; flex-wrap: wrap; }
+    .table .seats, .table.is-crowded .seats { position: static; inset: auto; display: grid; gap: 16px; }
+    .table .seat, .table.is-crowded .seat, .table .seat.is-hero { position: static; transform: none; width: auto; }
+    .table .plate, .table.is-crowded .plate, .table .seat.is-hero .plate { width: 100%; max-width: 100%; margin-top: 0; flex-wrap: wrap; }
+    .table .plate .avatar-wrap { position: static; transform: none; }
+    .table .seat:not(.is-hero) .seat-cards, .table .seat:not(.is-hero) .seat-cards:has(.card:not(.card--back)) { position: static; transform: none; justify-content: center; margin-bottom: 4px; }
+    .table .plate .bet-marker, .table .seat.is-hero .bet-marker { position: static; transform: none; margin-top: 4px; }
+    .hero-hand { position: static; transform: none; margin: 4px auto 0; max-width: 100%; white-space: normal; }
+    .action-area { height: auto; overflow: visible; }
+    .action-bar, .action-bar:not(.options-expanded) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .action-bar > *, .action-bar .act-group > * { grid-column: 1 / -1 !important; grid-row: auto !important; }
+    .action-bar.options-expanded { position: static; height: auto; overflow: visible; border-radius: 0; box-shadow: none; }
+    .action-bar:not(.options-expanded) .presets { flex-wrap: wrap; }
+    .preset { flex: 1 1 40%; }
+    .pre-action-hint { position: static; max-height: none; }
+  }
+}
+

@@ -1303,49 +1303,6 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
   .table.is-crowded .center {width:230px;top:44%;}
   .table.is-crowded .bet-marker {display:none;}
 }
-@media (max-width:600px) {
-  .topbar {padding:12px;gap:10px;}
-  .topbar .meta {gap:8px;width:100%;}
-  .topbar-sep {display:none;}
-  .meta-seg {gap:4px;}
-  .meta-label,.meta-value {font-size:12px;}
-  .stage {padding:12px;gap:12px;}
-  .table-wrap {padding:25px 0 85px;}
-  .table,.table.is-crowded {height:620px;aspect-ratio:auto;--tw:100cqw;--ch:40px;--cw:28px;--card-gap:3px;}
-  .seats {inset:0 49px;}
-  .seat {left:var(--seat-x)!important;top:var(--seat-y)!important;gap:5px;}
-  .plate,.seat.is-hero .plate {width:98px;min-width:0;padding:7px 5px;gap:3px;}
-  .table.is-crowded .plate {width:98px;min-width:98px;max-width:98px;}
-  .table.is-crowded .seat.is-hero .plate {width:150px;min-width:150px;max-width:150px;}
-  .seat.is-hero .plate {width:150px;max-width:150px;}
-  .avatar-wrap {display:none;}
-  .plate-name,.seat.is-hero .plate-name {font-size:12px;max-width:90px;}
-  .plate-stack,.seat.is-hero .plate-stack {font-size:14px;}
-  .plate .amount-secondary {display:none;}
-  .seat.is-hero .amount-secondary {display:block;}
-  .plate-tag {font-size:12px;}
-  .card--sm,.card--back.card--sm {--cw:22px;--ch:31px;}
-  .table.is-crowded .card--sm,.table.is-crowded .card--back.card--sm {--cw:22px;--ch:31px;}
-  .card--hero {--cw:42px;--ch:59px;}
-  .seat.is-hero .seat-cards {margin-bottom:0;}
-  .center {top:44%;width:calc(100% - 202px);min-width:126px;gap:10px;}
-  .pots {padding:8px 4px;width:100%;gap:4px;}
-  .pot-chip {display:none;}
-  .pot-label {width:100%;text-align:center;}
-  .pot-amount {font-size:18px;text-align:center;}
-  .bet-marker {display:none;}
-  .action-bar {position:relative;padding:12px;gap:8px;}
-  .act-group {width:100%;display:flex;}
-  .act-group .btn {flex:1;min-width:0;padding:10px 6px;}
-  .act-sep {display:none;}
-  .raise-panel {width:100%;flex-basis:100%;}
-  #btn-raise,#btn-allin-only {width:100%;}
-  .presets {gap:6px;}
-  .preset {padding:8px;}
-  .amount-field {width:100%;justify-content:space-between;}
-  .amount-input {width:60%;}
-  .review-head,.replay-head {flex-wrap:wrap;}
-}
 @media (prefers-reduced-motion:reduce) {*,*::before,*::after {animation:none!important;transition:none!important;scroll-behavior:auto!important;}}
 /* The display setting "줄이기" (data-motion=reduce, set by theme-boot.js) stops the same motion. */
 :root[data-motion="reduce"] *,:root[data-motion="reduce"] *::before,:root[data-motion="reduce"] *::after {animation:none!important;transition:none!important;scroll-behavior:auto!important;}
@@ -1564,15 +1521,6 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 .seat.is-winner .plate {outline:2px solid var(--c-action);box-shadow:0 0 14px color-mix(in srgb, var(--c-action) 50%, transparent);}
 .plate-action {display:block;font-size:12px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--c-plate-text-2);}
 .result-dock:has(> .hand-result[hidden]) {display:none;}
-/* The narrowest phones: five board cards (152px at 28px) are wider than the gap
-   between the side plates (140px at 360px), so the board cards shrink a little. */
-@media(max-width:380px) {
-  .board {--cw:25px;--ch:36px;--card-gap:2px;}
-}
-@media(max-width:600px) {
-  .plate-action-amount {display:none;}
-  .hand-result {font-size:.82rem;padding:.65rem;}
-}
 @media(prefers-reduced-motion:reduce) {.hand-result,.seat.is-winner {animation:none;transition:none;}}
 
 /* In the wrapping plate the status line takes its own row: .plate-info grows
@@ -1593,33 +1541,11 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 .seat.is-out .plate-name {color:var(--c-plate-text-2);}
 .seat.is-out .plate-tag {white-space:nowrap;}
 #action-options-toggle {display:none;}
-@media(max-width:600px) {
-  .action-bar {position:sticky;bottom:0;z-index:12;background:var(--panel);padding:8px;padding-bottom:max(8px,env(safe-area-inset-bottom));gap:6px;}
-  .action-bar:not(.options-expanded) {display:grid;grid-template-columns:1fr 1fr 1.5fr;}
-  .action-summary {grid-column:1/-1;font-size:12px;line-height:1.25;}
-  .action-bar:not(.options-expanded) .raise-panel,.action-bar:not(.options-expanded) .intent-note-wrap {display:none;}
-  /* The expanded sheet is where the memo lives on phones. */
-  .action-bar.options-expanded .intent-note-field {display:flex;}
-  /* Phones keep the memo field only; tag buttons would double the sheet. */
-  .intent-tags,.action-bar.options-expanded .intent-tags {display:none;}
-  .action-bar:not(.options-expanded) .decision-aid {grid-column:1/-1;grid-row:1;line-height:1.25;}
-  .intent-note-toggle {display:none;}
-  .action-bar:not(.options-expanded) .act-group {display:contents;}
-  .action-bar:not(.options-expanded) .btn {width:auto;min-width:0;height:44px;min-height:44px;padding:4px;}
-  #action-options-toggle {display:flex;grid-column:3;grid-row:3;font-size:12px;}
-  .action-bar:not(.options-expanded) #btn-raise,.action-bar:not(.options-expanded) #btn-allin-only {grid-column:3;grid-row:2;}
-  .action-bar.options-expanded {position:relative;}
-  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .table,.stage:has(#action-bar:not([hidden]):not(.options-expanded)) .table.is-crowded {height:250px;}
-  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .table-wrap {padding:12px 0 52px;}
-  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .seat:not(.is-hero) .seat-cards {display:none;}
-  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .plate {padding:3px 4px;gap:1px;}
-  /* The collapsed bar keeps fold, all-in and elimination readable: those seats
-     show their status in the stack's row (two rows, like every other plate). */
-  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .plate-tag:not(.is-fold,.is-out,.is-allin) {display:none;}
-  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .seat:is(.is-folded,.is-allin) .plate-stack {display:none;}
-  .stage:has(#action-bar:not([hidden]):not(.options-expanded)) .plate-tag {padding:0 4px;line-height:1.25;}
-  .action-feedback,#action-status,#action-notice,.idle-hint,.thinking {margin:0;}
-}
+/* Phone-only controls (table-mobile.css shows them): the raise stepper, the
+   records sheet's header, scrim and opener, and the hand-strength chip. Elsewhere
+   the slider stays a direct row of the raise panel. */
+.raise-slide {display:contents;}
+.raise-step,.side-head,.side-scrim,#side-open,.hero-hand {display:none;}
 
 /* Lobby-embedded tables hand their header to the parent once the shell bridge
    handshake completes; the page body then fills the frame on its own. */
