@@ -411,6 +411,7 @@
 @media (max-width: 600px) and (orientation: portrait), (max-width: 600px) and (min-height: 501px), (orientation: landscape) and (max-height: 500px) and (max-width: 1023px) {
   @container stage (max-width: 300px) {
     .table-context { height: auto; min-height: var(--hud-h); flex-wrap: wrap; padding: 4px 8px; }
+    .table-context-tools { flex: 1 1 100%; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
     .table-wrap { flex: none; height: auto; container-type: normal; }
     .table, .table.is-crowded { position: static; inset: auto; height: auto; display: flex; flex-direction: column; gap: 16px; padding: 10px 0; }
     .table .rail, .table .rail-line { display: none; }

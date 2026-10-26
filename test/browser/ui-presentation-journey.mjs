@@ -798,7 +798,8 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await publish();await browser(['wait','#btn-fold:not([disabled])']);
     assert.ok(await evaluate("[...document.querySelectorAll('#action-bar :is(#btn-fold,#btn-check,#btn-call,#btn-raise,#btn-allin-only)')].filter(n=>!n.hidden).length>=3"),'the zoomed turn has its action buttons');
     await evaluate("document.body.style.zoom='2'");
-    assert.ok(await evaluate('document.documentElement.scrollWidth<=innerWidth'));
+    const zoomWidth=await evaluate("({scroll:document.documentElement.scrollWidth,inner:innerWidth,wide:[...document.querySelectorAll('body *')].filter(n=>n.getClientRects().length&&n.getBoundingClientRect().right>innerWidth+1).slice(0,6).map(n=>(n.id||String(n.className))+':'+Math.round(n.getBoundingClientRect().right))})");
+    assert.ok(zoomWidth.scroll<=zoomWidth.inner,JSON.stringify(zoomWidth));
     // Zoomed on a phone the seats become a list and the page scrolls to everything.
     const zoomed=await evaluate(`(()=>{const plates=[...document.querySelectorAll('.seat .plate')],rects=plates.map(n=>n.getBoundingClientRect());
       const shown=n=>!!n&&n.getClientRects().length>0&&n.textContent.trim().length>0;
