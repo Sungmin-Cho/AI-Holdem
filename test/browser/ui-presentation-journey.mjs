@@ -541,7 +541,9 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await publish([],{view:{...bumped,street:'flop',seats:bumped.seats.map(s=>({...s,bet:0}))}});
     await browser(['wait','--fn','window.__motion.includes("motion-chip")']);
     await browser(['wait','400']);
-    assert.deepEqual(await evaluate("({animations:document.getAnimations().filter(a=>a.effect?.target?.closest?.('#table')).length,chips:document.querySelectorAll('.motion-chip').length})"),{animations:0,chips:0});
+    // motion.js animations (Element.animate) are what must end; a CSS animation such as
+    // the active seat's timer ring is a state indicator (shown on phones too) and stays.
+    assert.deepEqual(await evaluate("({animations:document.getAnimations().filter(a=>!(a instanceof CSSAnimation)&&a.effect?.target?.closest?.('#table')).length,chips:document.querySelectorAll('.motion-chip').length})"),{animations:0,chips:0});
     await evaluate("Element.prototype.animate=window.__animate");
     await publish([],{view});await ready();
     checks.push('motion-decoration');
