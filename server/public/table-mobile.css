@@ -109,23 +109,19 @@
   /* Expanded: the same bar becomes a sheet over the table; the buttons keep their row. */
   /* From just under the board and pot (--sheet-top, measured by app.js) to the
      bottom; only the middle row scrolls, so the buttons never leave the bottom. */
-  .action-bar.options-expanded { position: absolute; z-index: 65; left: 0; right: 0; top: var(--sheet-top, 46%); bottom: 0; height: auto; grid-template-rows: auto auto minmax(0, 1fr) auto auto; overflow: hidden; padding: 12px 8px calc(6px + var(--safe-b)); background: var(--c-surface-1); border-top: 1px solid var(--c-line-strong); border-radius: 18px 18px 0 0; box-shadow: var(--sh-3); }
+  .action-bar.options-expanded { position: absolute; z-index: 65; left: 0; right: 0; top: var(--sheet-top, 46%); bottom: 0; height: auto; grid-template-rows: auto auto auto minmax(0, 1fr) auto auto; overflow: hidden; padding: 12px 8px calc(6px + var(--safe-b)); background: var(--c-surface-1); border-top: 1px solid var(--c-line-strong); border-radius: 18px 18px 0 0; box-shadow: var(--sh-3); }
   .action-bar.options-expanded .action-summary { position: static; width: auto; height: auto; overflow: hidden; clip-path: none; grid-column: 1 / 6; grid-row: 1; color: var(--c-text); align-self: center; white-space: normal; overflow-wrap: anywhere; }
   .action-bar.options-expanded #action-options-toggle { grid-column: 6; grid-row: 1; border-color: var(--c-info); color: var(--c-info-text); }
-  .action-bar.options-expanded .decision-aid { grid-column: 1 / -1; grid-row: 2; white-space: normal; overflow-wrap: anywhere; color: var(--c-text-2); }
+  /* The sheet covers the dock's status line: a rejection or notice is repeated here. */
+  .action-bar.options-expanded .sheet-status:not([hidden]) { display: block; grid-column: 1 / -1; grid-row: 2; margin: 0; padding: 6px 10px; border: 1px solid var(--c-info); border-radius: 8px; background: var(--c-info-soft); color: var(--c-text); font-size: 12px; line-height: 1.45; }
+  .action-bar.options-expanded .decision-aid { grid-column: 1 / -1; grid-row: 3; white-space: normal; overflow-wrap: anywhere; color: var(--c-text-2); }
   /* An online deadline shares the aid's row in the sheet (the first row holds the summary). */
   .action-bar.options-expanded:has(#turn-deadline:not([hidden])) .decision-aid { grid-column: 1 / 5; }
-  .action-bar.options-expanded #turn-deadline { grid-row: 2; align-self: start; }
+  .action-bar.options-expanded #turn-deadline { grid-row: 3; align-self: start; }
   /* Sizes, then [− amount ＋], then the slider: the raise-top and raise-slide
      wrappers dissolve so their parts share one grid. */
-  .action-bar.options-expanded .raise-panel { grid-column: 1 / -1; grid-row: 3; display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-content: start; gap: 8px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+  .action-bar.options-expanded .raise-panel { grid-column: 1 / -1; grid-row: 4; display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-content: start; gap: 8px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
   .action-bar.options-expanded :is(.raise-top, .raise-slide) { display: contents; }
-  /* Too little room under the board (a short phone, an open keyboard): the whole
-     sheet scrolls and the buttons stick to its bottom edge. */
-  .action-bar.options-expanded.is-cramped { overflow-y: auto; overscroll-behavior: contain; grid-template-rows: none; grid-auto-rows: max-content; align-content: start; }
-  .action-bar.options-expanded.is-cramped .raise-panel { overflow: visible; }
-  .action-bar.options-expanded.is-cramped :is(#btn-fold, #btn-check, #btn-call, #btn-raise, #btn-allin-only) { position: sticky; bottom: 0; z-index: 1; box-shadow: 0 0 0 6px var(--c-surface-1); }
-  .action-bar.options-expanded.is-cramped #btn-fold { background: var(--c-surface-1); }
   .action-bar.options-expanded .presets { grid-column: 1 / -1; grid-row: 1; display: flex; gap: 4px; }
   .action-bar.options-expanded #raise-dec { grid-column: 1; grid-row: 2; }
   .action-bar.options-expanded .amount-field { grid-column: 2; grid-row: 2; }
@@ -133,14 +129,14 @@
   .action-bar.options-expanded .slider { grid-column: 1 / -1; grid-row: 3; }
   .action-bar.options-expanded .raise-range { grid-column: 1 / -1; grid-row: 4; }
   .action-bar.options-expanded .amount-error { grid-column: 1 / -1; grid-row: 5; margin: 0; }
-  .action-bar.options-expanded :is(#btn-fold, #btn-check, #btn-call, #btn-raise, #btn-allin-only) { grid-row: 5; }
+  .action-bar.options-expanded :is(#btn-fold, #btn-check, #btn-call, #btn-raise, #btn-allin-only) { grid-row: 6; }
   .action-bar.options-expanded .amount-field { width: 100%; height: 44px; margin: 0; justify-content: space-between; }
   .action-bar.options-expanded .amount-field { height: 48px; }
   .action-bar.options-expanded .amount-input { width: 50%; min-height: 44px; font-size: 18px; }
   .action-bar.options-expanded .raise-step { display: inline-flex; flex: none; width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; font-size: 20px; }
   .action-bar.options-expanded .slider { width: 100%; min-width: 0; min-height: 44px; margin: 0; }
   .action-bar.options-expanded .raise-range { display: block; margin: 0; font-size: 12px; text-align: left; }
-  .action-bar.options-expanded .intent-note-wrap { grid-column: 1 / -1; grid-row: 4; display: flex; }
+  .action-bar.options-expanded .intent-note-wrap { grid-column: 1 / -1; grid-row: 5; display: flex; }
   .action-bar.options-expanded .intent-note-field { display: flex; font-size: 12px; }
   .intent-tags, .action-bar.options-expanded .intent-tags, .intent-note-toggle { display: none; }
 
@@ -181,6 +177,12 @@
 @media (max-width: 600px) and (orientation: portrait), (max-width: 600px) and (min-height: 501px) {
   /* Dialogs rise from the bottom, within the thumb's reach. */
   .overlay:not(#replay-overlay) { place-items: end center; }
+  /* Too little room under the board (a short phone, an open keyboard): the whole
+     sheet scrolls and the buttons stick to its bottom edge. */
+  .action-bar.options-expanded.is-cramped { overflow-y: auto; overscroll-behavior: contain; grid-template-rows: none; grid-auto-rows: max-content; align-content: start; }
+  .action-bar.options-expanded.is-cramped .raise-panel { overflow: visible; }
+  .action-bar.options-expanded.is-cramped :is(#btn-fold, #btn-check, #btn-call, #btn-raise, #btn-allin-only) { position: sticky; bottom: 0; z-index: 1; box-shadow: 0 0 0 6px var(--c-surface-1); }
+  .action-bar.options-expanded.is-cramped #btn-fold { background: var(--c-surface-1); }
   /* ---- The table: a tall rounded felt filling the zone ---- */
   .table, .table.is-crowded {
     position: absolute; inset: 6px 6px 4px; width: auto; height: auto; max-height: none; aspect-ratio: auto; margin: 0;
@@ -372,16 +374,23 @@
   .action-bar .act-group .btn { padding: 0 4px; font-size: 13px; }
   /* Expanded: the rail itself holds the sheet (the table stays in view, so no
      summary row); only the amount panel scrolls. */
-  .action-bar.options-expanded { position: static; height: 100%; min-height: 0; top: auto; padding: 0; border: 0; border-radius: 0; box-shadow: none; background: none; grid-template-rows: auto minmax(0, 1fr) auto auto auto; }
+  .action-bar.options-expanded { position: static; height: 100%; min-height: 0; top: auto; padding: 0; border: 0; border-radius: 0; box-shadow: none; background: none; grid-template-rows: auto auto minmax(0, 1fr) auto auto auto; }
   .action-bar.options-expanded .action-summary { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  .action-bar.options-expanded .decision-aid { grid-row: 1; -webkit-line-clamp: 2; line-clamp: 2; }
-  .action-bar.options-expanded .raise-panel { grid-row: 2; }
+  .action-bar.options-expanded .sheet-status:not([hidden]) { grid-row: 1; }
+  .action-bar.options-expanded .decision-aid { grid-row: 2; -webkit-line-clamp: 2; line-clamp: 2; }
+  .action-bar.options-expanded #turn-deadline { grid-column: 5 / -1; grid-row: 2; }
+  .action-bar.options-expanded .raise-panel { grid-row: 3; }
   .action-bar.options-expanded .presets { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .action-bar.options-expanded .intent-note-wrap { grid-row: 3; }
-  .action-bar.options-expanded #action-options-toggle { grid-column: 1 / 3; grid-row: 4; }
-  .action-bar.options-expanded #btn-fold { grid-row: 4; }
-  .action-bar.options-expanded :is(#btn-check, #btn-call) { grid-row: 4; }
-  .action-bar.options-expanded :is(#btn-raise, #btn-allin-only) { grid-row: 5; }
+  /* The rail is narrow: the amount field takes its own row, the stepper flanks the slider. */
+  .action-bar.options-expanded .amount-field { grid-column: 1 / -1; grid-row: 2; }
+  .action-bar.options-expanded #raise-dec { grid-column: 1; grid-row: 3; }
+  .action-bar.options-expanded .slider { grid-column: 2; grid-row: 3; }
+  .action-bar.options-expanded #raise-inc { grid-column: 3; grid-row: 3; }
+  .action-bar.options-expanded .intent-note-wrap { grid-row: 4; }
+  .action-bar.options-expanded #action-options-toggle { grid-column: 1 / 3; grid-row: 5; }
+  .action-bar.options-expanded #btn-fold { grid-row: 5; }
+  .action-bar.options-expanded :is(#btn-check, #btn-call) { grid-row: 5; }
+  .action-bar.options-expanded :is(#btn-raise, #btn-allin-only) { grid-row: 6; }
 
   /* Records sheet from the right edge of the table, the rail stays usable. */
   main > .side { top: calc(var(--hud-h) + 4px); right: var(--rail-w); }

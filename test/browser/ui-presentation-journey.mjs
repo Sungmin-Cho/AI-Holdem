@@ -308,7 +308,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       const buttons=[...a.querySelectorAll('button'),...document.querySelectorAll('.table-context button,.table-context select')].filter(vis);
       const pressable=['#btn-fold',document.querySelector('#btn-check').hidden?'#btn-call':'#btn-check','#btn-raise'].map(sel=>{const b=document.querySelector(sel),q=b.getBoundingClientRect(),h=document.elementFromPoint(q.left+q.width/2,q.top+q.height/2);return !!h&&b.contains(h);});
       return {hidden:a.hidden,compact:matchMedia(${JSON.stringify(COMPACT_QUERY)}).matches,top:r.top,bottom:r.bottom,height:innerHeight,scrollY:document.documentElement.scrollHeight-innerHeight,scrollX:document.documentElement.scrollWidth-innerWidth,
-        clear:plates.every(p=>!hit(p,r)),controls:buttons.every(n=>n.getBoundingClientRect().height>=44),pressable,table:JSON.stringify(document.querySelector('.table').getBoundingClientRect())};})()`;
+        clear:plates.every(p=>!hit(p,r)),controls:buttons.every(n=>n.getBoundingClientRect().height>=44)&&[...a.querySelectorAll('input,select'),...document.querySelectorAll('.table-context select')].filter(vis).every(n=>{const q=n.getBoundingClientRect();return q.width>=44&&q.height>=44;}),pressable,table:JSON.stringify(document.querySelector('.table').getBoundingClientRect())};})()`;
     const phoneTables={};
     for(const [width,height] of [[390,667],[360,640],[390,844]]) {
       await browser(['set','viewport',String(width),String(height)]);await browser(['snapshot','-i']);
@@ -416,7 +416,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       const a=document.querySelector('#action-bar'),r=a.getBoundingClientRect(),s=document.querySelector('#action-summary'),sr=s.getBoundingClientRect();
       const press=n=>{const q=n.getBoundingClientRect(),h=document.elementFromPoint(q.left+q.width/2,q.top+q.height/2);return !!h&&n.contains(h);};
       return {open:a.classList.contains('options-expanded'),inside:r.top>=0&&r.bottom<=innerHeight+1,covered:[...document.querySelectorAll('#board .card, #pots')].filter(vis).filter(n=>hit(n.getBoundingClientRect(),r)).map(n=>n.id||n.className),
-        summary:s.textContent,summaryShown:sr.width>40&&sr.height>8&&sr.top>=r.top-1&&sr.bottom<=r.bottom+1,controls:[...a.querySelectorAll('button')].filter(vis).every(n=>n.getBoundingClientRect().height>=44),
+        summary:s.textContent,summaryShown:sr.width>40&&sr.height>8&&sr.top>=r.top-1&&sr.bottom<=r.bottom+1,controls:[...a.querySelectorAll('button')].filter(vis).every(n=>n.getBoundingClientRect().height>=44)&&[...a.querySelectorAll('input,select')].filter(vis).every(n=>{const q=n.getBoundingClientRect();return q.width>=44&&q.height>=44;}),
         pressable:['#btn-fold','#btn-raise','#raise-dec','#raise-inc','#action-options-toggle'].map(sel=>press(document.querySelector(sel))),table:JSON.stringify(document.querySelector('.table').getBoundingClientRect())};})()`;
     const raiseSheet=await evaluate(SHEET_SCRIPT);
     const sheetHero=view.seats.find(seat=>seat.playerId==='user');
@@ -762,6 +762,11 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       await browser(['select','#display-unit',unit]);
       assert.ok(await evaluate('document.documentElement.scrollWidth<=innerWidth'));
     }
+    // A turn of the viewer's, so the zoomed check below also reaches real action buttons.
+    const largeView=view;
+    view={...ownView,legal:{...ownView.legal,decisionId:`${ownView.legal.decisionId}-zoom`},seats:ownView.seats.map(s=>({...s,name:'매우 긴 플레이어 이름 접근성 확인',stack:9007199254740991}))};
+    await publish();await browser(['wait','#btn-fold:not([disabled])']);
+    assert.ok(await evaluate("[...document.querySelectorAll('#action-bar :is(#btn-fold,#btn-check,#btn-call,#btn-raise,#btn-allin-only)')].filter(n=>!n.hidden).length>=3"),'the zoomed turn has its action buttons');
     await evaluate("document.body.style.zoom='2'");
     assert.ok(await evaluate('document.documentElement.scrollWidth<=innerWidth'));
     // Zoomed on a phone the seats become a list and the page scrolls to everything.
@@ -772,6 +777,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       scrollTo(0,0);
       return {names:plates.every(p=>shown(p.querySelector('.plate-name'))),stacks:[...document.querySelectorAll('.seat:not(.is-out) .plate')].every(p=>shown(p.querySelector('.plate-stack'))),overlap:rects.some((a,i)=>rects.slice(i+1).some(b=>a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1)),reach,actions};})()`);
     assert.deepEqual(zoomed,{names:true,stacks:true,overlap:false,reach:true,actions:true},JSON.stringify(zoomed));
+    view=largeView;
     await browser(['screenshot',path.join(outDir,'large-values-zoom.png')]);
     await evaluate("document.body.style.zoom='1'");checks.push('large-values');
     let settlement=createGame({aiCount:2,startStack:100});settlement.button=2;settlement.handNo=2;

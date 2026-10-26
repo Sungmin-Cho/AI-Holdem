@@ -202,10 +202,23 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     await fixture.rejectReceivedAction(rejected);
     await waitForExpression(`document.querySelector('#action-status').textContent.includes('거부')
       && !document.querySelector('#btn-fold').disabled`, 'authoritative action rejection');
+    // A rejection reopens input, so a phone may adjust the correction: the raise
+    // sheet opens and repeats the rejection at its top (it covers the dock's line).
+    await setViewport(390, 844);
+    const phoneAdjust = await evaluate(`(() => { const t = document.querySelector('#action-options-toggle');
+      if (t.disabled || getComputedStyle(t).display === 'none') return { opened: false };
+      t.click(); const shown = (n) => !!n && !n.hidden && n.getClientRects().length > 0 && getComputedStyle(n).display !== 'none';
+      const mirror = document.querySelector('#sheet-status');
+      const out = { opened: document.querySelector('#action-bar').classList.contains('options-expanded'),
+        status: shown(mirror) && mirror.textContent.includes('거부'), memo: shown(document.querySelector('#intent-note')) };
+      t.click(); return out; })()`);
+    await setViewport(1280, 900);
+    await browser(['wait', '#btn-fold:not([disabled])']);
     await browser(['click', '#btn-fold']);
     const correctedStatus = await waitFor(fixture.actionStatus,
       (value) => value?.phase === 'accepted' && value.requestId !== rejected.requestId, 'corrected action receipt');
-    check('illegal-action-correction', correctedStatus.requestId !== rejected.requestId);
+    check('illegal-action-correction', correctedStatus.requestId !== rejected.requestId
+      && phoneAdjust.opened && phoneAdjust.status && phoneAdjust.memo, { phoneAdjust });
     const corrected = await fixture.receiveAction();
     await fixture.applyReceivedAction(corrected);
     await fixture.finishHandAndPublishTraining();

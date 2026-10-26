@@ -1545,7 +1545,7 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
    records sheet's header, scrim and opener, and the hand-strength chip. Elsewhere
    the slider stays a direct row of the raise panel. */
 .raise-slide {display:contents;}
-.raise-step,.side-head,.side-scrim,#side-open,.hero-hand {display:none;}
+.raise-step,.side-head,.side-scrim,#side-open,.hero-hand,.sheet-status {display:none;}
 
 /* Lobby-embedded tables hand their header to the parent once the shell bridge
    handshake completes; the page body then fills the frame on its own. */

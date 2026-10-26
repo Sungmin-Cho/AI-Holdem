@@ -2157,20 +2157,28 @@ $('intent-note-toggle').addEventListener('click', () => {
 // The phone raise sheet (table-mobile.css): the action bar itself, lifted over the
 // table from just under the board and pot (measured, so it never covers them) to
 // the bottom. It and the records sheet are never open together.
-let actionRoutine = false;
+let actionEditable = false;
+let sheetStatusText = '';
+function paintSheetStatus() {
+  const mirror = $('sheet-status');
+  mirror.textContent = sheetStatusText;
+  mirror.hidden = !(sheetStatusText && compactLayout() && $('action-bar').classList.contains('options-expanded'));
+}
 function setOptionsExpanded(expanded) {
   const bar = $('action-bar');
-  const next = Boolean(expanded) && (actionRoutine || !compactLayout());
+  const next = Boolean(expanded) && (actionEditable || !compactLayout());
   if (bar.classList.contains('options-expanded') !== next) {
     bar.classList.toggle('options-expanded', next);
     $('action-options-toggle').setAttribute('aria-expanded', String(next));
   }
   if (next) setSideOpen(false, { focus: false });
   placeSheet();
+  paintSheetStatus();
 }
 function placeSheet() {
   const bar = $('action-bar');
-  if (!bar.classList.contains('options-expanded') || !compactLayout()) { bar.style.removeProperty('--sheet-top'); bar.classList.remove('is-cramped'); return; }
+  // Only a lifted sheet (a phone held upright) is placed; sideways it stays in the rail.
+  if (!bar.classList.contains('options-expanded') || !compactLayout() || getComputedStyle(bar).position !== 'absolute') { bar.style.removeProperty('--sheet-top'); bar.classList.remove('is-cramped'); return; }
   const stage = document.querySelector('.stage').getBoundingClientRect();
   const bottoms = [...document.querySelectorAll('#board .card, #pots')].filter((node) => node.getClientRects().length)
     .map((node) => node.getBoundingClientRect().bottom);
@@ -2264,13 +2272,16 @@ async function initializeController() {
       // A plain "your turn" line: the phone dock lets its buttons say it (table-mobile.css);
       // sending, recovery and notices always show.
       const routine = state.phase === 'idle' && Boolean(state.decisionId) && !state.disabled && !$('action-notice')?.textContent && $('action-retry').hidden && $('action-reconcile').hidden;
-      actionRoutine = routine;
       $('action-status').closest('.action-feedback').classList.toggle('is-routine', routine);
-      // Sending, recovery and notices live in the dock's first line: a lifted
-      // raise sheet would cover them, so it folds back and stays shut until the
-      // next ordinary turn (setOptionsExpanded refuses, the button is disabled).
-      $('action-options-toggle').disabled = !routine;
-      if (!routine && compactLayout()) setOptionsExpanded(false);
+      // While a request is in flight or unresolved (the recovery buttons live in the
+      // dock's first line) the lifted raise sheet folds and stays shut. Once input is
+      // open again (idle, or a rejection to correct) it may open; it then repeats the
+      // status and notice at its top, since it covers the dock.
+      actionEditable = !state.disabled && Boolean(state.decisionId);
+      $('action-options-toggle').disabled = !actionEditable;
+      if (!actionEditable && compactLayout()) setOptionsExpanded(false);
+      sheetStatusText = [routine ? '' : $('action-status').textContent, $('action-notice')?.textContent ?? ''].filter(Boolean).join(' · ');
+      paintSheetStatus();
       paintActionBar(ui.view);
     },
   });
