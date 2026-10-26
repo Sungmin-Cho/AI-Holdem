@@ -11,11 +11,11 @@ import {userView} from '../../engine/views.js';
 import {fixedDeck} from '../helpers/fixtures.js';
 import {handRecordFixture,writeSecurityFixtures,defaultPlayers} from '../helpers/security-fixtures.js';
 import {parseCard,cardLabel} from '../../server/public/card-render.js';
-import {formatSignedAmount} from '../../server/public/chip-format.js';
+import {formatAmount,formatSignedAmount} from '../../server/public/chip-format.js';
 import {formatBbInput} from '../../server/public/amount-editor.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','help-over-replay','help-touch-targets','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-detail','last-result-recap','final-last-hand','seat-status-collapsed','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','embedded-state-matrix','state-matrix','onboarding-timed-turn','final-geometry','plate-status-row','computed-contrast','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','help-over-replay','help-touch-targets','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-detail','last-result-recap','final-last-hand','seat-status-collapsed','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','amount-text-press','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','embedded-state-matrix','state-matrix','onboarding-timed-turn','final-geometry','plate-status-row','computed-contrast','short-viewport','mobile-action-bar-sticky','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 // The geometry matrix (design A5): every width × table size × height the gate
 // runs. The journey records what it measured and fails if that differs.
@@ -396,6 +396,51 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await click('#btn-raise');
     const action=await evaluate('window.actionBodies.map(({action,amount})=>({action,amount}))');
     assert.deepEqual(action,[{action:'raise',amount:view.legal.maxRaiseTo}]);checks.push('chip-payload');
+    // #329: the press on the button's amount text is what blurs the field, so that
+    // one press sends — in big blinds and in chips. An out-of-range amount still
+    // shows the correction first and sends on the second press. Each case is a
+    // fresh decision; the field keeps focus until a real mouse press at the amount
+    // text (element.click() would skip mousedown and the blur). The label is
+    // updated in place: it follows the amount and unit, and the pressed nodes stay.
+    const freshDecision=async(tag)=>{
+      view={...view,legal:{...view.legal,decisionId:`${view.legal.decisionId}-${tag}`}};await publish();await ready();
+      await evaluate('window.actionBodies=[]');
+    };
+    const sentRaises=()=>evaluate('window.actionBodies.map(({action,amount})=>({action,amount}))');
+    const buttonLabel=id=>evaluate(`(()=>{const b=document.querySelector('#${id}');return {nodes:b.childNodes.length,label:b.firstChild?.data,primary:b.querySelector('.amount-primary')?.textContent,secondary:b.querySelector('.amount-secondary')?.textContent}})()`);
+    const expectedLabel=(label,amount,unit)=>{const parts=formatAmount(amount,view.blinds[1],unit);return {nodes:2,label:`${label} `,primary:parts.primary,secondary:parts.secondary};};
+    const raiseVerb=amount=>amount>=view.legal.maxRaiseTo?'올인':'레이즈';
+    const assertLabels=async(unit,raiseTo,why)=>{
+      assert.deepEqual(await buttonLabel('btn-raise'),expectedLabel(raiseVerb(raiseTo),raiseTo,unit),why);
+      if(!view.legal.canCheck)assert.deepEqual(await buttonLabel('btn-call'),expectedLabel('콜',view.legal.callAmount,unit),why);
+    };
+    const fillAmount=async(text)=>{await browser(['fill','#raise-amount',text]);assert.equal(await evaluate('document.activeElement?.id'),'raise-amount');};
+    const pressAmountText=async()=>{
+      const at=await evaluate("(()=>{const n=document.querySelector('#btn-raise .amount-primary');n.scrollIntoView({block:'center'});const r=n.getBoundingClientRect(),x=Math.round(r.left+r.width/2),y=Math.round(r.top+r.height/2);window.__raisePair=n.parentElement;return {x,y,inButton:!!document.elementFromPoint(x,y)?.closest('#btn-raise')};})()");
+      assert.equal(at.inButton,true,JSON.stringify(at));
+      await browser(['mouse','move',String(at.x),String(at.y)]);await browser(['mouse','down']);await browser(['mouse','up']);
+    };
+    const keptPressedNodes=()=>evaluate("document.querySelector('#btn-raise .amount-pair')===window.__raisePair");
+    const typedTo=Math.min(view.legal.minRaiseTo+view.blinds[1],view.legal.maxRaiseTo);
+    for(const unit of ['chips','bb']) {
+      await freshDecision(`amount-text-${unit}`);await browser(['select','#display-unit',unit]);
+      await assertLabels(unit,Number(await evaluate("document.querySelector('#raise-slider').value")),`${unit}: new decision`);
+      await fillAmount(unit==='bb'?bbText(typedTo):String(typedTo));
+      await assertLabels(unit,typedTo,`${unit}: typed amount`);
+      await pressAmountText();
+      assert.deepEqual(await sentRaises(),[{action:'raise',amount:typedTo}],`${unit}: one press on the amount text sends once`);
+      assert.equal(await keptPressedNodes(),true,`${unit}: the press keeps the amount nodes`);
+    }
+    await freshDecision('amount-text-clamp');
+    await fillAmount('9999999');
+    await pressAmountText();
+    assert.deepEqual(await sentRaises(),[],'out of range: the first press only confirms the correction');
+    assert.match(await evaluate("document.querySelector('#amount-error').textContent"),/다시 눌러 제출/);
+    assert.equal(await keptPressedNodes(),true,'out of range: the press keeps the amount nodes');
+    await assertLabels('bb',view.legal.maxRaiseTo,'out of range: corrected amount');
+    await pressAmountText();
+    assert.deepEqual(await sentRaises(),[{action:'raise',amount:view.legal.maxRaiseTo}]);
+    checks.push('amount-text-press');
     view={...view,blinds:[50,100]};
     await publish([{type:'hand_start',handNo:1,blinds:[25,50]},{type:'action',playerId:'user',action:'raise',amount:125,street:'preflop'},{type:'hand_start',handNo:2,blinds:[50,100]},{type:'action',playerId:'user',action:'raise',amount:125,street:'preflop'}],{handReplay:{handNos:[1]}});
     await click('#tab-log');

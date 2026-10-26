@@ -275,8 +275,22 @@ function showBootError(text) {
   $('boot-error').hidden = false;
 }
 
+// In place: a press that starts on the amount text keeps its target when the
+// field's blur or a repaint relabels the button — Chrome sends no click once the
+// pressed node has left the document (#329). The first paint (index.html's plain
+// text) builds the nodes.
 function setBtnLabel(btn, label, amount) {
-  btn.replaceChildren(document.createTextNode(`${label} `), amountNode(amount, ui.view?.blinds?.[1], 'num'));
+  const bb = ui.view?.blinds?.[1];
+  const [text, pair, extra] = btn.childNodes;
+  const [primary, secondary, more] = pair?.children ?? [];
+  if (extra || more || !secondary || text?.nodeType !== Node.TEXT_NODE || !pair.classList.contains('amount-pair')) {
+    btn.replaceChildren(document.createTextNode(`${label} `), amountNode(amount, bb, 'num'));
+    return;
+  }
+  const parts = formatAmount(amount, bb, displayUnit);
+  if (text.data !== `${label} `) text.data = `${label} `;
+  if (primary.textContent !== parts.primary) primary.textContent = parts.primary;
+  if (secondary.textContent !== parts.secondary) secondary.textContent = parts.secondary;
 }
 
 // Host HUD (D13): the engine's public-observation counts, the same the AI

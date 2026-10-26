@@ -1257,6 +1257,8 @@ select {border:1px solid var(--c-control-border);background:var(--c-surface-2);c
 .action-summary {flex:0 0 100%;margin:0;color:var(--muted);font-size:13px;line-height:1.7;overflow-wrap:anywhere;}
 .btn,.preset,.study-entry .btn,.action-feedback .btn,.replay-open,.replay-study {min-height:44px;min-width:44px;font-size:14px;}
 .btn-raise .amount-secondary {color:var(--gold-ink);}
+/* #329: a press on a button's amount lands on the button itself. */
+.btn .amount-pair {pointer-events:none;}
 .raise-panel {flex:1 1 300px;min-width:0;}
 .raise-top {flex-wrap:wrap;gap:10px;}
 .amount-field {min-width:0;max-width:100%;border-color:var(--c-control-border);}
