@@ -164,6 +164,9 @@
   .side-scrim { display: block; position: absolute; z-index: 55; left: 0; right: 0; top: var(--hud-h); bottom: calc(var(--dock-h) + var(--safe-b)); background: var(--c-scrim); }
   .side-head .btn { min-height: 44px; }
 
+  /* The viewer's own countdown is in the dock (#turn-deadline); the plate stays narrow. */
+  .table .seat.is-hero .plate-deadline { display: none; }
+
   /* Dialogs stand above the records sheet. */
   .overlay { z-index: 70; padding: 12px 12px calc(12px + var(--safe-b)); }
   .review-card { padding: 18px 16px 20px; max-height: calc(100dvh - 24px - var(--safe-b)); }
@@ -321,6 +324,9 @@
   .table .plate .amount-secondary { display: none; }
   .table .plate-status { flex: 0 1 auto; width: auto; min-width: 0; max-width: 76px; margin: 0; }
   .table .plate-status:empty { display: none; }
+  /* An opponent's online countdown takes a second line in the row-shaped plate. */
+  .table .plate:has(.plate-deadline:not([hidden])) { flex-wrap: wrap; }
+  .table .plate .plate-deadline { flex: 1 0 100%; text-align: center; line-height: 14px; }
   .table .plate .plate-tag, .table .plate .plate-action { width: auto; padding: 0 3px; font-size: 12px; line-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .table .dealer-btn { top: -7px; left: -7px; right: auto; width: 18px; height: 18px; font-size: 12px; z-index: 3; }
   .table .dealer-btn.is-sb, .table .dealer-btn.is-bb { width: auto; min-width: 22px; }
