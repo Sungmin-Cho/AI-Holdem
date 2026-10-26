@@ -344,7 +344,18 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       assert.ok(!rail.hidden&&rail.compact&&rail.top>=0&&rail.bottom<=rail.height+1&&rail.scrollY<=1&&rail.scrollX<=1&&rail.clear&&rail.controls&&rail.pressable.every(Boolean),JSON.stringify({width,height,rail}));
       await evaluate("document.querySelector('#action-options-toggle').click()");
       const open=await evaluate(DOCK_SCRIPT);
-      assert.ok(open.bottom<=open.height+1&&open.scrollY<=1&&open.pressable.every(Boolean)&&open.table===rail.table,JSON.stringify({width,height,open}));
+      assert.ok(open.scrollY<=1&&open.scrollX<=1&&open.controls&&open.pressable.every(Boolean)&&open.table===rail.table,JSON.stringify({width,height,open}));
+      // A rejection's status and notice stay in the rail above the sheet: the rail
+      // scrolls to the amount field and the memo, and the buttons stay pressable.
+      const crowded=await evaluate(`(()=>{const status=document.querySelector('#action-status'),fb=status.closest('.action-feedback'),notice=document.querySelector('#action-notice'),area=document.querySelector('.action-area');
+        const saved={text:status.textContent,routine:fb.classList.contains('is-routine'),notice:notice.textContent,hidden:notice.hidden};
+        fb.classList.remove('is-routine');status.textContent='액션이 거부됐습니다. 현재 가능한 액션을 다시 고르세요.';notice.textContent='엔진이 이 액션을 받지 않았습니다 · '.repeat(3);notice.hidden=false;
+        const press=n=>{n.scrollIntoView({block:'center'});const q=n.getBoundingClientRect(),h=document.elementFromPoint(q.left+q.width/2,q.top+q.height/2);return !!h&&n.contains(h);};
+        const reach=['#raise-amount','#intent-note','#btn-fold','#btn-raise'].map(sel=>press(document.querySelector(sel)));
+        const panel=document.querySelector('.raise-panel').getBoundingClientRect().height;
+        status.textContent=saved.text;fb.classList.toggle('is-routine',saved.routine);notice.textContent=saved.notice;notice.hidden=saved.hidden;area.scrollTop=0;
+        return {reach,panel};})()`);
+      assert.ok(crowded.reach.every(Boolean)&&crowded.panel>=120,JSON.stringify({width,height,crowded}));
       await browser(['screenshot',path.join(outDir,`mobile-landscape-sheet-${width}x${height}.png`)]);
       await evaluate("document.querySelector('#action-options-toggle').click()");
     }
@@ -358,6 +369,13 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     }
     await evaluate("document.querySelector('#side-open').click()");
     assert.equal(await evaluate("document.querySelector('.table-wrap').inert"),true);
+    // A sheet left open across the boundary is re-placed on the way back.
+    await evaluate("document.querySelector('#side-close').click();document.querySelector('#action-options-toggle').click();true");
+    await browser(['set','viewport','601','900']);await publish();
+    await browser(['set','viewport','390','667']);await evaluate("dispatchEvent(new Event('resize'));true");
+    const replaced=await evaluate("(()=>{const bar=document.querySelector('#action-bar'),stage=document.querySelector('.stage').getBoundingClientRect(),bottom=Math.max(...[...document.querySelectorAll('#board .card, #pots')].map(n=>n.getBoundingClientRect().bottom));return {open:bar.classList.contains('options-expanded'),top:Math.round(bar.getBoundingClientRect().top-stage.top),want:Math.round(bottom-stage.top+8)};})()");
+    assert.ok(replaced.open&&Math.abs(replaced.top-replaced.want)<=1,JSON.stringify(replaced));
+    await evaluate("document.querySelector('#action-options-toggle').click();document.querySelector('#side-open').click();true");
     await browser(['set','viewport','601','900']);
     // The media query's change event comes with the next rendered frame (late in a
     // hidden window); any repaint settles it too.

@@ -1689,7 +1689,7 @@ function paintFrame() {
   paintThinking(view);
   paintPlateThinking();
   paintActionBar(view);
-  placeSheet();
+  settleSheet();
   // Off the phone layout the records sheet does not exist; a hidden page gets the
   // media query's change event late, so each paint also settles it.
   if (sideOpen && !compactLayout()) setSideOpen(false, { focus: false });
@@ -2070,7 +2070,7 @@ document.addEventListener('keydown', (ev) => {
   ev.preventDefault();
   setSideOpen(false);
 });
-onCompactChange((compact) => { if (!compact) setSideOpen(false, { focus: false }); });
+onCompactChange((compact) => { if (!compact) setSideOpen(false, { focus: false }); settleSheet(); });
 document.querySelector('.tabs').addEventListener('keydown',ev=>{
   const tabs=['log','coach','training','participants'].filter(name=>$(`tab-${name}`)&&!$(`tab-${name}`).hidden);let index=tabs.indexOf(selectedTab);
   if(ev.key==='ArrowRight')index=(index+1)%tabs.length;
@@ -2189,7 +2189,14 @@ function placeSheet() {
   bar.style.setProperty('--sheet-top', `${Math.round(top)}px`);
   bar.classList.toggle('is-cramped', stage.height - top < 320);
 }
-globalThis.addEventListener?.('resize', placeSheet);
+// Entering the phone layout (or resizing) with the sheet open re-applies its rules:
+// a locked turn folds it, the status mirror follows, and the sheet is re-placed.
+function settleSheet() {
+  if (compactLayout() && !actionEditable) setOptionsExpanded(false);
+  placeSheet();
+  paintSheetStatus();
+}
+globalThis.addEventListener?.('resize', settleSheet);
 $('action-options-toggle').addEventListener('click', () => {
   const expanded = !$('action-bar').classList.contains('options-expanded');
   setOptionsExpanded(expanded);
