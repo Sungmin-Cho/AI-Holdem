@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decisionAid, decisionAidText } from '../server/public/decision-aid.js';
+import { decisionAid, decisionAidText, heroHandLabel } from '../server/public/decision-aid.js';
 import { createGame, startHand, applyAction, legalFor } from '../engine/hand.js';
 import { snapshotDecision } from '../engine/decision.js';
 import { viewFor } from '../engine/views.js';
@@ -79,4 +79,23 @@ test('the aid states the same required equity as the engine fact card, or none w
   // An ordinary price: the same number as the engine.
   const plain = play([1000, 1000, 1000], [['raise', 150], ['fold']]);
   assert.equal(Number.parseFloat(plain.need), plain.facts.requiredEquity);
+});
+
+test('hand-strength chip names the hole cards, then the made hand and draws', () => {
+  assert.equal(heroHandLabel(['Kh', 'Ah']), 'A K 수딧');
+  assert.equal(heroHandLabel(['8c', '8d']), '포켓 8');
+  assert.equal(heroHandLabel(['9d', 'Ts']), '10 9 오프수트');
+  assert.equal(heroHandLabel(['Ah', 'Kh'], ['Ad', '7c', '2s']), '원페어 · 탑페어');
+  assert.equal(heroHandLabel(['Ah', 'Kh'], ['Qh', '7h', '2s']), '하이 카드 · 플러시 드로');
+  assert.equal(heroHandLabel(['9h', '8d'], ['7c', '6s', '2h']), '하이 카드 · 양방 드로');
+  assert.equal(heroHandLabel(['Ah', 'Kh'], ['Qh', 'Jh', '2h']), '플러시');
+  // Straight draws by shape: two ends, two inside gaps, one inside gap.
+  assert.equal(heroHandLabel(['3s', '9d'], ['5c', '6h', '7d']), '하이 카드 · 더블 거트샷');
+  assert.equal(heroHandLabel(['9h', '8d'], ['6c', '5s', '2h']), '하이 카드 · 거트샷');
+  // Unknown or malformed cards and a partial board say nothing.
+  assert.equal(heroHandLabel([]), '');
+  assert.equal(heroHandLabel(['Ah', 'Kx']), '');
+  assert.equal(heroHandLabel(['Ah', 'Kh'], ['Qh']), '');
+  assert.equal(heroHandLabel(null, ['Qh', 'Jh', '2h']), '');
+  assert.doesNotMatch(heroHandLabel(['Ah', 'Kh'], ['Ad', '7c', '2s']), /추천|콜하세요|폴드|정답|GTO|%/);
 });

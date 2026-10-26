@@ -64,3 +64,28 @@ export function decisionAidText(aid) {
   if (!aid) return '';
   return aid.items.map((item) => `${item.label} ${item.value}`).join(' · ');
 }
+
+const RANK_ORDER = '23456789TJQKA';
+const rankText = (rank) => (rank === 'T' ? '10' : rank);
+
+// The phone's hand-strength chip beside the viewer's cards: what the two hole
+// cards are before the flop ("A K 수딧", "포켓 8"), then what they make with the
+// board and what they draw to. Facts only, from the viewer's own cards.
+export function heroHandLabel(myCards, board = []) {
+  const cards = Array.isArray(myCards) ? myCards : [];
+  const shown = Array.isArray(board) ? board : [];
+  if (cards.length !== 2 || !cards.every((code) => typeof code === 'string' && /^[2-9TJQKA][shdc]$/.test(code))) return '';
+  if (shown.length === 0) {
+    const [a, b] = [...cards].sort((x, y) => RANK_ORDER.indexOf(y[0]) - RANK_ORDER.indexOf(x[0]));
+    if (a[0] === b[0]) return `포켓 ${rankText(a[0])}`;
+    return `${rankText(a[0])} ${rankText(b[0])} ${a[1] === b[1] ? '수딧' : '오프수트'}`;
+  }
+  if (shown.length < 3) return '';
+  try {
+    const made = describeMadeHand(cards, shown).label;
+    const draws = drawsOf(cards, shown);
+    const draw = draws.outs ? [draws.flushDraw ? '플러시 드로' : null, draws.straightDraw === 'open-ended' ? '양방 드로'
+      : draws.straightDraw === 'double-gutshot' ? '더블 거트샷' : draws.straightDraw ? '거트샷' : null].filter(Boolean).join(' + ') : '';
+    return draw ? `${made} · ${draw}` : made;
+  } catch { return ''; }
+}

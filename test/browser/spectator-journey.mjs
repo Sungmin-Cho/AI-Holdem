@@ -1,4 +1,4 @@
-import { finishJourney, selfTestJourney, cleanupJourney } from './journey-exit.mjs';
+import { finishJourney, selfTestJourney, cleanupJourney, EMBED_FIT_SCRIPT, assertEmbedFit } from './journey-exit.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -117,6 +117,9 @@ export async function runSpectatorJourney(outDir) {
       await wait(()=>evaluate(departed,"!document.querySelector('#join-form').hidden"),'eliminated guest leaves');
     }
     await browsers.observer(['set','viewport','390','844']);
+    // The watcher's phone: the same app shell — no page scroll, no plate over another.
+    await wait(async()=>(await evaluate('observer',EMBED_FIT_SCRIPT))!==null,'spectator table at 390x844');
+    assertEmbedFit(await evaluate('observer',EMBED_FIT_SCRIPT),'spectator 390x844');
     await browsers.observer(['screenshot',path.join(outDir,'spectator-mobile.png')]);
     await resume();await end();
     await wait(()=>evaluate('observer',"document.querySelector('#final').hidden===false"),'observer results');

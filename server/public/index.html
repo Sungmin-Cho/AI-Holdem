@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <title>AI 홀덤</title>
   <script src="/theme-boot.js"></script>
   <link rel="preload" href="/font-pretendard-400.woff2" as="font" type="font/woff2" crossorigin>
@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/ui-base.css">
   <link rel="stylesheet" href="/table.css">
   <link rel="stylesheet" href="/replay.css">
+  <link rel="stylesheet" href="/table-mobile.css">
 </head>
 <body>
   <header class="topbar">
@@ -33,7 +34,7 @@
 
   <main>
     <section class="stage">
-      <div class="table-context"><span id="participants-summary">참가자 —</span><span class="table-context-tools"><button type="button" id="last-result-open" class="btn btn-ghost last-result-open" aria-haspopup="dialog" disabled>직전 결과</button><label>표시 단위 <select id="display-unit"><option value="bb">BB 중심</option><option value="chips">칩 중심</option></select></label></span></div>
+      <div class="table-context"><span id="participants-summary">참가자 —</span><span class="table-context-tools"><button type="button" id="last-result-open" class="btn btn-ghost last-result-open" aria-haspopup="dialog" disabled>직전 결과</button><label><span class="unit-label">표시 단위</span> <select id="display-unit"><option value="bb">BB 중심</option><option value="chips">칩 중심</option></select></label><button type="button" id="side-open" class="btn btn-ghost side-open" aria-expanded="false" aria-controls="side-panel">기록<span id="unread-total" class="unread" hidden></span></button></span></div>
       <p id="turn-announcement" class="sr-only" role="status" aria-live="polite"></p>
       <p id="seat-announcement" class="sr-only" role="status"></p>
       <p id="spectator-banner" class="spectator-banner" role="status" hidden></p>
@@ -66,7 +67,8 @@
         <div id="action-bar" class="action-bar" hidden>
           <p id="action-summary" class="action-summary"></p>
           <p id="decision-aid" class="decision-aid num" aria-live="polite" hidden></p>
-          <button type="button" id="action-options-toggle" class="btn btn-ghost" aria-expanded="false" aria-controls="raise-panel intent-note">금액·메모</button>
+          <p id="sheet-status" class="sheet-status" aria-hidden="true" hidden></p>
+          <button type="button" id="action-options-toggle" class="btn btn-ghost" aria-expanded="false" aria-controls="raise-panel intent-note" aria-label="금액·메모 조정">조정</button>
           <div class="act-group">
             <button type="button" id="btn-fold" class="btn btn-fold">폴드</button>
             <button type="button" id="btn-check" class="btn btn-neutral">체크</button>
@@ -92,7 +94,11 @@
                        autocomplete="off" spellcheck="false" aria-label="이번 스트리트 레이즈 총액 직접 입력 (칩)" aria-describedby="raise-range amount-error">
               </div>
             </div>
+            <div class="raise-slide">
+              <button type="button" id="raise-dec" class="btn btn-ghost raise-step" aria-label="금액 줄이기">−</button>
             <input id="raise-slider" class="slider" type="range" min="0" max="0" step="1" value="0" aria-label="레이즈 금액 슬라이더">
+              <button type="button" id="raise-inc" class="btn btn-ghost raise-step" aria-label="금액 늘리기">＋</button>
+            </div>
             <p id="raise-range" class="raise-range num"></p>
             <p id="amount-error" class="amount-error" role="status"></p>
           </div>
@@ -118,7 +124,9 @@
       </div>
     </section>
 
-    <aside class="side">
+    <div id="side-scrim" class="side-scrim" hidden></div>
+    <aside class="side" id="side-panel" aria-label="기록">
+      <div class="side-head"><h2 class="side-title">기록</h2><button type="button" id="side-close" class="btn btn-ghost">닫기</button></div>
       <div class="study-entry"><button id="review-reopen" class="btn btn-ghost" type="button" hidden>결과 다시 보기</button></div>
       <p id="coach-toast" class="coach-toast" role="status" hidden><span id="coach-toast-text"></span><button type="button" id="coach-toast-open" class="btn btn-ghost">코치 보기</button></p>
       <div class="tabs" role="tablist">

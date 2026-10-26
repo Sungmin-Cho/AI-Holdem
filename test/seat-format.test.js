@@ -35,8 +35,20 @@ test('mobile slots preserve every seat including hero, 2 through 9 players', () 
   for(let n=2;n<=9;n++){
     const slots=Array.from({length:n},(_,i)=>mobileSeatSlot(i,n));
     assert.equal(new Set(slots.map(p=>`${p.x},${p.y}`)).size,n);
-    assert.deepEqual(slots[0],{x:50,y:100});
+    assert.equal(new Set(slots.map(p=>p.slot)).size,n);
+    assert.deepEqual(slots[0],{x:50,y:100,slot:'H'});
   }
+  // The scrolling tablet layout reads these coordinates (table.css, 601–800px
+  // stage): the phone redesign must not move them.
+  const coords=n=>Array.from({length:n},(_,i)=>{const {x,y}=mobileSeatSlot(i,n);return `${x},${y}`;}).join(' ');
+  assert.equal(coords(9),'50,100 0,78 0,54 0,29 28,4 72,4 100,29 100,54 100,78');
+  assert.equal(coords(8),'50,100 0,78 0,54 0,29 50,4 100,29 100,54 100,78');
+  assert.equal(coords(6),'50,100 0,78 0,29 50,4 100,29 100,78');
+  // The phone layout (table-mobile.css) places seats by these names.
+  const names=n=>Array.from({length:n},(_,i)=>mobileSeatSlot(i,n).slot).join(' ');
+  assert.equal(names(2),'H TC');
+  assert.equal(names(6),'H L3 L1 TC R1 R3');
+  assert.equal(names(9),'H L3 L2 L1 T1 T2 R1 R2 R3');
 });
 
 test('blind markers follow actual posts, including heads-up, busted seats and short all-ins', async () => {

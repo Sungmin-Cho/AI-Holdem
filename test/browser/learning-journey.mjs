@@ -202,10 +202,23 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     await fixture.rejectReceivedAction(rejected);
     await waitForExpression(`document.querySelector('#action-status').textContent.includes('거부')
       && !document.querySelector('#btn-fold').disabled`, 'authoritative action rejection');
+    // A rejection reopens input, so a phone may adjust the correction: the raise
+    // sheet opens and repeats the rejection at its top (it covers the dock's line).
+    await setViewport(390, 844);
+    const phoneAdjust = await evaluate(`(() => { const t = document.querySelector('#action-options-toggle');
+      if (t.disabled || getComputedStyle(t).display === 'none') return { opened: false };
+      t.click(); const shown = (n) => !!n && !n.hidden && n.getClientRects().length > 0 && getComputedStyle(n).display !== 'none';
+      const mirror = document.querySelector('#sheet-status');
+      const out = { opened: document.querySelector('#action-bar').classList.contains('options-expanded'),
+        status: shown(mirror) && mirror.textContent.includes('거부'), memo: shown(document.querySelector('#intent-note')) };
+      t.click(); return out; })()`);
+    await setViewport(1280, 900);
+    await browser(['wait', '#btn-fold:not([disabled])']);
     await browser(['click', '#btn-fold']);
     const correctedStatus = await waitFor(fixture.actionStatus,
       (value) => value?.phase === 'accepted' && value.requestId !== rejected.requestId, 'corrected action receipt');
-    check('illegal-action-correction', correctedStatus.requestId !== rejected.requestId);
+    check('illegal-action-correction', correctedStatus.requestId !== rejected.requestId
+      && phoneAdjust.opened && phoneAdjust.status && phoneAdjust.memo, { phoneAdjust });
     const corrected = await fixture.receiveAction();
     await fixture.applyReceivedAction(corrected);
     await fixture.finishHandAndPublishTraining();
@@ -221,8 +234,12 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
     }
     await setViewport(390, 844);
     await waitForExpression('!document.querySelector("#unread-training").hidden', 'training unread badge');
-    const unreadMobile = await evaluate(`document.querySelector('#unread-training').textContent.length > 0
-      && document.documentElement.scrollWidth <= 390`);
+    // On a phone the panels sit in the closed records sheet: the count must show on
+    // its button, where the user can see it.
+    const unreadMobile = await evaluate(`(() => { const badge = document.querySelector('#unread-total');
+      return document.querySelector('#unread-training').textContent.length > 0 && !badge.hidden
+        && badge.getClientRects().length > 0 && getComputedStyle(badge).display !== 'none' && Number(badge.textContent) > 0
+        && document.documentElement.scrollWidth <= 390; })()`);
     await browser(['screenshot', path.join(output, 'training-unread-mobile.png')]);
     await setViewport(1280, 900);
     const unreadObserved = await evaluate('document.querySelector("#unread-training").textContent.length > 0');
@@ -295,9 +312,15 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
       normalHidden: document.querySelector('#btn-raise').hidden,
       allInHidden: document.querySelector('#btn-allin-only').hidden,
       amount: Number(document.querySelector('#btn-allin-only .amount-secondary').textContent.replaceAll(',', '').replace(' 칩', '')),
+      // The phone's adjust button stays: it opens the summary, the aid and the memo.
+      adjust: (() => { const t = document.querySelector('#action-options-toggle'); if (getComputedStyle(t).display === 'none' || t.disabled) return false;
+        t.click(); const open = document.querySelector('#action-bar').classList.contains('options-expanded');
+        const shown = (n) => !!n && n.getClientRects().length > 0 && getComputedStyle(n).display !== 'none';
+        const ok = open && shown(document.querySelector('#action-summary')) && shown(document.querySelector('#intent-note'));
+        t.click(); return ok && !document.querySelector('#action-bar').classList.contains('options-expanded'); })(),
     }))()`);
     check('short-all-in', shortLegal.minRaiseTo > shortLegal.maxRaiseTo && shortUi.normalHidden
-      && !shortUi.allInHidden && shortUi.amount === shortLegal.maxRaiseTo);
+      && !shortUi.allInHidden && shortUi.amount === shortLegal.maxRaiseTo && shortUi.adjust);
     await browser(['screenshot', path.join(output, 'short-all-in-mobile.png')]);
     const { promise: shortDelivery } = await beginDelivery(shortFixture);
     await browser(['click', '#btn-allin-only']);

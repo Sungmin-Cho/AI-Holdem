@@ -12,7 +12,8 @@ import { helpButton } from './help-panel.js';
 import { createOnboarding, PARTICIPANT_ONBOARDING_STEPS } from './onboarding.js';
 import { DISPLAY_KEYS, currentDisplaySettings, saveDisplaySetting } from './display-settings.js';
 
-import { decisionAid, decisionAidText } from './decision-aid.js';
+import { decisionAid, decisionAidText, heroHandLabel } from './decision-aid.js';
+import { compactLayout, onCompactChange } from './layout-mode.js';
 import { compareGuesses, GUESS_CHOICES, hudLine, readOpponentNotes, saveOpponentNote } from './opponent-notes.js';
 import { levelSecondsLeft, formatLevelSeconds, clampRaiseTo, snapRaiseTo, stepRaiseTo, potRaiseTo, bbRaiseTo, defaultRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
 import { createActionController, formatActionNotice } from './action-controller.js';
@@ -120,7 +121,7 @@ const onboarding = createOnboarding({
   targets: {
     seat: () => document.querySelector('.seat.is-hero .plate'),
     actions: () => $('action-bar'),
-    side: () => document.querySelector('.side .tabs'),
+    side: () => (compactLayout() ? $('side-open') : document.querySelector('.side .tabs')),
   },
 });
 const dialogs = createDialogController(document, () => {
@@ -493,9 +494,22 @@ function paintLevelLeft(view = ui.view) {
   $('level-left-unit').hidden = seconds !== null;
 }
 
+// What the viewer's own cards make with the board as drawn — during a staged
+// runout that is the street on screen, never the full board in the view.
+function paintHeroHand(boardCards) {
+  const chip = document.querySelector('.seat.is-hero .hero-hand');
+  if (!chip) return;
+  const seat = chip.closest('.seat');
+  const shown = currentDisplaySettings().aid !== 'off' && !isSpectating(ui.view) && !seat.classList.contains('is-folded');
+  const text = shown ? heroHandLabel(ui.view?.myCards, boardCards) : '';
+  chip.hidden = !text;
+  if (chip.textContent !== text) chip.textContent = text;
+}
+
 function paintBoard(view) {
   const board = $('board');
   const cards = view?.board ?? [];
+  paintHeroHand(cards);
   const signature = JSON.stringify(cards);
   if (board.dataset.cards === signature) return;
   board.dataset.cards = signature;
@@ -621,6 +635,7 @@ function paintSeats(view) {
     const mobile = mobileSeatSlot(i,n);
     node.style.setProperty('--seat-x', `${mobile.x}%`);
     node.style.setProperty('--seat-y', `${mobile.y}%`);
+    node.dataset.slot = mobile.slot;
 
     const plate = node.querySelector('.plate') ?? el('button', 'plate');
     plate.type = 'button';
@@ -656,6 +671,8 @@ function paintSeats(view) {
       statusGroup.append(el('span', 'plate-tag', state.status));
     }
     plate.append(statusGroup);
+    // The phone's hand-strength chip; paintBoard fills it from the board on screen.
+    if (isHero && !state.out) plate.append(el('span', 'hero-hand'));
     if (active) plate.append(el('span', 'plate-deadline'));
     const position = positions[seat.playerId];
     if (state.showButton || position) {
@@ -752,7 +769,7 @@ function paintHandResult(handNo = ui.handResult?.handNo) {
         const body=await response.json();
         if(!response.ok || body.skipped!==true)throw Error('SKIP_UNAVAILABLE');
       } catch { /* Both rejection and success hide this hand's skip control. */ }
-      finally {if(ui.handResult?.handNo===captured){skip.hidden=true;skipHiddenForHand=captured;if(hadFocus)$('tab-log').focus();}}
+      finally {if(ui.handResult?.handNo===captured){skip.hidden=true;skipHiddenForHand=captured;if(hadFocus)(compactLayout()?$('side-open'):$('tab-log')).focus();}}
     };
     live.append(skip);
   }
@@ -823,16 +840,21 @@ function markAmountValid(valid) {
   $('raise-amount').setAttribute('aria-invalid', String(!valid));
   const malformed = amountEditor.state.unit === 'bb' ? 'BB 숫자(소수 둘째 자리까지)와 합법 범위를 확인해 주세요.' : '칩 정수와 합법 범위를 확인해 주세요.';
   $('amount-error').textContent = !valid ? malformed : amountEditor.state.pendingCorrection ? '합법 범위로 보정했습니다. 레이즈를 눌러 금액을 확인해 주세요.' : amountEditor.state.confirmedCorrection ? `보정된 금액(${amountText(amountEditor.state.value)})을 확인했습니다. 레이즈를 다시 눌러 제출하세요.` : '';
-  if ($('amount-error').textContent && matchMedia('(max-width:600px)').matches) {
-    $('action-bar').classList.add('options-expanded');
-    $('action-options-toggle').setAttribute('aria-expanded','true');
-  }
+  if ($('amount-error').textContent && compactLayout()) setOptionsExpanded(true);
+}
+
+// The phone stepper follows the other raise controls and stops at the legal ends.
+let stepperOff = true;
+function syncStepper(legal = ui.view?.legal) {
+  $('raise-dec').disabled = stepperOff || !legal || raiseTo <= legal.minRaiseTo;
+  $('raise-inc').disabled = stepperOff || !legal || raiseTo >= legal.maxRaiseTo;
 }
 
 function setRaiseTo(value, { fromInput = false } = {}) {
   const legal = ui.view?.legal;
   if (!legal || pendingAction) return;
   raiseTo = fromInput ? amountEditor.state.value : amountEditor.choose(value, legal).value;
+  syncStepper(legal);
   $('raise-slider').value = String(raiseTo);
   setBtnLabel($('btn-raise'), raiseLabel(raiseTo), raiseTo);
   if (!fromInput) $('raise-amount').value = amountEditor.state.text;
@@ -844,6 +866,7 @@ function commitAmount() {
   const input = $('raise-amount');
   const state = amountEditor.commit(legal);
   raiseTo = state.value; input.value = state.text;
+  syncStepper(legal);
   $('raise-slider').value = String(raiseTo);
   setBtnLabel($('btn-raise'), raiseLabel(raiseTo), raiseTo);
   markAmountValid(!state.invalid);
@@ -944,6 +967,7 @@ function paintActionBar(view) {
   $('btn-raise').hidden = shortAllIn;
   const amount = $('raise-amount');
   amount.disabled = raiseOff;
+  stepperOff = raiseOff;
   amount.closest('.amount-field').classList.toggle('is-disabled', raiseOff);
   // Preflop adds the reference sizes; later streets add ⅓ and ¾ pot.
   for (const btn of $('raise-panel').querySelectorAll('[data-preset]')) {
@@ -959,6 +983,7 @@ function paintActionBar(view) {
   $('btn-allin-only').disabled = pendingAction || !legal.canRaise;
   setBtnLabel($('btn-allin-only'), '올인', legal.maxRaiseTo);
   if (!shortAllIn) syncRaisePanel(legal);
+  syncStepper(legal);
 }
 
 function logNode(item, verb, bb) {
@@ -1373,7 +1398,7 @@ function disposeReplayController() {
 
 function openStudyCard(evaluationId) {
   closeReplay();
-  selectTab('training');
+  openPanel('training');
   const card = document.querySelector(`[data-evaluation-id="${evaluationId}"]`);
   if (card?.closest('.training-excluded')) setTrainingExcludedOpen(true);
   if (card instanceof HTMLDetailsElement) card.open = true;
@@ -1664,6 +1689,10 @@ function paintFrame() {
   paintThinking(view);
   paintPlateThinking();
   paintActionBar(view);
+  settleSheet();
+  // Off the phone layout the records sheet does not exist; a hidden page gets the
+  // media query's change event late, so each paint also settles it.
+  if (sideOpen && !compactLayout()) setSideOpen(false, { focus: false });
   settleLastResult(view);
   paintHint();
   paintLog();
@@ -1784,7 +1813,7 @@ function render(m, contiguous = true) {
   if (Array.isArray(m.events) && m.events.length) ui.log.push(...m.events);
   if (Array.isArray(m.messages) && m.messages.length) ui.log.push(...m.messages);
   if (Array.isArray(m.coach) && m.coach.length) {
-    if (selectedTab !== 'coach') {
+    if (!panelInView('coach')) {
       unread.coach += m.coach.length;
       const fresh = m.coach.filter((note) => !note.unavailable && !ui.coach.some((existing) => existing.handNo === note.handNo));
       if (fresh.length) showCoachToast(fresh.at(-1).handNo);
@@ -1798,12 +1827,12 @@ function render(m, contiguous = true) {
     ui.coach.sort((a, b) => (a.handNo ?? 0) - (b.handNo ?? 0));
   }
   if (Array.isArray(m.training) && m.training.length) {
-    if (selectedTab !== 'training') unread.training += m.training.filter((item) => !trainingExcluded(item) && !ui.training.some((old) => old.evaluationId === item.evaluationId)).length;
+    if (!panelInView('training')) unread.training += m.training.filter((item) => !trainingExcluded(item) && !ui.training.some((old) => old.evaluationId === item.evaluationId)).length;
     ui.training = mergeTrainingItems(ui.training, m.training);
     for (const ann of ui.trainingAnnotations) mergeAnnotationOntoCards(ann);
   }
   if (Array.isArray(m.trainingAnnotations) && m.trainingAnnotations.length) {
-    if (selectedTab !== 'training') unread.training += m.trainingAnnotations.filter((ann) => !trainingExcluded(ui.training.find((item) => item.evaluationId === ann.evaluationId)) && !ui.trainingAnnotations.some((old) => old.evaluationId === ann.evaluationId && old.field === ann.field && JSON.stringify(old) === JSON.stringify(ann))).length;
+    if (!panelInView('training')) unread.training += m.trainingAnnotations.filter((ann) => !trainingExcluded(ui.training.find((item) => item.evaluationId === ann.evaluationId)) && !ui.trainingAnnotations.some((old) => old.evaluationId === ann.evaluationId && old.field === ann.field && JSON.stringify(old) === JSON.stringify(ann))).length;
     for (const ann of m.trainingAnnotations) {
       const at = ui.trainingAnnotations.findIndex((existing) => (
         existing.evaluationId === ann.evaluationId && existing.field === ann.field
@@ -1966,13 +1995,50 @@ function paintUnread() {
     badge.textContent = unread[name] ? `새 ${unread[name]}` : '';
     badge.hidden = !unread[name];
   }
+  // The phone's records button carries the sum, so news shows with the sheet closed.
+  const total = unread.coach + unread.training;
+  $('unread-total').textContent = total ? String(total) : '';
+  $('unread-total').hidden = !total;
+  $('side-open').setAttribute('aria-label', total ? `기록 · 새 항목 ${total}개` : '기록');
+}
+
+// Phones keep the side panel in a sheet (table-mobile.css): a panel is in view
+// only while the sheet is open. Elsewhere the selected tab is always in view.
+let sideOpen = false;
+function panelInView(name) {
+  return selectedTab === name && (sideOpen || !compactLayout());
+}
+function setSideOpen(open, { focus = true } = {}) {
+  const next = Boolean(open) && compactLayout();
+  if (next === sideOpen) return;
+  const side = $('side-panel');
+  const hadFocus = side.contains(document.activeElement);
+  sideOpen = next;
+  side.classList.toggle('is-open', next);
+  document.body.classList.toggle('side-open', next);
+  $('side-scrim').hidden = !next;
+  // The sheet covers the table, not the dock: covered seat buttons leave the tab order.
+  document.querySelector('.table-wrap').inert = next;
+  $('side-open').setAttribute('aria-expanded', String(next));
+  if (next) {
+    setOptionsExpanded(false);
+    if (selectedTab in unread) unread[selectedTab] = 0;
+    paintUnread();
+    if (focus) $(`tab-${selectedTab}`)?.focus();
+  } else if (focus && hadFocus) $('side-open').focus();
+}
+// Navigation to a panel (coach toast, replay → learning card, final → log):
+// on a phone that also opens the sheet.
+function openPanel(name) {
+  selectTab(name);
+  if (compactLayout()) setSideOpen(true, { focus: false });
 }
 
 function selectTab(which) {
   // A tab hidden for this viewer (coach, learning for participants) cannot be selected.
   if ($(`tab-${which}`)?.hidden) return;
   selectedTab = which;
-  if (which in unread) unread[which] = 0;
+  if (which in unread && panelInView(which)) unread[which] = 0;
   paintUnread();
   for (const name of ['log', 'coach', 'training', 'participants']) {
     const on = name === which;
@@ -1988,12 +2054,23 @@ $('tab-log').addEventListener('click', () => selectTab('log'));
 $('tab-coach').addEventListener('click', () => selectTab('coach'));
 $('coach-toast-open').addEventListener('click', () => {
   $('coach-toast').hidden = true;
-  selectTab('coach');
+  openPanel('coach');
   $('panel-coach').scrollIntoView?.({ block: 'nearest' });
 });
 $('tab-training')?.addEventListener('click', () => selectTab('training'));
 $('tab-participants').addEventListener('click',()=>selectTab('participants'));
 selectTab('log');
+$('side-open').addEventListener('click', () => setSideOpen(!sideOpen));
+$('side-close').addEventListener('click', () => setSideOpen(false));
+$('side-scrim').addEventListener('click', () => setSideOpen(false));
+// Esc closes the sheet unless a dialog above it owns the key (the dialog
+// controller, registered first, marks the Esc it used with preventDefault).
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape' || ev.defaultPrevented || !sideOpen || dialogs.active || document.querySelector('dialog[open]')) return;
+  ev.preventDefault();
+  setSideOpen(false);
+});
+onCompactChange((compact) => { if (!compact) setSideOpen(false, { focus: false }); settleSheet(); });
 document.querySelector('.tabs').addEventListener('keydown',ev=>{
   const tabs=['log','coach','training','participants'].filter(name=>$(`tab-${name}`)&&!$(`tab-${name}`).hidden);let index=tabs.indexOf(selectedTab);
   if(ev.key==='ArrowRight')index=(index+1)%tabs.length;
@@ -2057,7 +2134,7 @@ $('replay-close')?.addEventListener('click', () => {
 $('replay-overlay')?.addEventListener('click', (ev) => {
   if (ev.target === $('replay-overlay')) closeReplay();
 });
-$('final-log').addEventListener('click',()=>{ $('review-overlay').dataset.dismissed='true';dialogs.close();selectTab('log');});
+$('final-log').addEventListener('click',()=>{ $('review-overlay').dataset.dismissed='true';dialogs.close();openPanel('log');});
 $('review-close').addEventListener('click', () => {
   const overlay = $('review-overlay');
   overlay.dataset.dismissed = 'true';
@@ -2077,10 +2154,62 @@ $('intent-note-toggle').addEventListener('click', () => {
   $('intent-note').focus();
 });
 
+// The phone raise sheet (table-mobile.css): the action bar itself, lifted over the
+// table from just under the board and pot (measured, so it never covers them) to
+// the bottom. It and the records sheet are never open together.
+let actionEditable = false;
+let sheetStatusText = '';
+function paintSheetStatus() {
+  const mirror = $('sheet-status');
+  mirror.textContent = sheetStatusText;
+  mirror.hidden = !(sheetStatusText && compactLayout() && $('action-bar').classList.contains('options-expanded'));
+}
+function setOptionsExpanded(expanded) {
+  const bar = $('action-bar');
+  const next = Boolean(expanded) && (actionEditable || !compactLayout());
+  if (bar.classList.contains('options-expanded') !== next) {
+    bar.classList.toggle('options-expanded', next);
+    $('action-options-toggle').setAttribute('aria-expanded', String(next));
+  }
+  if (next) setSideOpen(false, { focus: false });
+  placeSheet();
+  paintSheetStatus();
+}
+function placeSheet() {
+  const bar = $('action-bar');
+  // Only a lifted sheet (a phone held upright) is placed; sideways it stays in the rail.
+  if (!bar.classList.contains('options-expanded') || !compactLayout() || getComputedStyle(bar).position !== 'absolute') { bar.style.removeProperty('--sheet-top'); bar.classList.remove('is-cramped'); return; }
+  const stage = document.querySelector('.stage').getBoundingClientRect();
+  const bottoms = [...document.querySelectorAll('#board .card, #pots')].filter((node) => node.getClientRects().length)
+    .map((node) => node.getBoundingClientRect().bottom);
+  if (!bottoms.length || !stage.height) return;
+  // Never over the board or pot. When that leaves too little room (a short phone,
+  // a keyboard) the sheet scrolls as a whole and its buttons stick to its bottom.
+  const top = Math.max(...bottoms) - stage.top + 8;
+  bar.style.setProperty('--sheet-top', `${Math.round(top)}px`);
+  bar.classList.toggle('is-cramped', stage.height - top < 320);
+}
+// Entering the phone layout (or resizing) with the sheet open re-applies its rules:
+// a locked turn folds it, the status mirror follows, and the sheet is re-placed.
+function settleSheet() {
+  if (compactLayout() && !actionEditable) setOptionsExpanded(false);
+  placeSheet();
+  paintSheetStatus();
+}
+globalThis.addEventListener?.('resize', settleSheet);
 $('action-options-toggle').addEventListener('click', () => {
-  const expanded=$('action-bar').classList.toggle('options-expanded');
-  $('action-options-toggle').setAttribute('aria-expanded',String(expanded));
-  if(expanded)$('raise-amount').focus({preventScroll:true});
+  const expanded = !$('action-bar').classList.contains('options-expanded');
+  setOptionsExpanded(expanded);
+  // Phones: the sheet opens without focusing the field, so no keyboard covers it.
+  if(expanded && !compactLayout())$('raise-amount').focus({preventScroll:true});
+});
+// The phone stepper: half a big blind in big-blind mode, one big blind in chips.
+for (const [id, direction] of [['raise-dec', -1], ['raise-inc', 1]]) $(id).addEventListener('click', () => {
+  const legal = ui.view?.legal;
+  if (!legal || pendingAction || !legal.canRaise || legal.minRaiseTo > legal.maxRaiseTo) return;
+  const bb = ui.view.blinds?.[1];
+  setRaiseTo(amountEditor.state.unit === 'bb' ? stepRaiseTo(raiseTo, legal, bb, direction) : clampRaiseTo(raiseTo + direction * (bb > 0 ? bb : 1), legal));
+  markAmountValid(true);
 });
 $('action-reconcile').addEventListener('click', () => void actionController?.reconcile());
 $('action-retry').addEventListener('click', () => void actionController?.retry());
@@ -2147,6 +2276,19 @@ async function initializeController() {
       $('action-retry').hidden = !state.canRetry;
       $('action-retry').disabled = !state.canRetry;
       $('action-reconcile').hidden = !['unknown', 'unreceived', 'accepted', 'delivered', 'consumed', 'paused'].includes(state.phase);
+      // A plain "your turn" line: the phone dock lets its buttons say it (table-mobile.css);
+      // sending, recovery and notices always show.
+      const routine = state.phase === 'idle' && Boolean(state.decisionId) && !state.disabled && !$('action-notice')?.textContent && $('action-retry').hidden && $('action-reconcile').hidden;
+      $('action-status').closest('.action-feedback').classList.toggle('is-routine', routine);
+      // While a request is in flight or unresolved (the recovery buttons live in the
+      // dock's first line) the lifted raise sheet folds and stays shut. Once input is
+      // open again (idle, or a rejection to correct) it may open; it then repeats the
+      // status and notice at its top, since it covers the dock.
+      actionEditable = !state.disabled && Boolean(state.decisionId);
+      $('action-options-toggle').disabled = !actionEditable;
+      if (!actionEditable && compactLayout()) setOptionsExpanded(false);
+      sheetStatusText = [routine ? '' : $('action-status').textContent, $('action-notice')?.textContent ?? ''].filter(Boolean).join(' · ');
+      paintSheetStatus();
       paintActionBar(ui.view);
     },
   });

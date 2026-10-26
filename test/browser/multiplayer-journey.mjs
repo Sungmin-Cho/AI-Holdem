@@ -355,7 +355,7 @@ export async function runMultiplayerJourney(outDir) {
         const header = document.querySelector('.app-header').getBoundingClientRect();
         const frame = document.querySelector('#table').getBoundingClientRect();
         const doc = document.querySelector('#table').contentDocument;
-        const covered = [...doc.querySelectorAll('.plate, #board .card, #pots')].filter((n) => n.getClientRects().length).some((n) => {
+        const covered = [...doc.querySelectorAll('.plate, #board .card, #pots, .table-context-tools > *')].filter((n) => n.getClientRects().length).some((n) => {
           const r = n.getBoundingClientRect(), top = r.top + frame.top, left = r.left + frame.left;
           return banner.left < left + r.width - 1 && banner.right > left + 1 && banner.top < top + r.height - 1 && banner.bottom > top + 1;
         });
