@@ -299,9 +299,15 @@ export async function runLearningJourney({ outDir, userStoreDir = DEFAULT_USER_S
       normalHidden: document.querySelector('#btn-raise').hidden,
       allInHidden: document.querySelector('#btn-allin-only').hidden,
       amount: Number(document.querySelector('#btn-allin-only .amount-secondary').textContent.replaceAll(',', '').replace(' 칩', '')),
+      // The phone's adjust button stays: it opens the summary, the aid and the memo.
+      adjust: (() => { const t = document.querySelector('#action-options-toggle'); if (getComputedStyle(t).display === 'none' || t.disabled) return false;
+        t.click(); const open = document.querySelector('#action-bar').classList.contains('options-expanded');
+        const shown = (n) => !!n && n.getClientRects().length > 0 && getComputedStyle(n).display !== 'none';
+        const ok = open && shown(document.querySelector('#action-summary')) && shown(document.querySelector('#intent-note'));
+        t.click(); return ok && !document.querySelector('#action-bar').classList.contains('options-expanded'); })(),
     }))()`);
     check('short-all-in', shortLegal.minRaiseTo > shortLegal.maxRaiseTo && shortUi.normalHidden
-      && !shortUi.allInHidden && shortUi.amount === shortLegal.maxRaiseTo);
+      && !shortUi.allInHidden && shortUi.amount === shortLegal.maxRaiseTo && shortUi.adjust);
     await browser(['screenshot', path.join(output, 'short-all-in-mobile.png')]);
     const { promise: shortDelivery } = await beginDelivery(shortFixture);
     await browser(['click', '#btn-allin-only']);

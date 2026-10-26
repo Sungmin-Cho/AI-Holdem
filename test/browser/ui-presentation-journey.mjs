@@ -13,6 +13,7 @@ import {handRecordFixture,writeSecurityFixtures,defaultPlayers} from '../helpers
 import {parseCard,cardLabel} from '../../server/public/card-render.js';
 import {formatAmount,formatSignedAmount} from '../../server/public/chip-format.js';
 import {formatBbInput} from '../../server/public/amount-editor.js';
+import {stepRaiseTo} from '../../server/public/table-controls.js';
 import {heroHandLabel} from '../../server/public/decision-aid.js';
 import {COMPACT_QUERY} from '../../server/public/layout-mode.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
@@ -304,7 +305,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     // every plate, and no page scroll. The table box does not move between turns.
     const DOCK_SCRIPT=`(()=>{const vis=n=>!!n&&n.getClientRects().length>0&&getComputedStyle(n).display!=='none';const hit=(x,y)=>x.left<y.right-1&&x.right>y.left+1&&x.top<y.bottom-1&&x.bottom>y.top+1;
       const a=document.querySelector('#action-bar'),r=a.getBoundingClientRect(),plates=[...document.querySelectorAll('.seat .plate')].filter(vis).map(n=>n.getBoundingClientRect());
-      const buttons=[...a.querySelectorAll('button')].filter(vis);
+      const buttons=[...a.querySelectorAll('button'),...document.querySelectorAll('.table-context button,.table-context select')].filter(vis);
       const pressable=['#btn-fold',document.querySelector('#btn-check').hidden?'#btn-call':'#btn-check','#btn-raise'].map(sel=>{const b=document.querySelector(sel),q=b.getBoundingClientRect(),h=document.elementFromPoint(q.left+q.width/2,q.top+q.height/2);return !!h&&b.contains(h);});
       return {hidden:a.hidden,compact:matchMedia(${JSON.stringify(COMPACT_QUERY)}).matches,top:r.top,bottom:r.bottom,height:innerHeight,scrollY:document.documentElement.scrollHeight-innerHeight,scrollX:document.documentElement.scrollWidth-innerWidth,
         clear:plates.every(p=>!hit(p,r)),controls:buttons.every(n=>n.getBoundingClientRect().height>=44),pressable,table:JSON.stringify(document.querySelector('.table').getBoundingClientRect())};})()`;
@@ -316,6 +317,16 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       phoneTables[`${width}x${height}`]=dock.table;
       await browser(['screenshot',path.join(outDir,`mobile-dock-${width}x${height}.png`)]);
     }
+    // A recovery state that overflows the dock starts at its top: scrolling reaches
+    // the status and its button first, and the buttons at the end.
+    const overflow=await evaluate(`(()=>{const area=document.querySelector('.action-area'),status=document.querySelector('#action-status'),fb=status.closest('.action-feedback'),retry=document.querySelector('#action-retry');
+      const saved={text:status.textContent,routine:fb.classList.contains('is-routine'),retry:retry.hidden};
+      fb.classList.remove('is-routine');status.textContent='응답을 확인하지 못했습니다 · '.repeat(12);retry.hidden=false;
+      area.scrollTop=0;const a=area.getBoundingClientRect(),top=fb.getBoundingClientRect().top>=a.top-1,scrolls=area.scrollHeight>area.clientHeight+1;
+      area.scrollTop=area.scrollHeight;const bottom=document.querySelector('#btn-raise').getBoundingClientRect().bottom<=area.getBoundingClientRect().bottom+1;
+      status.textContent=saved.text;fb.classList.toggle('is-routine',saved.routine);retry.hidden=saved.retry;area.scrollTop=0;
+      return {scrolls,top,bottom};})()`);
+    assert.deepEqual(overflow,{scrolls:true,top:true,bottom:true},JSON.stringify(overflow));
     // The viewer's turn, another's turn and back: the phone table box stays put.
     for(const [width,height] of [[390,667],[360,640]]) {
       await browser(['set','viewport',String(width),String(height)]);
@@ -417,7 +428,25 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.equal(await fieldChips(),view.legal.maxRaiseTo,'＋ at the maximum stays there');
     await evaluate("document.querySelector('#raise-dec').click()");
     assert.equal(await fieldChips(),Math.max(view.legal.minRaiseTo,view.legal.maxRaiseTo-view.blinds[1]),'− takes one big blind off in chips');
+    await browser(['select','#display-unit','bb']);
+    const sliderChips=()=>evaluate("Number(document.querySelector('#raise-slider').value)");
+    const beforeBb=await sliderChips();
+    await evaluate("document.querySelector('#raise-dec').click()");
+    assert.equal(await sliderChips(),stepRaiseTo(beforeBb,view.legal,view.blinds[1],-1),'− in big blinds steps half a big blind');
+    await browser(['select','#display-unit','chips']);
     assert.equal(await evaluate('window.actionBodies.length'),0,'stepping sends nothing');
+    // Other phones, the lobby frame and a keyboard-short screen: the board and pot stay
+    // uncovered; with too little room the whole sheet scrolls under fixed buttons.
+    for(const [width,height,embedded] of [[360,640,false],[390,590,true],[390,480,false]]) {
+      await browser(['set','viewport',String(width),String(height)]);
+      await evaluate(`document.body.classList.toggle('embedded',${embedded});dispatchEvent(new Event('resize'));true`);
+      const small=await evaluate(`(()=>{const r=${SHEET_SCRIPT};const a=document.querySelector('#action-bar');a.scrollTop=a.scrollHeight;const press=sel=>{const n=document.querySelector(sel),q=n.getBoundingClientRect(),h=document.elementFromPoint(q.left+q.width/2,q.top+q.height/2);return !!h&&n.contains(h);};const end=['#btn-fold','#btn-raise'].map(press);a.scrollTop=0;return {...r,cramped:a.classList.contains('is-cramped'),end};})()`);
+      assert.ok(small.open&&small.inside&&small.covered.length===0&&small.controls&&small.end.every(Boolean)&&small.pressable[0]&&small.pressable[1],JSON.stringify({width,height,small}));
+      if(height===480)assert.equal(small.cramped,true,'a keyboard-short screen scrolls the whole sheet');
+      await browser(['screenshot',path.join(outDir,`mobile-raise-sheet-${width}x${height}.png`)]);
+    }
+    await evaluate("document.body.classList.remove('embedded');true");
+    await browser(['set','viewport','390','667']);await evaluate("dispatchEvent(new Event('resize'));true");
     await evaluate("document.querySelector('#action-options-toggle').click()");
     assert.equal(await evaluate("document.querySelector('#action-bar').classList.contains('options-expanded')"),false);
     checks.push('mobile-raise-sheet');
@@ -453,6 +482,17 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       return {open:side.classList.contains('is-open'),expanded:document.querySelector('#side-open').getAttribute('aria-expanded'),inert:document.querySelector('.table-wrap').inert,overDock:r.bottom>dock.top+1,underHud:r.top>=hud.bottom-1,foldPressable:!!h&&fold.contains(h),tab:document.querySelector('#tab-log').getClientRects().length>0};})()`);
     assert.deepEqual(drawer,{open:true,expanded:'true',inert:true,overDock:false,underHud:true,foldPressable:true,tab:true},JSON.stringify(drawer));
     await browser(['screenshot',path.join(outDir,'mobile-drawer-390x667.png')]);
+    // The two sheets never share the screen; the close button and the scrim close it too.
+    const sheets="({raise:document.querySelector('#action-bar').classList.contains('options-expanded'),records:document.querySelector('#side-panel').classList.contains('is-open')})";
+    await evaluate("document.querySelector('#action-options-toggle').click()");
+    assert.deepEqual(await evaluate(sheets),{raise:true,records:false},'adjusting closes the records sheet');
+    await evaluate("document.querySelector('#side-open').click()");
+    assert.deepEqual(await evaluate(sheets),{raise:false,records:true},'the records sheet folds the raise sheet');
+    await evaluate("document.querySelector('#side-close').click()");
+    assert.deepEqual(await evaluate(sheets),{raise:false,records:false});
+    await evaluate("document.querySelector('#side-open').click()");await evaluate("document.querySelector('#side-scrim').click()");
+    assert.deepEqual(await evaluate(sheets),{raise:false,records:false});
+    await evaluate("document.querySelector('#side-open').click()");
     await evaluate("document.querySelector('#tab-log').focus()");await browser(['press','Escape']);
     assert.deepEqual(await evaluate("({open:document.querySelector('#side-panel').classList.contains('is-open'),inert:document.querySelector('.table-wrap').inert,focus:document.activeElement?.id})"),{open:false,inert:false,focus:'side-open'});
     await browser(['reload']);await ready();
@@ -484,6 +524,12 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await click('#btn-raise');
     const action=await evaluate('window.actionBodies.map(({action,amount})=>({action,amount}))');
     assert.deepEqual(action,[{action:'raise',amount:view.legal.maxRaiseTo}]);checks.push('chip-payload');
+    // After a send the phone sheet folds (the status takes the dock) and cannot be
+    // reopened over it until the next ordinary turn.
+    if(await evaluate(`matchMedia(${JSON.stringify(COMPACT_QUERY)}).matches`)){
+      const folded=await evaluate("(()=>{const t=document.querySelector('#action-options-toggle');t.click();return {open:document.querySelector('#action-bar').classList.contains('options-expanded'),disabled:t.disabled,status:!document.querySelector('.action-feedback').classList.contains('is-routine')};})()");
+      assert.deepEqual(folded,{open:false,disabled:true,status:true},JSON.stringify(folded));
+    }
     // #329: the press on the button's amount text is what blurs the field, so that
     // one press sends — in big blinds and in chips. An out-of-range amount still
     // shows the correction first and sends on the second press. Each case is a
@@ -719,8 +765,13 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await evaluate("document.body.style.zoom='2'");
     assert.ok(await evaluate('document.documentElement.scrollWidth<=innerWidth'));
     // Zoomed on a phone the seats become a list and the page scrolls to everything.
-    const zoomed=await evaluate("(()=>{const rects=[...document.querySelectorAll('.seat .plate')].map(n=>n.getBoundingClientRect());const bar=document.querySelector('#action-bar'),fold=document.querySelector('#btn-fold').getBoundingClientRect();return {names:[...document.querySelectorAll('.seat .plate-name')].every(n=>n.getClientRects().length>0&&n.textContent.length>0),overlap:rects.some((a,i)=>rects.slice(i+1).some(b=>a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1)),reach:bar.hidden||(fold.width>0&&fold.bottom+scrollY<=document.documentElement.scrollHeight+1)}})()");
-    assert.deepEqual(zoomed,{names:true,overlap:false,reach:true},JSON.stringify(zoomed));
+    const zoomed=await evaluate(`(()=>{const plates=[...document.querySelectorAll('.seat .plate')],rects=plates.map(n=>n.getBoundingClientRect());
+      const shown=n=>!!n&&n.getClientRects().length>0&&n.textContent.trim().length>0;
+      const reach=plates.every(p=>{p.scrollIntoView({block:'center'});const r=p.getBoundingClientRect(),h=document.elementFromPoint(r.left+r.width/2,r.top+Math.min(r.height/2,16));return !!h&&p.contains(h);});
+      const actions=[...document.querySelectorAll('#action-bar:not([hidden]) :is(#btn-fold,#btn-check,#btn-call,#btn-raise,#btn-allin-only)')].filter(n=>!n.hidden).every(b=>{b.scrollIntoView({block:'center'});const r=b.getBoundingClientRect(),h=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);return !!h&&b.contains(h);});
+      scrollTo(0,0);
+      return {names:plates.every(p=>shown(p.querySelector('.plate-name'))),stacks:[...document.querySelectorAll('.seat:not(.is-out) .plate')].every(p=>shown(p.querySelector('.plate-stack'))),overlap:rects.some((a,i)=>rects.slice(i+1).some(b=>a.left<b.right-1&&a.right>b.left+1&&a.top<b.bottom-1&&a.bottom>b.top+1)),reach,actions};})()`);
+    assert.deepEqual(zoomed,{names:true,stacks:true,overlap:false,reach:true,actions:true},JSON.stringify(zoomed));
     await browser(['screenshot',path.join(outDir,'large-values-zoom.png')]);
     await evaluate("document.body.style.zoom='1'");checks.push('large-values');
     let settlement=createGame({aiCount:2,startStack:100});settlement.button=2;settlement.handNo=2;
@@ -820,6 +871,8 @@ export async function runUiJourney(outDir,{ci=false}={}) {
       const placed=await evaluate("(()=>{const node=document.querySelector('#hand-result'),r=node.getBoundingClientRect(),t=document.querySelector('.table').getBoundingClientRect();return {hidden:node.hidden,inside:r.left>=0&&r.right<=innerWidth+1&&((r.top>=0&&r.bottom<=innerHeight+1)||r.top>=t.bottom-1),hits:[...document.querySelectorAll('#board .card, #pots, .seat .plate')].filter(n=>{const b=n.getBoundingClientRect();return b.width&&r.left<b.right-1&&r.right>b.left+1&&r.top<b.bottom-1&&r.bottom>b.top+1;}).map(n=>n.id||n.className)}})()");
       await browser(['screenshot',path.join(outDir,`hand-result-${width}x${height}.png`)]);
       assert.deepEqual({hidden:placed.hidden,inside:placed.inside,hits:placed.hits},{hidden:false,inside:true,hits:[]},JSON.stringify({width,height,placed}));
+      // On a phone the result shares the reserved dock: the table box is the turn's.
+      if(width===390)assert.equal(await evaluate("JSON.stringify(document.querySelector('.table').getBoundingClientRect())"),phoneTables['390x667'],'the result does not move the phone table');
     }
     await measureEmbedded('result',true);
     assert.deepEqual(embedded,embeddedStates(),'the embedded state matrix ran exactly the expected states');

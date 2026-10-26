@@ -46,11 +46,14 @@
   .table-wrap { position: relative; flex: 1 1 auto; min-height: 0; display: block; padding: 0; container-type: size; }
 
   /* ---- Dock: one height whatever it shows ---- */
-  .action-area { position: static; display: flex; flex-direction: column; justify-content: flex-end; gap: 6px; height: calc(var(--dock-h) + var(--safe-b)); padding: 6px 8px calc(6px + var(--safe-b)); overflow-y: auto; overscroll-behavior: contain; background: var(--c-surface-1); border-top: 1px solid var(--c-line-strong); }
+  /* Content sits at the bottom (the ::before spacer takes the free space) but,
+     when a recovery state overflows, starts at the top, so scrolling reaches it. */
+  .action-area { position: static; display: flex; flex-direction: column; justify-content: flex-start; gap: 6px; height: calc(var(--dock-h) + var(--safe-b)); padding: 6px 8px calc(6px + var(--safe-b)); overflow-y: auto; overscroll-behavior: contain; background: var(--c-surface-1); border-top: 1px solid var(--c-line-strong); }
   .action-area > * { flex-shrink: 0; }
+  .action-area::before { content: ""; flex: 1 0 0; margin-bottom: -6px; }
   .thinking, .idle-hint { margin: 0; font-size: 13px; }
   /* Waiting: the status lines sit together in the middle of the reserved dock. */
-  .action-area:not(:has(> #action-bar:not([hidden]))) { justify-content: center; }
+  .action-area:not(:has(> #action-bar:not([hidden])))::after { content: ""; flex: 1 0 0; margin-top: -6px; }
   .action-feedback { min-height: 0; margin: 0; padding: 0; gap: 6px; flex-wrap: wrap; text-align: center; }
   .action-feedback p, #action-status, #action-notice { margin: 0; font-size: 12px; }
   .action-feedback:has(#action-status:empty):not(:has(button:not([hidden]))) { display: none; }
@@ -92,7 +95,6 @@
   .action-bar .btn .amount-pair { gap: 1px; }
   .action-bar .btn .amount-primary { font-size: 14px; }
   #action-options-toggle { display: flex; grid-column: 6; grid-row: 2; min-width: 0; height: 44px; min-height: 44px; padding: 0 2px; font-size: 12px; }
-  .action-bar:has(#raise-panel[hidden]) #action-options-toggle { display: none; }
   /* Collapsed: the raise panel shows only its size presets — at most five. */
   .raise-panel { grid-column: 1 / 6; grid-row: 2; min-width: 0; padding: 0; gap: 8px; }
   .action-bar:not(.options-expanded) .raise-panel, .action-bar:not(.options-expanded) .raise-top { display: block; }
@@ -118,6 +120,12 @@
      wrappers dissolve so their parts share one grid. */
   .action-bar.options-expanded .raise-panel { grid-column: 1 / -1; grid-row: 3; display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; align-content: start; gap: 8px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
   .action-bar.options-expanded :is(.raise-top, .raise-slide) { display: contents; }
+  /* Too little room under the board (a short phone, an open keyboard): the whole
+     sheet scrolls and the buttons stick to its bottom edge. */
+  .action-bar.options-expanded.is-cramped { overflow-y: auto; overscroll-behavior: contain; grid-template-rows: none; grid-auto-rows: max-content; align-content: start; }
+  .action-bar.options-expanded.is-cramped .raise-panel { overflow: visible; }
+  .action-bar.options-expanded.is-cramped :is(#btn-fold, #btn-check, #btn-call, #btn-raise, #btn-allin-only) { position: sticky; bottom: 0; z-index: 1; box-shadow: 0 0 0 6px var(--c-surface-1); }
+  .action-bar.options-expanded.is-cramped #btn-fold { background: var(--c-surface-1); }
   .action-bar.options-expanded .presets { grid-column: 1 / -1; grid-row: 1; display: flex; gap: 4px; }
   .action-bar.options-expanded #raise-dec { grid-column: 1; grid-row: 2; }
   .action-bar.options-expanded .amount-field { grid-column: 2; grid-row: 2; }
@@ -127,7 +135,8 @@
   .action-bar.options-expanded .amount-error { grid-column: 1 / -1; grid-row: 5; margin: 0; }
   .action-bar.options-expanded :is(#btn-fold, #btn-check, #btn-call, #btn-raise, #btn-allin-only) { grid-row: 5; }
   .action-bar.options-expanded .amount-field { width: 100%; height: 44px; margin: 0; justify-content: space-between; }
-  .action-bar.options-expanded .amount-input { width: 50%; min-height: 40px; font-size: 18px; }
+  .action-bar.options-expanded .amount-field { height: 48px; }
+  .action-bar.options-expanded .amount-input { width: 50%; min-height: 44px; font-size: 18px; }
   .action-bar.options-expanded .raise-step { display: inline-flex; flex: none; width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; font-size: 20px; }
   .action-bar.options-expanded .slider { width: 100%; min-width: 0; min-height: 44px; margin: 0; }
   .action-bar.options-expanded .raise-range { display: block; margin: 0; font-size: 12px; text-align: left; }
@@ -270,11 +279,10 @@
 /* ===== L: a phone held sideways ========================================= */
 /* The table on the left, the dock as a rail on the right (the right thumb). */
 @media (orientation: landscape) and (max-height: 500px) and (max-width: 1023px) {
-  :root { --hud-h: 40px; --rail-w: clamp(212px, 30vw, 268px); }
+  :root { --rail-w: clamp(212px, 30vw, 268px); }
   .topbar { min-height: 40px; }
   .stage, .stage:has(> .pre-action-hint:not([hidden])) { display: grid; grid-template-columns: minmax(0, 1fr) var(--rail-w); grid-template-rows: var(--hud-h) auto minmax(0, 1fr); }
   .table-context { grid-column: 1; grid-row: 1; height: var(--hud-h); padding-left: max(12px, env(safe-area-inset-left, 0px)); }
-  .table-context .btn, .table-context select { height: 40px; min-height: 40px; }
   .spectator-banner { grid-column: 1; grid-row: 2; }
   .table-wrap { grid-column: 1; grid-row: 3; }
   /* contain:size — the rail's content must not grow the grid rows it spans. */
@@ -360,8 +368,6 @@
   #action-options-toggle { grid-column: 1 / 3; grid-row: 4; }
   #btn-fold { grid-column: 3 / 5; grid-row: 4; }
   #btn-check, #btn-call { grid-column: 5 / -1; grid-row: 4; }
-  .action-bar:has(#raise-panel[hidden]) #btn-fold { grid-column: 1 / 4; }
-  .action-bar:has(#raise-panel[hidden]) :is(#btn-check, #btn-call) { grid-column: 4 / -1; }
   #btn-raise, #btn-allin-only { grid-column: 1 / -1; grid-row: 5; }
   .action-bar .act-group .btn { padding: 0 4px; font-size: 13px; }
   /* Expanded: the rail itself holds the sheet (the table stays in view, so no

@@ -85,7 +85,7 @@ export function heroHandLabel(myCards, board = []) {
     const made = describeMadeHand(cards, shown).label;
     const draws = drawsOf(cards, shown);
     const draw = draws.outs ? [draws.flushDraw ? '플러시 드로' : null, draws.straightDraw === 'open-ended' ? '양방 드로'
-      : draws.straightDraw ? '거트샷' : null].filter(Boolean).join(' + ') : '';
+      : draws.straightDraw === 'double-gutshot' ? '더블 거트샷' : draws.straightDraw ? '거트샷' : null].filter(Boolean).join(' + ') : '';
     return draw ? `${made} · ${draw}` : made;
   } catch { return ''; }
 }

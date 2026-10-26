@@ -116,6 +116,11 @@ body.has-game #final { flex: none; max-height: 45vh; overflow: auto; margin: 0; 
      left half (where the head count is), clear of the tools and the seats. */
   .pause-banner { top: var(--sp-1); left: var(--sp-2); max-width: calc(50% - var(--sp-2)); transform: none; white-space: normal; text-align: center; }
 }
+/* A phone held sideways: the table's HUD sits over the table column, left of the
+   dock rail; the pause note keeps to that column's left half. */
+@media (orientation: landscape) and (max-height: 500px) and (max-width: 1023px) {
+  .pause-banner { top: var(--sp-1); left: var(--sp-2); max-width: calc((100% - clamp(212px, 30vw, 268px)) / 2 - var(--sp-2)); transform: none; white-space: normal; text-align: center; }
+}
 @media (max-width: 420px) {
   .member-controls { flex-wrap: wrap; }
   .waiting-row { grid-template-columns: auto minmax(0, 1fr) auto; }

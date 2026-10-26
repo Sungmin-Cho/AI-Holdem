@@ -843,10 +843,18 @@ function markAmountValid(valid) {
   if ($('amount-error').textContent && compactLayout()) setOptionsExpanded(true);
 }
 
+// The phone stepper follows the other raise controls and stops at the legal ends.
+let stepperOff = true;
+function syncStepper(legal = ui.view?.legal) {
+  $('raise-dec').disabled = stepperOff || !legal || raiseTo <= legal.minRaiseTo;
+  $('raise-inc').disabled = stepperOff || !legal || raiseTo >= legal.maxRaiseTo;
+}
+
 function setRaiseTo(value, { fromInput = false } = {}) {
   const legal = ui.view?.legal;
   if (!legal || pendingAction) return;
   raiseTo = fromInput ? amountEditor.state.value : amountEditor.choose(value, legal).value;
+  syncStepper(legal);
   $('raise-slider').value = String(raiseTo);
   setBtnLabel($('btn-raise'), raiseLabel(raiseTo), raiseTo);
   if (!fromInput) $('raise-amount').value = amountEditor.state.text;
@@ -858,6 +866,7 @@ function commitAmount() {
   const input = $('raise-amount');
   const state = amountEditor.commit(legal);
   raiseTo = state.value; input.value = state.text;
+  syncStepper(legal);
   $('raise-slider').value = String(raiseTo);
   setBtnLabel($('btn-raise'), raiseLabel(raiseTo), raiseTo);
   markAmountValid(!state.invalid);
@@ -958,6 +967,7 @@ function paintActionBar(view) {
   $('btn-raise').hidden = shortAllIn;
   const amount = $('raise-amount');
   amount.disabled = raiseOff;
+  stepperOff = raiseOff;
   amount.closest('.amount-field').classList.toggle('is-disabled', raiseOff);
   // Preflop adds the reference sizes; later streets add ⅓ and ¾ pot.
   for (const btn of $('raise-panel').querySelectorAll('[data-preset]')) {
@@ -973,6 +983,7 @@ function paintActionBar(view) {
   $('btn-allin-only').disabled = pendingAction || !legal.canRaise;
   setBtnLabel($('btn-allin-only'), '올인', legal.maxRaiseTo);
   if (!shortAllIn) syncRaisePanel(legal);
+  syncStepper(legal);
 }
 
 function logNode(item, verb, bb) {
@@ -2146,9 +2157,10 @@ $('intent-note-toggle').addEventListener('click', () => {
 // The phone raise sheet (table-mobile.css): the action bar itself, lifted over the
 // table from just under the board and pot (measured, so it never covers them) to
 // the bottom. It and the records sheet are never open together.
+let actionRoutine = false;
 function setOptionsExpanded(expanded) {
   const bar = $('action-bar');
-  const next = Boolean(expanded);
+  const next = Boolean(expanded) && (actionRoutine || !compactLayout());
   if (bar.classList.contains('options-expanded') !== next) {
     bar.classList.toggle('options-expanded', next);
     $('action-options-toggle').setAttribute('aria-expanded', String(next));
@@ -2158,14 +2170,16 @@ function setOptionsExpanded(expanded) {
 }
 function placeSheet() {
   const bar = $('action-bar');
-  if (!bar.classList.contains('options-expanded') || !compactLayout()) { bar.style.removeProperty('--sheet-top'); return; }
+  if (!bar.classList.contains('options-expanded') || !compactLayout()) { bar.style.removeProperty('--sheet-top'); bar.classList.remove('is-cramped'); return; }
   const stage = document.querySelector('.stage').getBoundingClientRect();
   const bottoms = [...document.querySelectorAll('#board .card, #pots')].filter((node) => node.getClientRects().length)
     .map((node) => node.getBoundingClientRect().bottom);
   if (!bottoms.length || !stage.height) return;
-  // Leave the sheet room for its fixed rows on the shortest phones.
-  const top = Math.min(Math.max(...bottoms) - stage.top + 8, stage.height - Math.min(stage.height * 0.8, 340));
+  // Never over the board or pot. When that leaves too little room (a short phone,
+  // a keyboard) the sheet scrolls as a whole and its buttons stick to its bottom.
+  const top = Math.max(...bottoms) - stage.top + 8;
   bar.style.setProperty('--sheet-top', `${Math.round(top)}px`);
+  bar.classList.toggle('is-cramped', stage.height - top < 320);
 }
 globalThis.addEventListener?.('resize', placeSheet);
 $('action-options-toggle').addEventListener('click', () => {
@@ -2250,9 +2264,12 @@ async function initializeController() {
       // A plain "your turn" line: the phone dock lets its buttons say it (table-mobile.css);
       // sending, recovery and notices always show.
       const routine = state.phase === 'idle' && Boolean(state.decisionId) && !state.disabled && !$('action-notice')?.textContent && $('action-retry').hidden && $('action-reconcile').hidden;
+      actionRoutine = routine;
       $('action-status').closest('.action-feedback').classList.toggle('is-routine', routine);
       // Sending, recovery and notices live in the dock's first line: a lifted
-      // raise sheet would cover them, so it folds back.
+      // raise sheet would cover them, so it folds back and stays shut until the
+      // next ordinary turn (setOptionsExpanded refuses, the button is disabled).
+      $('action-options-toggle').disabled = !routine;
       if (!routine && compactLayout()) setOptionsExpanded(false);
       paintActionBar(ui.view);
     },

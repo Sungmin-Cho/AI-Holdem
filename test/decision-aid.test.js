@@ -89,6 +89,9 @@ test('hand-strength chip names the hole cards, then the made hand and draws', ()
   assert.equal(heroHandLabel(['Ah', 'Kh'], ['Qh', '7h', '2s']), '하이 카드 · 플러시 드로');
   assert.equal(heroHandLabel(['9h', '8d'], ['7c', '6s', '2h']), '하이 카드 · 양방 드로');
   assert.equal(heroHandLabel(['Ah', 'Kh'], ['Qh', 'Jh', '2h']), '플러시');
+  // Straight draws by shape: two ends, two inside gaps, one inside gap.
+  assert.equal(heroHandLabel(['3s', '9d'], ['5c', '6h', '7d']), '하이 카드 · 더블 거트샷');
+  assert.equal(heroHandLabel(['9h', '8d'], ['6c', '5s', '2h']), '하이 카드 · 거트샷');
   // Unknown or malformed cards and a partial board say nothing.
   assert.equal(heroHandLabel([]), '');
   assert.equal(heroHandLabel(['Ah', 'Kx']), '');
