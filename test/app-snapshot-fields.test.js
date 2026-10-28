@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { createSessionManager } from '../tools/session-manager.js';
 import { startAppServer } from '../tools/app-server.js';
 import { resolveRuntimes } from '../tools/player-runtime.js';
@@ -49,6 +51,16 @@ const RAW_SECRET = 'decision-meta dropped: /Users/someone/.secret --operator-con
 // snapshot's random hex identifiers (gameEpoch, UUIDs), which made this flaky (#304).
 const HOST_LEAK = /operator-confirmed|pid: 4242|\.secret|sonnet/;
 const PARTICIPANT_LEAK = /secret|pid: 4242/;
+const PROBE_DETAIL = {
+  retried: true, modelFallback: false, code: null,
+  calls: [
+    { purpose: 'probe-upper', attempt: 1, code: 'NO_RESPONSE', bootMs: 150, turnStartMs: null, firstProgressMs: null, elapsedMs: 30_010 },
+    { purpose: 'probe-upper', attempt: 2, code: null, bootMs: 160, turnStartMs: null, firstProgressMs: 1_700, elapsedMs: 2_300 },
+  ],
+};
+const findFiles = (dir, name) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => (
+  entry.isDirectory() ? findFiles(path.join(dir, entry.name), name) : (entry.name === name ? [path.join(dir, entry.name)] : [])
+));
 
 test('host snapshot exposes boot stages and projected notices bound to the launching game', { timeout: TIMEOUT * 2 }, async (t) => {
   const storeDir = createOwnedTempDir('app-snapshot-fields');
@@ -70,6 +82,8 @@ test('host snapshot exposes boot stages and projected notices bound to the launc
     if (!gate) return { player: null, upper: null, notices: [PREVIOUS_GAME_NOTICE, RAW_SECRET] };
     onProbe?.({ tier: 'upper', runtime: 'claude', round: 0, ok: null, elapsedMs: 0 });
     await gate.promise;
+    // #333: the final event carries diagnostics. They reach the loop log but never the snapshot's boot.probe.
+    onProbe?.({ tier: 'upper', runtime: 'claude', round: 0, ok: true, elapsedMs: 31_000, detail: PROBE_DETAIL });
     return { player, upper, notices: [] };
   };
   const seen = [];
@@ -132,6 +146,11 @@ test('host snapshot exposes boot stages and projected notices bound to the launc
   assert.deepEqual(second.notices.items.filter((item) => item.code === 'RUNTIME_CONTAINMENT_FAILED'), []);
   const stages = seen.filter((snap) => snap.state === 'starting').map((snap) => snap.boot.stage);
   assert.equal(stages[0], 'preparing');
+  // #333: the final probe event's diagnostics reach the loop log (the boot.probe snapshot above stays the closed five fields).
+  const records = findFiles(storeDir, 'loop.log').flatMap((file) => fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((row) => JSON.parse(row)))
+    .filter((record) => record.event === 'runtime-probe' && record.ok === true);
+  assert.equal(records.length, 1, 'one final runtime-probe record');
+  assert.deepEqual({ ...records[0], at: undefined }, { at: undefined, event: 'runtime-probe', tier: 'upper', runtime: 'claude', round: 0, ok: true, elapsedMs: 31_000, ...PROBE_DETAIL });
   await run(manager, 'pause');
   await run(manager, 'end');
 });

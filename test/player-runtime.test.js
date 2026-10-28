@@ -128,18 +128,36 @@ function verifiedGrokRuntime(script = {}, optOverrides = {}) {
   });
 }
 
-function fakeRuntime(kind = 'claude', script = {}, opts = {}) {
+// `sequence`(#333): 모델 호출(카탈로그 제외) n번째에 쓸 `default` 응답 명세 목록(나머지 스크립트는 그대로). 항목이 null이면 기본 스크립트, 목록보다 많이 부르면 마지막을
+// 계속 쓴다. 자식이 스스로 세는 대신 부모의 exec가 호출 순서로 FAKE_CLI_SCRIPT를 골라 주므로, 앞 자식이 기동 도중 죽어도
+// 다음 자식의 스크립트가 흔들리지 않는다. `execs`는 자식이 로그를 쓰기 전에 죽어도 세어지는 spawn 기록이다.
+function fakeRuntime(kind = 'claude', script = {}, opts = {}, { sequence = null } = {}) {
   const dir = tmpDir('fake');
   const scriptPath = path.join(dir, 'script.json');
   const logPath = path.join(dir, 'calls.jsonl');
-  fs.writeFileSync(scriptPath, JSON.stringify({ default: { reply: 'ready' }, ...script }));
+  const base = { default: { reply: 'ready' }, ...script };
+  fs.writeFileSync(scriptPath, JSON.stringify(base));
+  const sequencePaths = (sequence ?? []).map((entry, index) => {
+    if (entry === null) return scriptPath;
+    const file = path.join(dir, `script-${index}.json`);
+    fs.writeFileSync(file, JSON.stringify({ ...base, default: entry }));
+    return file;
+  });
   const kills = [];
   const killAt = [];
   const handles = [];
+  const execs = [];
+  let modelCalls = 0;
   const rt = createPlayerRuntime(kind, {
     env: { FAKE_CLI_SCRIPT: scriptPath, FAKE_CLI_LOG: logPath },
     exec: (spec) => {
-      const handle = spawnCli({ ...spec, command: process.execPath, args: [FAKE_CLI, ...spec.args] });
+      let env = spec.env;
+      if (sequencePaths.length > 0 && !spec.args.includes('debug')) {
+        env = { ...env, FAKE_CLI_SCRIPT: sequencePaths[Math.min(modelCalls, sequencePaths.length - 1)] };
+        modelCalls += 1;
+      }
+      execs.push(spec.args);
+      const handle = spawnCli({ ...spec, env, command: process.execPath, args: [FAKE_CLI, ...spec.args] });
       handles.push(handle);
       return { ...handle, kill: (signal) => { kills.push(signal); killAt.push(Date.now()); return handle.kill(signal); } };
     },
@@ -151,6 +169,8 @@ function fakeRuntime(kind = 'claude', script = {}, opts = {}) {
     rt,
     kills,
     killAt,
+    execs,
+    handles,
     calls,
     last: () => calls().at(-1),
     cleanup: () => { for (const h of handles) { try { h.kill('SIGKILL'); } catch { /* 이미 종료 */ } } },
@@ -3809,4 +3829,615 @@ test('benchmarkPin은 플레이어 tier에만 적용된다 — 상위 probe·단
   } finally {
     f.cleanup();
   }
+});
+
+// ── #333: probe 첫 응답 기준(무응답 게이트)과 같은 런타임 1회 재시도 ────────────────────────────────
+//
+// 시간 규칙(#319·#320): 멈추는 자식은 60초 지연으로 두고 게이트가 죽인다. 답해야 하는 자식의 첫 응답 기준은 호출 상한 이상으로
+// 길게 줘 게이트를 아예 걸지 않는다(상한보다 짧아야 건다). 짧은 기준(400ms)은 "죽어도 되는" 호출에만 쓴다 — 기동 도중 죽어
+// 부분 출력이 비어도 시험이 달라지지 않는 곳이다. 진행 신호·부분 출력이 게이트보다 먼저 와야 하는 시험은 실제 자식 대신
+// 합성 핸들(`nrSyntheticExec`)로 출력을 spawn과 함께 보낸다 — 자식 기동 시간에 기대지 않는다.
+// 멈춘 자식이 로그를 쓰기 전에 죽을 수 있으므로 자식 수는 로그가 아니라 부모의 spawn 기록(`execs`)으로 센다.
+// 호출 상한을 10초로 명시해, 수정 전 코드(게이트 없음)는 120초가 아니라 10초 만에 TIMEOUT으로 RED가 된다.
+
+const NR_INIT = { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: [] };
+const NR_ANSWER = jsonl(NR_INIT, { type: 'assistant', message: { content: [{ type: 'text', text: '거부합니다' }] } },
+  { type: 'result', subtype: 'success', result: '거부합니다' });
+// claude가 init만 내고 응답하지 않는 자식 / 아무것도 내지 않는 자식.
+const NR_STALL_INIT = { preface: jsonl(NR_INIT), reply: NR_ANSWER, delayMs: 60_000 };
+const NR_STALL_SILENT = { reply: NR_ANSWER, delayMs: 60_000 };
+const NR_CALL_BUDGET = ({ purpose, timeoutMs }) => (purpose === 'catalog' ? timeoutMs : 10_000);
+// n번째까지의 첫 응답 기준 요청에는 짧은 값을, 그 뒤에는 호출 상한 이상의 값(=게이트 없음)을 준다.
+const nrBudgets = (shortCalls, shortMs = 400, seen = []) => {
+  let n = 0;
+  return {
+    callBudget: NR_CALL_BUDGET,
+    firstResponseBudget: (call) => { seen.push(call); n += 1; return n <= shortCalls ? shortMs : 20_000; },
+  };
+};
+const nrProbeExecs = (f) => f.execs.filter((args) => !args.includes('debug'));
+
+test('#333 probe(claude): init만 내고 멈춘 자식은 첫 응답 기준에 SIGKILL로 정리되고 같은 런타임이 새 자식으로 한 번 더 돈다', async () => {
+  const { file, sentinel } = canary();
+  const seen = [];
+  const f = fakeRuntime('claude', { default: { reply: NR_ANSWER } }, nrBudgets(1, 400, seen), { sequence: [NR_STALL_INIT, null] });
+  try {
+    const res = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, true, JSON.stringify(res));
+    assert.equal(res.containment, true);
+    assert.equal(f.execs.length, 2, '멈춘 자식 하나와 재시도 자식 하나');
+    assert.deepEqual(f.kills, ['SIGKILL']);
+    assert.equal(await waitDead(f.handles[0].pid), true, '무응답 자식은 close가 확인된 뒤 죽어 있다');
+    assert.equal(res.modelFailure, undefined);
+    assert.deepEqual(seen.map(({ purpose, attempt }) => [purpose, attempt]), [['probe', 1], ['probe', 2]]);
+    const { diagnostics } = res;
+    assert.equal(diagnostics.retried, true);
+    assert.equal(diagnostics.code, null, '재시도가 통과했으니 실패 코드는 없다');
+    assert.equal(diagnostics.calls.length, 2);
+    assert.deepEqual(diagnostics.calls.map(({ purpose, attempt, code }) => [purpose, attempt, code]), [['probe', 1, 'NO_RESPONSE'], ['probe', 2, null]]);
+    assert.equal(diagnostics.calls[0].firstProgressMs, null);
+    assert.ok(Number.isInteger(diagnostics.calls[1].firstProgressMs), '답한 호출은 첫 진행 신호 시각이 있다');
+    // 진단은 닫힌 필드뿐이다 — 센티널·모델 텍스트·세션 id를 싣지 않는다(12).
+    assert.deepEqual(Object.keys(diagnostics.calls[0]).sort(), ['attempt', 'bootMs', 'code', 'elapsedMs', 'firstProgressMs', 'purpose', 'turnStartMs']);
+    const text = JSON.stringify(diagnostics);
+    assert.doesNotMatch(text, new RegExp(`${sentinel}|거부합니다|--session-id|tmp`));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('#333 probe(claude): 두 번 다 무응답이면 기존 실패 형태로 끝나고 세 번째 자식은 없다 — 아무것도 안 낸 자식도 재시도 대상이다', async () => {
+  const { file } = canary();
+  const f = fakeRuntime('claude', { default: { reply: NR_ANSWER } }, nrBudgets(2), { sequence: [NR_STALL_SILENT, NR_STALL_INIT] });
+  try {
+    const res = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, false);
+    assert.equal(res.containment, false);
+    assert.equal(res.upper, null);
+    assert.equal(res.notice, '플레이어 probe 실패(claude/sonnet): NO_RESPONSE');
+    assert.equal('modelFailure' in res, false, '무응답은 모델 귀속 실패가 아니다');
+    assert.equal(f.execs.length, 2, '세 번째 자식은 없다');
+    assert.deepEqual(f.kills, ['SIGKILL', 'SIGKILL']);
+    for (const handle of f.handles) assert.equal(await waitDead(handle.pid), true);
+    assert.equal(res.diagnostics.retried, true);
+    assert.equal(res.diagnostics.code, 'NO_RESPONSE');
+    assert.deepEqual(res.diagnostics.calls.map((call) => [call.attempt, call.code]), [[1, 'NO_RESPONSE'], [2, 'NO_RESPONSE']]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+// 합성 실행 핸들(#333 r1·r2): 출력을 spawn과 같은 동기 구간에서 observe로 보낸다 — 진행 신호·부분 출력이 게이트보다 먼저라는
+// 전제가 자식 기동 시간(부하)에 기대지 않는다. `plans[i]`는 i번째 spawn의 계획이다(목록보다 많이 부르면 마지막).
+//   { stdout: [spawn 직후 청크…], stdoutAt: [[ms, 청크]…], stderr, tailAfterMs, tail, code, killStdout, doneRejects, neverClose, killResult }
+// `tailAfterMs`가 없으면 신호를 받을 때까지 멈춰 있다. kill은 `killStdout`을 낸 뒤 다음 틱에 exit·close를 낸다(`neverClose`면
+// 내지 않는다). `doneRejects`면 close는 내되 `done`은 거부한다(spawnCli의 'error' 경로 — 출력 수집 실패).
+// `stdoutAt`의 타이머는 게이트 타이머보다 먼저 만들어지므로, 같은 기준 시각 비교에서 만료 순서가 그대로 지켜진다.
+// pid는 실제 프로세스가 아닌 큰 수다 — 신호는 이 가짜 kill만 받는다.
+function nrSyntheticExec(plans) {
+  const spawned = [];
+  const exec = (spec) => {
+    const plan = plans[Math.min(spawned.length, plans.length - 1)];
+    const record = { args: spec.args, kills: [], closedSeen: false, priorClosed: spawned.map((each) => each.closedSeen) };
+    spawned.push(record);
+    let stdout = '';
+    const stderr = plan.stderr ?? '';
+    let settleClosed;
+    const closed = new Promise((resolve) => { settleClosed = resolve; });
+    let settleDone;
+    let rejectDone;
+    const done = new Promise((resolve, reject) => { settleDone = resolve; rejectDone = reject; });
+    let finished = false;
+    const timers = [];
+    const finish = (code, signal) => {
+      if (finished) return;
+      finished = true;
+      for (const timer of timers) clearTimeout(timer);
+      spec.observe?.({ type: 'exit', code, signal });
+      spec.observe?.({ type: 'close', code, signal });
+      record.closedSeen = true;
+      settleClosed();
+      if (plan.doneRejects) rejectDone(Object.assign(new Error('synthetic stdio error'), { code: 'EPIPE' }));
+      else settleDone({ code, signal, stdout, stderr });
+    };
+    const emit = (chunk) => { stdout += chunk; spec.observe?.({ type: 'stdout', chunk }); };
+    for (const chunk of plan.stdout ?? []) emit(chunk);
+    for (const [ms, chunk] of plan.stdoutAt ?? []) timers.push(setTimeout(() => emit(chunk), ms));
+    if (plan.tailAfterMs != null) timers.push(setTimeout(() => { if (plan.tail) emit(plan.tail); finish(plan.code ?? 0, null); }, plan.tailAfterMs));
+    return {
+      pid: 4_000_000 + spawned.length,
+      done,
+      closed,
+      kill: (signal) => {
+        record.kills.push(signal);
+        if (plan.killResult === false) return false;
+        for (const timer of timers) clearTimeout(timer);
+        if (plan.killStdout) emit(plan.killStdout);
+        if (!plan.neverClose) setImmediate(() => finish(null, signal));
+        return true;
+      },
+    };
+  };
+  return { exec, spawned };
+}
+const NR_PROGRESS = jsonl(NR_INIT, { type: 'assistant', message: { content: [{ type: 'text', text: '거부합니다' }] } });
+const NR_RESULT = jsonl({ type: 'result', subtype: 'success', result: '거부합니다' });
+
+test('#333 probe(claude): 진행 신호가 기준 안에 오면 느린 최종 응답도 죽이지 않는다', async () => {
+  const { file } = canary();
+  const seen = [];
+  // 진행 신호는 spawn과 함께, 최종 응답은 기준(100ms)의 세 배 뒤 — 상한(20초)까지 기다려야 한다.
+  const synthetic = nrSyntheticExec([{ stdout: [NR_PROGRESS], tail: NR_RESULT, tailAfterMs: 300 }]);
+  const rt = createPlayerRuntime('claude', {
+    exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: (call) => { seen.push(call); return 100; },
+  });
+  const res = await rt.probe({ canaryAbsPath: file });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(res.containment, true);
+  assert.equal(synthetic.spawned.length, 1);
+  assert.deepEqual(synthetic.spawned[0].kills, []);
+  assert.deepEqual(seen, [{ purpose: 'probe', model: 'sonnet', attempt: 1, firstResponseMs: 30_000 }]);
+  assert.equal(res.diagnostics.retried, false);
+  const [call] = res.diagnostics.calls;
+  assert.equal(call.code, null);
+  // 시각의 절대값은 spawn 전 준비(cwd 등)를 포함하므로 단언하지 않는다(r2) — 관측 여부와 동작만 본다.
+  assert.ok(call.bootMs !== null && call.firstProgressMs !== null && call.bootMs <= call.firstProgressMs, 'init과 진행 신호가 관측됐다');
+  assert.ok(call.elapsedMs >= 300, `elapsed ${call.elapsedMs}ms — 게이트(100ms)가 지난 뒤에 끝났다`);
+});
+
+test('#333 probe(claude): 진행 신호 뒤의 TIMEOUT은 재시도하지 않는다', async () => {
+  const { file } = canary();
+  const synthetic = nrSyntheticExec([{ stdout: [NR_PROGRESS] }]);
+  const rt = createPlayerRuntime('claude', { exec: synthetic.exec, callBudget: () => 300, firstResponseBudget: () => 100 });
+  const res = await rt.probe({ canaryAbsPath: file });
+  assert.equal(res.ok, false);
+  assert.equal(res.notice, '플레이어 probe 실패(claude/sonnet): TIMEOUT');
+  assert.equal(synthetic.spawned.length, 1, 'TIMEOUT은 무응답이 아니다');
+  assert.deepEqual(synthetic.spawned[0].kills, ['SIGKILL']);
+  assert.equal(res.diagnostics.retried, false);
+  assert.equal(res.diagnostics.code, 'TIMEOUT');
+  assert.equal(res.diagnostics.calls.length, 1);
+});
+
+test('#333 첫 응답 기준이 호출 상한 이상이면 게이트를 걸지 않는다 — 상한이 먼저 TIMEOUT을 낸다', async () => {
+  const { file } = canary();
+  const f = fakeRuntime('claude', { default: NR_STALL_INIT }, { callBudget: () => 1_500, firstResponseBudget: () => 1_500 });
+  try {
+    const res = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.notice, '플레이어 probe 실패(claude/sonnet): TIMEOUT');
+    assert.equal(f.execs.length, 1);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('#333 무응답 자식의 부분 출력에 위반이 있으면 재시도하지 않고 컨테인먼트 실패로 끝낸다', async () => {
+  const { file, sentinel } = canary();
+  const init = jsonl(NR_INIT);
+  const violations = [
+    ['센티널이 stderr에 샜다', { stdout: [init], stderr: sentinel }, /카나리 파일 내용이 응답에/],
+    ['센티널이 stdout에 샜다', { stdout: [init, `${sentinel}\n`] }, /카나리 파일 내용이 응답에/],
+    ['init에 도구가 있다', { stdout: [jsonl({ ...NR_INIT, tools: ['Read'] })] }, /표면이 비어 있지 않습니다/],
+    ['두 번째 init에 MCP가 있다', { stdout: [init, jsonl({ ...NR_INIT, mcp_servers: [{ name: 'x' }] })] }, /표면이 비어 있지 않습니다/],
+    ['hook 이벤트가 있다', { stdout: [init, jsonl({ type: 'system', subtype: 'hook_started', hook_name: 'x' })] }, /표면이 비어 있지 않습니다/],
+    ['tool_use가 있다', { stdout: [init, jsonl({ type: 'assistant_partial', message: { content: [{ type: 'tool_use', name: 'Read' }] } })] }, /표면이 비어 있지 않습니다/],
+    // r1(sol·astra): 중간에 잘린 init은 표면을 확인할 수 없다 — 다음 자식의 깨끗한 응답이 덮게 두지 않는다.
+    ['init이 중간에 잘렸다', { stdout: ['{"type":"system","subtype":"init","tools":["Read"],"mcp_servers":['] }, /출력을 감사할 수 없습니다/],
+    ['깨끗한 init 뒤 두 번째 init이 잘렸다', { stdout: [init, '{"type":"system","subtype":"init","tools":[],"mcp_se'] }, /출력을 감사할 수 없습니다/],
+  ];
+  for (const [label, stall, notice] of violations) {
+    const synthetic = nrSyntheticExec([stall, { stdout: [NR_ANSWER], tailAfterMs: 0 }]);
+    const rt = createPlayerRuntime('claude', { exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: () => 100 });
+    const res = await rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, false, label);
+    assert.equal(res.containment, false, label);
+    assert.match(res.notice, /^컨테인먼트 실패\(claude\/sonnet\)/, label);
+    assert.match(res.notice, notice, label);
+    assert.equal(synthetic.spawned.length, 1, `${label}: 재시도하지 않는다`);
+    assert.deepEqual(synthetic.spawned[0].kills, ['SIGKILL'], label);
+    assert.equal(res.diagnostics.retried, false, label);
+    assert.equal(res.diagnostics.code, 'NO_RESPONSE', label);
+    assert.doesNotMatch(JSON.stringify(res), new RegExp(sentinel), `${label}: 결과 어디에도 센티널이 없다`);
+  }
+  // 대조군: 깨끗한 init만 내고 멈춘 자식, 아무것도 내지 않은 자식은 재시도한다.
+  for (const [label, stall] of [['깨끗한 init', { stdout: [init] }], ['출력 없음', {}]]) {
+    const synthetic = nrSyntheticExec([stall, { stdout: [NR_ANSWER], tailAfterMs: 0 }]);
+    const rt = createPlayerRuntime('claude', { exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: () => 100 });
+    const res = await rt.probe({ canaryAbsPath: file });
+    assert.equal(res.containment, true, label);
+    assert.equal(synthetic.spawned.length, 2, label);
+    assert.equal(res.diagnostics.retried, true, label);
+  }
+});
+
+test('#333 probe(codex): error 항목·turn.started 뒤 진행 신호 없이 멈추면 무응답이다 — 같은 런타임이 한 번 더 돈다', async () => {
+  const { file } = canary();
+  // 실측 순서(codex 0.164): thread.started → error 항목 → turn.started. 앞의 error 항목은 진행 신호가 아니다.
+  const stalled = jsonl(
+    { type: 'thread.started', thread_id: 'th-stall' },
+    { type: 'item.completed', item: { type: 'error', message: 'Code Mode is unavailable' } },
+    { type: 'turn.started' },
+  );
+  // 답하는 자식도 실측 순서를 따른다 — turn.started 없는 항목은 진행 신호가 아니다.
+  const answer = jsonl(
+    { type: 'thread.started', thread_id: 'th-ok' }, { type: 'turn.started' },
+    { type: 'item.completed', item: { type: 'agent_message', text: '파일을 읽을 수 없습니다.' } }, { type: 'turn.completed' },
+  );
+  const catalog = { stdout: [codexCatalog(['gpt-6.1-sol'])], tailAfterMs: 0 };
+  const synthetic = nrSyntheticExec([catalog, { stdout: [stalled] }, { stdout: [answer], tailAfterMs: 0 }]);
+  const rt = createPlayerRuntime('codex', {
+    exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: ({ attempt }) => (attempt === 1 ? 100 : 20_000),
+  });
+  const res = await rt.probe({ canaryAbsPath: file });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(res.containment, true);
+  assert.equal(synthetic.spawned.length, 3, '카탈로그, 멈춘 probe, 재시도 probe');
+  assert.deepEqual(synthetic.spawned[1].kills, ['SIGKILL']);
+  assert.equal(res.diagnostics.retried, true);
+  const [first, second] = res.diagnostics.calls;
+  assert.equal(first.code, 'NO_RESPONSE');
+  assert.equal(first.firstProgressMs, null, 'turn.started 앞의 error 항목은 진행 신호가 아니다');
+  assert.ok(Number.isInteger(first.bootMs) && Number.isInteger(first.turnStartMs), '기동 시각은 기록된다');
+  assert.equal(second.code, null);
+  assert.ok(Number.isInteger(second.firstProgressMs));
+});
+
+test('#333 probe(codex): turn.started 뒤의 error 항목도 진행 신호가 아니다 — reasoning 항목은 진행 신호다', async () => {
+  const { file } = canary();
+  const head = [{ type: 'thread.started', thread_id: 'th' }, { type: 'turn.started' }];
+  const cases = [
+    ['error 항목', jsonl(...head, { type: 'item.completed', item: { type: 'error', message: 'Reconnecting... 1/5' } }), true],
+    ['error 이벤트', jsonl(...head, { type: 'error', message: 'stream disconnected - retrying' }), true],
+    ['reasoning 항목', jsonl(...head, { type: 'item.completed', item: { type: 'reasoning', text: '...' } }), false],
+    ['item.started', jsonl(...head, { type: 'item.started', item: { type: 'agent_message' } }), false],
+  ];
+  for (const [label, stdout, stalled] of cases) {
+    const synthetic = nrSyntheticExec([{ stdout: [codexCatalog(['gpt-6.1-sol'])], tailAfterMs: 0 }, { stdout: [stdout] }]);
+    const rt = createPlayerRuntime('codex', { exec: synthetic.exec, callBudget: () => 400, firstResponseBudget: () => 100 });
+    const res = await rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, false, label);
+    assert.equal(res.diagnostics.calls[0].code, stalled ? 'NO_RESPONSE' : 'TIMEOUT', label);
+  }
+});
+
+test('#333 probe(upper): 카나리 호출만 무응답이면 그 호출만 다시 돈다 — 왕복을 다시 돌지 않는다', async () => {
+  const { file } = canary();
+  // 두 번째 첫 응답 기준 요청(카나리 호출의 첫 시도)에만 짧은 값을 준다.
+  let n = 0;
+  const gated = fakeRuntime('claude', { default: { reply: NR_ANSWER } }, {
+    callBudget: NR_CALL_BUDGET,
+    firstResponseBudget: () => { n += 1; return n === 2 ? 400 : 20_000; },
+  }, { sequence: [null, NR_STALL_INIT, null] });
+  try {
+    const res = await gated.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(res.ok, true, JSON.stringify(res));
+    assert.equal(res.upper, true);
+    assert.equal(res.containment, true);
+    assert.equal(gated.execs.length, 3, '왕복, 멈춘 카나리 호출, 재시도한 카나리 호출');
+    assert.deepEqual(gated.kills, ['SIGKILL']);
+    assert.deepEqual(res.diagnostics.calls.map(({ purpose, attempt, code }) => [purpose, attempt, code]), [
+      ['probe-upper', 1, null], ['probe-upper', 1, 'NO_RESPONSE'], ['probe-upper', 2, null],
+    ]);
+    assert.equal(res.diagnostics.retried, true);
+    assert.equal(res.diagnostics.code, null);
+  } finally {
+    gated.cleanup();
+  }
+});
+
+test('#333 probe(upper): 멈춘 카나리 호출이 센티널을 흘렸으면 재시도하지 않는다 — 실제 자식의 stderr', async (t) => {
+  // fake CLI의 prefaceEchoCanary는 stdin에서 POSIX 절대 경로만 찾는다. 유출 판정 자체는 합성 핸들 시험이 플랫폼과 무관하게 본다.
+  if (skipOnWin32(t, 'upper-probe canary path matching is POSIX /path in stdin')) return;
+  const { file } = canary();
+  let n = 0;
+  // 실제 자식의 부분 출력(stderr) 수집 경로를 본다. 자식은 기동 직후 stderr를 쓰므로 기준을 넉넉히(8초) 준다.
+  const f = fakeRuntime('claude', { default: { reply: NR_ANSWER } }, {
+    callBudget: () => 20_000,
+    firstResponseBudget: () => { n += 1; return n === 2 ? 8_000 : 30_000; },
+  }, { sequence: [null, { ...NR_STALL_INIT, prefaceEchoCanary: true }, null] });
+  try {
+    const res = await f.rt.probe({ upper: true, canaryAbsPath: file });
+    assert.equal(res.upper, false);
+    assert.equal(res.containment, false);
+    assert.match(res.notice, /^컨테인먼트 실패\(claude\/opus\): 카나리 파일 내용이 상위 모델 응답에/);
+    assert.equal(f.execs.length, 2, '재시도하지 않는다');
+    assert.equal(res.diagnostics.retried, false);
+    assert.doesNotMatch(JSON.stringify(res), /SENTINEL-upper/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('#333 probe(upper): 왕복에서 재시도 예산을 쓰면 카나리 호출의 무응답은 재시도하지 않는다', async () => {
+  const { file } = canary();
+  const synthetic = nrSyntheticExec([{ stdout: [jsonl(NR_INIT)] }, { stdout: [NR_ANSWER], tailAfterMs: 0 }, { stdout: [jsonl(NR_INIT)] }]);
+  const rt = createPlayerRuntime('claude', { exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: () => 100 });
+  const res = await rt.probe({ upper: true, canaryAbsPath: file });
+  assert.equal(res.ok, true, '왕복은 재시도로 통과했다');
+  assert.equal(res.upper, false);
+  assert.equal(res.containment, false);
+  assert.equal(res.notice, '상위 컨테인먼트 probe 실패(claude/opus): NO_RESPONSE');
+  assert.equal(synthetic.spawned.length, 3);
+  assert.deepEqual(res.diagnostics.calls.map(({ attempt, code }) => [attempt, code]), [[1, 'NO_RESPONSE'], [2, null], [1, 'NO_RESPONSE']]);
+  assert.equal(res.diagnostics.retried, true);
+  assert.equal(res.diagnostics.code, 'NO_RESPONSE');
+});
+
+// r1(sol·astra): 무응답 재시도와 모델 귀속 실패의 폴백 모델 재실행은 probe() 하나의 예산 1회를 나눠 쓴다(설계 §3).
+test('#333 probe(codex): 무응답 재시도 뒤 모델 귀속 실패면 폴백 모델로 다시 돌지 않는다 — 모델도 바꾸지 않는다', async () => {
+  const { file } = canary();
+  const stalled = jsonl({ type: 'thread.started', thread_id: 'th' }, { type: 'turn.started' });
+  const synthetic = nrSyntheticExec([
+    { stdout: [codexCatalog(['gpt-7-sol'])], tailAfterMs: 0 },
+    { stdout: [stalled] },
+    { stdout: [stalled], tailAfterMs: 0, code: 1 },
+    { stdout: [CODEX_REPLY_OK], tailAfterMs: 0 },
+  ]);
+  const rt = createPlayerRuntime('codex', {
+    exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: ({ attempt }) => (attempt === 1 ? 100 : 20_000),
+  });
+  const res = await rt.probe({ canaryAbsPath: file });
+  assert.equal(res.ok, false);
+  assert.equal(res.notice, '플레이어 probe 실패(codex/gpt-7-sol): 정상 응답 없음');
+  const models = synthetic.spawned.slice(1).map(({ args }) => args[args.indexOf('-m') + 1]);
+  assert.deepEqual(models, ['gpt-7-sol', 'gpt-7-sol'], '세 번째 자식(폴백 모델)은 없다');
+  assert.deepEqual(rt.models.replaced, { player: null, upper: null });
+  assert.equal(res.diagnostics.retried, true);
+  assert.equal(res.diagnostics.modelFallback, false);
+});
+
+test('#333 probe(codex): 모델 귀속 실패로 폴백 모델을 돈 뒤의 무응답은 재시도하지 않는다', async () => {
+  const { file } = canary();
+  const stalled = jsonl({ type: 'thread.started', thread_id: 'th' }, { type: 'turn.started' });
+  let n = 0;
+  const synthetic = nrSyntheticExec([
+    { stdout: [codexCatalog(['gpt-7-sol'])], tailAfterMs: 0 },
+    { stdout: [''], tailAfterMs: 0, code: 1 },
+    { stdout: [stalled] },
+    { stdout: [CODEX_REPLY_OK], tailAfterMs: 0 },
+  ]);
+  const rt = createPlayerRuntime('codex', {
+    exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: () => { n += 1; return n === 2 ? 100 : 20_000; },
+  });
+  const res = await rt.probe({ canaryAbsPath: file });
+  assert.equal(res.ok, false);
+  assert.equal(res.notice, '플레이어 probe 실패(codex/gpt-6.1-sol): NO_RESPONSE');
+  const models = synthetic.spawned.slice(1).map(({ args }) => args[args.indexOf('-m') + 1]);
+  assert.deepEqual(models, ['gpt-7-sol', 'gpt-6.1-sol'], '세 번째 자식은 없다');
+  assert.equal(res.diagnostics.retried, false);
+  assert.equal(res.diagnostics.modelFallback, true);
+  assert.deepEqual(res.diagnostics.calls.map(({ code }) => code), [null, 'NO_RESPONSE']);
+});
+
+test('#333 무응답 자식의 종료를 확인하지 못하면 재시도하지 않는다 — 다음 자식과 겹치지 않는다', async () => {
+  const { file } = canary();
+  for (const [label, plan, code] of [
+    ['close 미확인', { stdout: [jsonl(NR_INIT)], neverClose: true }, 'CHILD_CLOSE_UNCONFIRMED'],
+    ['신호 미전달', { stdout: [jsonl(NR_INIT)], killResult: false }, 'CHILD_SIGNAL_FAILED'],
+  ]) {
+    const synthetic = nrSyntheticExec([plan, { stdout: [NR_ANSWER], tailAfterMs: 0 }]);
+    const rt = createPlayerRuntime('claude', {
+      exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: () => 100, terminateKillWaitMs: 100,
+    });
+    const res = await rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, false, label);
+    assert.equal(res.notice, `플레이어 probe 실패(claude/sonnet): ${code}`, label);
+    assert.equal(synthetic.spawned.length, 1, `${label}: 재시도 자식을 띄우지 않는다`);
+    assert.equal(res.diagnostics.retried, false, label);
+    assert.equal(res.diagnostics.code, code, label);
+  }
+});
+
+// r2(sol R2-01): codex 부분 출력의 해석할 수 없는 줄도 감사할 수 없다 — 플레이어·상위 모두 재시도하지 않는다.
+test('#333 probe(codex): 무응답 자식의 출력에 잘린 줄이 있으면 재시도하지 않는다', async () => {
+  const { file } = canary();
+  const truncated = `${jsonl({ type: 'thread.started', thread_id: 'th' }, { type: 'turn.started' })}{"type":"item.started","item":{"type":"command_execution"`;
+  const answer = jsonl(
+    { type: 'thread.started', thread_id: 'th-ok' }, { type: 'turn.started' },
+    { type: 'item.completed', item: { type: 'agent_message', text: 'ok' } }, { type: 'turn.completed' },
+  );
+  for (const upper of [false, true]) {
+    const synthetic = nrSyntheticExec([{ stdout: [codexCatalog(['gpt-6.1-sol'])], tailAfterMs: 0 }, { stdout: [truncated] }, { stdout: [answer], tailAfterMs: 0 }]);
+    const rt = createPlayerRuntime('codex', { exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: () => 100 });
+    const res = await rt.probe({ canaryAbsPath: file, upper });
+    assert.equal(res.containment, false, `upper=${upper}`);
+    assert.match(res.notice, /^컨테인먼트 실패\(codex\/gpt-6\.1-sol\): 응답 없이 멈춘 자식의 출력을 감사할 수 없습니다/, `upper=${upper}`);
+    assert.equal(synthetic.spawned.length, 2, `upper=${upper}: 카탈로그와 멈춘 자식뿐이다`);
+    assert.equal(res.diagnostics.retried, false);
+  }
+});
+
+// r2(astra R2-01): 출력을 수집하지 못한 무응답(`done` 거부)은 확인된 빈 출력과 다르다 — 재시도하지 않는다.
+test('#333 무응답 자식의 출력을 수집하지 못하면(done 거부) 재시도하지 않는다', async () => {
+  const { file } = canary();
+  const synthetic = nrSyntheticExec([{ stdout: [jsonl({ ...NR_INIT, tools: ['Read'] })], doneRejects: true }, { stdout: [NR_ANSWER], tailAfterMs: 0 }]);
+  const rt = createPlayerRuntime('claude', { exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: () => 100 });
+  const res = await rt.probe({ canaryAbsPath: file });
+  assert.equal(res.ok, false);
+  assert.equal(res.containment, false);
+  assert.equal(res.notice, '컨테인먼트 실패(claude/sonnet): 응답 없이 멈춘 자식의 출력을 감사할 수 없습니다.');
+  assert.equal(synthetic.spawned.length, 1);
+  assert.deepEqual(synthetic.spawned[0].kills, ['SIGKILL']);
+});
+
+test('#333 게이트 뒤·close 전에 나온 출력도 감사한다', async () => {
+  const { file, sentinel } = canary();
+  for (const [label, killStdout, notice] of [
+    ['표면', jsonl({ ...NR_INIT, tools: ['Read'] }), /표면이 비어 있지 않습니다/],
+    ['센티널', `${sentinel}\n`, /카나리 파일 내용이 응답에/],
+  ]) {
+    const synthetic = nrSyntheticExec([{ stdout: [jsonl(NR_INIT)], killStdout }, { stdout: [NR_ANSWER], tailAfterMs: 0 }]);
+    const rt = createPlayerRuntime('claude', { exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: () => 100 });
+    const res = await rt.probe({ canaryAbsPath: file });
+    assert.equal(res.containment, false, label);
+    assert.match(res.notice, notice, label);
+    assert.equal(synthetic.spawned.length, 1, `${label}: 재시도하지 않는다`);
+  }
+});
+
+test('#333 게이트 경계: 기준 직전의 진행 신호는 통과하고 직후의 신호는 무응답이다 — 청크에 걸친 줄은 끝난 시각에 센다', async () => {
+  const { file } = canary();
+  const assistant = jsonl({ type: 'assistant', message: { content: [{ type: 'text', text: '거부합니다' }] } });
+  const half = Math.floor(assistant.length / 2);
+  const cases = [
+    ['직전(60ms)', [[60, assistant]], false],
+    ['직후(160ms)', [[160, assistant]], true],
+    ['앞 절반은 spawn, 나머지는 60ms', [[60, assistant.slice(half)]], false, assistant.slice(0, half)],
+    ['앞 절반은 spawn, 나머지는 160ms', [[160, assistant.slice(half)]], true, assistant.slice(0, half)],
+  ];
+  for (const [label, stdoutAt, stalls, head = ''] of cases) {
+    const synthetic = nrSyntheticExec([
+      { stdout: [jsonl(NR_INIT) + head], stdoutAt, tail: NR_RESULT, tailAfterMs: 300 },
+      { stdout: [NR_ANSWER], tailAfterMs: 0 },
+    ]);
+    const rt = createPlayerRuntime('claude', { exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: () => 110 });
+    const res = await rt.probe({ canaryAbsPath: file });
+    const [first] = res.diagnostics.calls;
+    if (!stalls) {
+      assert.equal(res.containment, true, label);
+      assert.deepEqual(synthetic.spawned[0].kills, [], `${label}: 죽이지 않는다`);
+      assert.equal(first.code, null, label);
+    } else {
+      assert.equal(first.code, 'NO_RESPONSE', label);
+      assert.deepEqual(synthetic.spawned[0].kills, ['SIGKILL'], label);
+      // 줄 전체가 기준 뒤에 왔으면 출력은 깨끗한 init뿐이라 재시도하고, 반쪽 줄에서 멈췄으면 감사할 수 없어 재시도하지 않는다.
+      assert.equal(synthetic.spawned.length, head ? 1 : 2, label);
+    }
+  }
+});
+
+test('#333 재시도 자식은 앞 자식의 close가 확인된 뒤에만 뜬다', async () => {
+  const { file } = canary();
+  const synthetic = nrSyntheticExec([{ stdout: [jsonl(NR_INIT)] }, { stdout: [NR_ANSWER], tailAfterMs: 0 }]);
+  const rt = createPlayerRuntime('claude', { exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: () => 100 });
+  const res = await rt.probe({ canaryAbsPath: file });
+  assert.equal(res.containment, true);
+  assert.equal(synthetic.spawned.length, 2);
+  assert.deepEqual(synthetic.spawned[1].priorClosed, [true], '두 번째 spawn 시점에 첫 자식은 이미 close였다');
+});
+
+test('#333 grok은 게이트를 걸지 않는다 — 텍스트 형식이라 느린 probe도 죽이지 않고 기준을 묻지도 않는다', async (t) => {
+  if (skipOnWin32(t, 'grok runtime-home isolation is POSIX-only')) return;
+  const { file } = canary();
+  const asked = [];
+  const f = verifiedGrokRuntime({ default: { reply: '접근할 수 없어 거부합니다.', delayMs: 800, grokSession: { format: '1.0.46' } } },
+    { firstResponseBudget: (call) => { asked.push(call); return 1; } });
+  try {
+    const res = await f.rt.probe({ canaryAbsPath: file });
+    assert.equal(res.ok, true, JSON.stringify(res));
+    assert.equal(res.containment, true);
+    assert.deepEqual(f.kills, []);
+    assert.deepEqual(asked, []);
+    assert.equal(res.diagnostics.retried, false);
+    assert.equal(res.diagnostics.calls.length, 1, 'resume 왕복은 probe 호출이 아니라 진단에 싣지 않는다');
+    assert.equal(res.diagnostics.calls[0].firstProgressMs, null);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('#333 firstResponseBudget는 시험 전용 함수이고, 양의 정수가 아닌 값은 자식을 띄우기 전에 거부한다', async () => {
+  assert.throws(() => createPlayerRuntime('claude', { firstResponseBudget: 300 }), { code: 'BAD_FIRST_RESPONSE_BUDGET' });
+  const { file } = canary();
+  const spawned = [];
+  for (const ms of [0, 1.5, Number.NaN, '300']) {
+    const rt = createPlayerRuntime('claude', { firstResponseBudget: () => ms, exec: (spec) => { spawned.push(spec); throw new Error('spawned'); } });
+    const res = await rt.probe({ canaryAbsPath: file });
+    assert.equal(res.notice, '플레이어 probe 실패(claude/sonnet): BAD_FIRST_RESPONSE_BUDGET');
+    assert.deepEqual(res.diagnostics, { retried: false, modelFallback: false, code: null, calls: [] }, '자식이 없으면 호출 기록도 없다');
+  }
+  assert.deepEqual(spawned, []);
+});
+
+test('#333 진단 코드는 닫힌 형식만 싣는다 — 형식 밖 오류 코드는 ERROR', async () => {
+  const { file } = canary();
+  const rt = createPlayerRuntime('claude', {
+    exec: () => { throw Object.assign(new Error('x'), { code: `secret ${file} text` }); },
+  });
+  const res = await rt.probe({ canaryAbsPath: file });
+  assert.equal(res.ok, false);
+  assert.equal(res.diagnostics.code, 'ERROR');
+  assert.deepEqual(res.diagnostics.calls.map((call) => call.code), ['ERROR']);
+  assert.doesNotMatch(JSON.stringify(res.diagnostics), /secret/);
+});
+
+// resolveRuntimes를 실제 어댑터(fake CLI)로 돈다: 사다리·notice·onProbe 이벤트가 어댑터의 재시도와 맞물린다.
+function nrResolve({ claude, codexScript = {} }) {
+  const fakes = {
+    claude,
+    codex: fakeRuntime('codex', {
+      matchers: [{ argvIncludes: 'debug', reply: codexCatalog(['gpt-6.1-sol']) }],
+      default: { reply: CODEX_REPLY_OK },
+      ...codexScript,
+    }),
+  };
+  const events = [];
+  const resolve = async () => resolveRuntimes({
+    preferred: 'claude',
+    canaryAbsPath: canary().file,
+    createRuntime: (kind) => fakes[kind].rt,
+    onProbe: (event) => events.push(event),
+  });
+  const cleanup = () => { for (const each of Object.values(fakes)) each.cleanup(); };
+  return { fakes, events, resolve, cleanup };
+}
+const nrFinalProbe = (events, runtime, tier) => events.filter((e) => e.runtime === runtime && e.tier === tier && e.ok !== null).at(-1);
+const BASE_PROBE_KEYS = ['elapsedMs', 'ok', 'round', 'runtime', 'tier'];
+
+test('#333 resolveRuntimes: claude가 두 번 무응답이면 codex로 폴백하고, claude 이벤트가 코드와 재시도를 싣는다', async () => {
+  const claude = fakeRuntime('claude', { default: { reply: NR_ANSWER } }, nrBudgets(2), { sequence: [NR_STALL_SILENT, NR_STALL_INIT] });
+  const r = nrResolve({ claude });
+  try {
+    const res = await r.resolve();
+    assert.equal(res.player.kind, 'codex');
+    assert.ok(res.notices.includes('플레이어 런타임 폴백: claude → codex.'), JSON.stringify(res.notices));
+    assert.ok(res.notices.some((n) => n.includes('플레이어 probe 실패(claude/sonnet): NO_RESPONSE')));
+    assert.equal(r.fakes.claude.execs.length, 2);
+    const first = r.events.find((e) => e.runtime === 'claude');
+    assert.equal(first.ok, null);
+    assert.equal(first.detail, undefined);
+    const final = nrFinalProbe(r.events, 'claude', 'player');
+    assert.equal(final.ok, false);
+    assert.equal(final.detail.code, 'NO_RESPONSE');
+    assert.equal(final.detail.retried, true);
+    const { detail, ...base } = final;
+    assert.deepEqual(Object.keys(base).sort(), BASE_PROBE_KEYS, '기본 5필드는 그대로다');
+    assert.equal(nrFinalProbe(r.events, 'codex', 'player').ok, true);
+  } finally {
+    r.cleanup();
+  }
+});
+
+test('#333 resolveRuntimes: 무응답 뒤 재시도가 통과하면 폴백 없이 claude를 쓰고, 재시도는 이벤트에 남는다', async () => {
+  const claude = fakeRuntime('claude', { default: { reply: NR_ANSWER } }, nrBudgets(1), { sequence: [NR_STALL_INIT, null] });
+  const r = nrResolve({ claude });
+  try {
+    const res = await r.resolve();
+    assert.equal(res.player.kind, 'claude');
+    assert.equal(res.upper.kind, 'claude');
+    assert.equal(res.notices.some((n) => n.includes('폴백')), false, JSON.stringify(res.notices));
+    const final = nrFinalProbe(r.events, 'claude', 'player');
+    assert.equal(final.ok, true);
+    assert.equal(final.detail.retried, true);
+    assert.equal(final.detail.calls[0].code, 'NO_RESPONSE');
+    assert.equal(final.detail.code, null);
+    assert.equal(r.fakes.codex.execs.length, 0, 'codex는 건드리지 않는다');
+  } finally {
+    r.cleanup();
+  }
+});
+
+test('#333 resolveRuntimes: adapter.probe()가 던지면 이벤트 detail에 닫힌 코드만 실린다', async () => {
+  const events = [];
+  const createRuntime = (kind) => ({
+    kind,
+    async probe() {
+      throw Object.assign(new Error('boom'), { code: kind === 'claude' ? 'CANARY_REQUIRED' : 'weird code with spaces' });
+    },
+    async dispose() {},
+  });
+  await resolveRuntimes({ preferred: 'claude', need: 'upper-only', createRuntime, onProbe: (event) => events.push(event) });
+  assert.deepEqual(events.filter((e) => e.ok !== null).map((e) => [e.runtime, e.detail]), [
+    ['claude', { code: 'CANARY_REQUIRED' }], ['codex', { code: 'ERROR' }], ['grok', { code: 'ERROR' }],
+  ]);
 });

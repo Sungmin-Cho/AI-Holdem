@@ -3,7 +3,7 @@
 //
 // 동작: stdin 전문을 읽고 `FAKE_CLI_SCRIPT`(JSON)의 매처에서 응답을 골라 stdout에 쓴다.
 //   { matchers: [{ includes?, argvIncludes?, reply, delayMs?, exitCode?, stderr?,
-//                  ignoreTerm?, echoCanary?, orphanMs?, inspectJson?, inspectExit?,
+//                  ignoreTerm?, echoCanary?, preface?, prefaceStderr?, prefaceEchoCanary?, orphanMs?, inspectJson?, inspectExit?,
 //                  grokSession?, grokSessionRaw?, preexistingSession? }],
 //     default: { reply, … },
 //     logEnvValues?: ['HOME','GROK_AUTH_PATH'] }
@@ -12,6 +12,9 @@
 //   - `ignoreTerm`이면 SIGTERM을 삼킨다 — 단계적 종료(TERM→KILL) 계약 테스트용.
 //   - `echoCanary`면 stdin에서 절대 경로를 찾아 그 파일 내용을 reply 뒤에 붙인다 —
 //     어댑터가 스스로 만든 fresh 센티널을 테스트가 몰라도 유출 CLI를 흉내 낼 수 있다.
+//   - `preface`(문자열)는 `delayMs` **전에**, 기동 직후 stdout에 쓴다. `reply`는 그대로 `delayMs` 뒤에 나온다 — 첫 줄(init 등)만
+//     내고 멈추는 "무응답" 자식과, 진행 신호는 일찍 내고 최종 응답은 늦은 자식을 같은 스크립트로 흉내 낸다(#333).
+//     `prefaceStderr`는 같은 시점에 stderr에 쓰는 문자열, `prefaceEchoCanary`면 stdin의 절대 경로 파일 내용을 stderr에 쓴다.
 //   - `orphanMs`면 stdout/stderr를 상속한 detached 후손을 그 시간만큼 살려 두고 즉시
 //     exit 0 한다 — 직계 exit 뒤에도 stdio close가 열려 있는 경우의 계약 테스트용.
 //     후손 pid는 `{orphanPid}` 한 줄로 로그에 남긴다(테스트가 정리한다).
@@ -267,6 +270,10 @@ function respond() {
   // 파이프로 가는 stdout 쓰기는 비동기다 — 끝나기 전에 exit하면 64KiB를 넘는 출력이 잘린다.
   process.stdout.write(out, () => process.exit(chosen.exitCode ?? 0));
 }
+
+if (chosen.preface) process.stdout.write(String(chosen.preface));
+if (chosen.prefaceStderr) process.stderr.write(String(chosen.prefaceStderr));
+if (chosen.prefaceEchoCanary) process.stderr.write(canaryContent());
 
 if (chosen.delayMs) setTimeout(respond, chosen.delayMs);
 else respond();

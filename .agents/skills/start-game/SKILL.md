@@ -106,7 +106,7 @@ node engine/cli.js resume-check --game-dir "$SESSION_DIR" --lock-dir game
 2. `phase`가 `bootstrap`을 지남(`playing` 이후) — 정상 기동이다.
 3. `resume-check`의 **`loopPidAlive:false`** — 사이드카 pid가 사망했다. `/tmp/ai-holdem-boot.log`를 보고 중단한다.
 
-런타임 probe 사다리(런타임 × 플레이어/상위 모델/컨테인먼트)가 있어 부트가 수십 초를 넘을 수 있다. grok은 격리 홈(`~/.ai-holdem/runtime-home/…`, 지워도 됨)에서 inspect·세션 감사를 돌며, 카나리 거부 왕복이 각 25–50 s라 부트가 1–2분(Grok 호스트는 2–3분) 걸릴 수 있다. grok 탈락 notice의 코드(`RUNTIME_HOME_*`·`GROK_*`)가 어떤 검사에서 떨어졌는지를 말한다. **pid가 살아 있는 한 "기동 중"으로 보고하고 계속 기다린다** — 중단하거나 `--force`로 다시 띄우지 마라.
+런타임 probe 사다리(런타임 × 플레이어/상위 모델/컨테인먼트)가 있어 부트가 수십 초를 넘을 수 있다. grok은 격리 홈(`~/.ai-holdem/runtime-home/…`, 지워도 됨)에서 inspect·세션 감사를 돌며, 카나리 거부 왕복이 각 25–50 s라 부트가 1–2분(Grok 호스트는 2–3분) 걸릴 수 있다. grok 탈락 notice의 코드(`RUNTIME_HOME_*`·`GROK_*`)가 어떤 검사에서 떨어졌는지를 말한다. claude·codex probe 호출이 30초 안에 모델 응답 진행 신호를 내지 않으면 그 자식을 종료하고 같은 런타임으로 한 번 다시 돈다 — 그것도 무응답이면 notice `…probe 실패(…): NO_RESPONSE`를 남기고 다음 런타임으로 넘어간다. `loop.log`의 `runtime-probe` 기록에 호출별 코드·구간 시각과 재시도 여부가 남는다. **pid가 살아 있는 한 "기동 중"으로 보고하고 계속 기다린다** — 중단하거나 `--force`로 다시 띄우지 마라.
 
 2번에 도달하면 `loop-state.json`의 `port`·`sessionToken`으로 브라우저를 연다.
 

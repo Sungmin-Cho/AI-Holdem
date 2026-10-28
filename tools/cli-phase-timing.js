@@ -3,7 +3,16 @@
 // stdout을 줄 단위로 보고 JSONL 이벤트의 **이름**(`type`)만 읽는다 — 원문·메시지·세션 id는 남기지 않는다.
 // 시각은 모두 spawn 기준 ms(단조 시계)이고, 관측하지 못한 값은 0이 아니라 null이다. 기준 시각의 규칙은
 // 비교 도구(/4) 타임라인과 같다: 첫 `thread.started`, 첫 `turn.started`, 첫 `turn.completed`/`turn.failed`.
-// codex만 이 이벤트를 낸다. claude·grok은 exit·close만 채워진다.
+// codex JSONL이 이 이벤트를 낸다. claude stream-json은 `system/init`을 `bootMs`로 싣는다(CLI가 기동을 마치고
+// 낸 첫 세션 이벤트). grok·claude text 형식은 exit·close만 채워진다.
+//
+// 진행 신호(#333): `firstProgressMs`는 "모델이 응답을 내기 시작했다"는 첫 이벤트의 시각이다. CLI 자체의 기동·
+// 재시도·경고 이벤트는 진행 신호가 아니다.
+//   claude: `assistant`·`user`·`result`·`stream_event`의 첫 줄. `system`(init·api_retry·hook 등 모든 subtype),
+//           `rate_limit_event`(응답 헤더 기반이라 본문 정체를 가르지 못한다), 모르는 type은 아니다.
+//   codex:  `turn.started` **이후**의 첫 `item.*`(error 항목 제외), 또는 `turn.completed`·`turn.failed`.
+//           codex 0.164는 `turn.started` 앞에 `item.completed`(`item.type: "error"`)를 내므로 그것은 세지 않는다.
+// 두 런타임의 type 이름은 겹치지 않아 파서는 형식을 몰라도 된다.
 // 한 줄(개행 없이 이어지는 버퍼 포함)이 64KiB를 넘으면 그 줄은 이름을 뽑지 않는다.
 //
 // 실패 위치(#312 진단): turn을 끝낸 이벤트의 종류(`turnEnd`), `turn.failed` 메시지의 닫힌 분류(`turnError`),
@@ -11,7 +20,8 @@
 // 아래 닫힌 분류의 이름으로만 남고, 목록 밖은 `other`다. codex 0.163.0은 실패 turn을 `error`와
 // `turn.failed`(`error.message`만, 구조화된 코드 없음) 뒤 exit 1로 낸다.
 const LINE_LIMIT = 64 * 1024;
-const MILESTONE_HINT = /"(?:thread\.started|turn\.(?:started|completed|failed)|error)"/;
+const MILESTONE_HINT = /"(?:thread\.started|turn\.(?:started|completed|failed)|error|item\.[a-z_.]+|system|assistant|user|result|stream_event)"/;
+const CLAUDE_PROGRESS_TYPES = new Set(['assistant', 'user', 'result', 'stream_event']);
 
 // error 계열 메시지의 닫힌 분류. 첫 일치가 이긴다. 비교 도구(/4)의 타임라인 이름과 같은 목록이다.
 // capacity(#312 L5: "Selected model is at capacity")는 기존 분류를 바꾸지 않도록 끝에 둔다.
@@ -46,7 +56,9 @@ const since = (later, earlier) => (later === null || earlier === null ? null : l
 
 export function createPhaseTiming(now = () => performance.now()) {
   const startedAt = now();
-  const marks = { bootMs: null, turnStartMs: null, turnEndMs: null, signalMs: null, exitMs: null, closeMs: null };
+  const marks = {
+    bootMs: null, turnStartMs: null, firstProgressMs: null, turnEndMs: null, signalMs: null, exitMs: null, closeMs: null,
+  };
   let turnEnd = null;
   let turnError = null;
   const errorEvents = {};
@@ -60,9 +72,14 @@ export function createPhaseTiming(now = () => performance.now()) {
     let event;
     try { event = JSON.parse(line); } catch { return; }
     const type = event?.type;
+    const progress = () => { if (marks.firstProgressMs === null) marks.firstProgressMs = ms; };
     if (type === 'thread.started' && marks.bootMs === null) marks.bootMs = ms;
+    else if (type === 'system' && event?.subtype === 'init' && marks.bootMs === null) marks.bootMs = ms;
     else if (type === 'turn.started' && marks.turnStartMs === null) marks.turnStartMs = ms;
+    else if (CLAUDE_PROGRESS_TYPES.has(type)) progress();
+    else if (typeof type === 'string' && type.startsWith('item.') && event?.item?.type !== 'error' && marks.turnStartMs !== null) progress();
     else if ((type === 'turn.completed' || type === 'turn.failed') && marks.turnEndMs === null) {
+      progress();
       marks.turnEndMs = ms;
       turnEnd = type === 'turn.completed' ? 'completed' : 'failed';
       if (type === 'turn.failed') turnError = errorClassOf(event);

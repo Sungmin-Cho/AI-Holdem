@@ -34,7 +34,7 @@ test('milestones are the first thread/turn events, read across chunk boundaries'
   timing.observe({ type: 'close', code: 0, signal: null });
   const view = timing.view();
   assert.deepEqual(view, {
-    bootMs: 220, turnStartMs: 220, turnEndMs: 3100, signalMs: null, exitMs: 3400, closeMs: 3410,
+    bootMs: 220, turnStartMs: 220, firstProgressMs: 3000, turnEndMs: 3100, signalMs: null, exitMs: 3400, closeMs: 3410,
     turnMs: 2880, censored: false, exitToCloseMs: 10,
     turnEnd: 'completed', turnError: null, errorEvents: {}, exitCode: 0, exitSignal: null,
   });
@@ -179,6 +179,83 @@ test('withTiming attaches once and never throws on unusual errors', () => {
   assert.equal(withTiming(frozen, { a: 3 }), frozen);
   assert.equal(frozen.timing, undefined);
   assert.equal(withTiming(null, { a: 4 }), null);
+});
+
+// ── 진행 신호(#333) ───────────────────────────────────────────────────────────
+
+// 이벤트 열을 시각과 함께 먹이고 첫 진행 신호·기동 시각을 돌려준다.
+function progressOf(...steps) {
+  const c = clock();
+  const timing = createPhaseTiming(c.now);
+  for (const [ms, ...events] of steps) {
+    c.set(ms);
+    timing.observe({ type: 'stdout', chunk: events.map((event) => (typeof event === 'string' ? `${event}\n` : line(event))).join('') });
+  }
+  const view = timing.view();
+  return { progress: view.firstProgressMs, boot: view.bootMs, view };
+}
+
+test('claude progress: the first assistant/user/result/stream_event line; system init is the boot mark, not progress', () => {
+  const init = { type: 'system', subtype: 'init', tools: [], mcp_servers: [], plugins: [] };
+  const { progress, boot, view } = progressOf([150, init], [1700, { type: 'assistant', message: { content: [] } }], [2300, { type: 'result', result: 'ok' }]);
+  assert.equal(boot, 150, 'claude system/init is the first session event');
+  assert.equal(progress, 1700, 'the first assistant line is the first progress signal');
+  assert.equal(view.turnStartMs, null, 'claude has no turn.started');
+  for (const type of ['assistant', 'user', 'result', 'stream_event']) {
+    assert.equal(progressOf([40, { type }]).progress, 40, `${type} is progress`);
+  }
+});
+
+test('claude non-progress lines: any system subtype, rate_limit_event and unknown types', () => {
+  const quiet = progressOf(
+    [10, { type: 'system', subtype: 'init' }],
+    [20, { type: 'system', subtype: 'api_retry', attempt: 1 }],
+    [30, { type: 'system', subtype: 'hook_started' }],
+    [40, { type: 'rate_limit_event', rate_limit_info: {} }],
+    [50, { type: 'something_new' }],
+    [60, 'plain text, not json "assistant"'],
+  );
+  assert.equal(quiet.progress, null);
+  assert.equal(quiet.boot, 10);
+  // 뒤에 오는 진짜 응답이 그 시각을 가진다. rate_limit_event가 assistant 뒤에 와도 첫 시각은 바뀌지 않는다.
+  const later = progressOf([10, { type: 'system', subtype: 'init' }], [20, { type: 'rate_limit_event' }], [900, { type: 'assistant' }], [950, { type: 'rate_limit_event' }]);
+  assert.equal(later.progress, 900);
+});
+
+test('codex progress: only an item after turn.started that is not an error, or the turn end', () => {
+  // 실측(codex 0.164): turn.started 앞에 type "error" item.completed가 온다.
+  const beforeTurn = progressOf(
+    [200, { type: 'thread.started', thread_id: 'th-1' }],
+    [210, { type: 'item.completed', item: { type: 'error', message: 'x' } }],
+    [220, { type: 'item.completed', item: { type: 'agent_message', text: 'too early' } }],
+  );
+  assert.equal(beforeTurn.progress, null, 'items before turn.started are not progress, error or not');
+  const quiet = progressOf(
+    [200, { type: 'thread.started' }],
+    [800, { type: 'turn.started' }],
+    [810, { type: 'item.completed', item: { type: 'error', message: 'x' } }],
+    [820, { type: 'item.started', item: { type: 'error' } }],
+    [830, { type: 'error', message: 'warn' }],
+  );
+  assert.equal(quiet.progress, null, 'thread.started, turn.started, error events and error items are not progress');
+  assert.equal(quiet.boot, 200);
+  const item = progressOf([200, { type: 'thread.started' }], [800, { type: 'turn.started' }], [810, { type: 'item.completed', item: { type: 'error' } }], [5400, { type: 'item.started', item: { type: 'agent_message' } }]);
+  assert.equal(item.progress, 5400);
+  assert.equal(progressOf([1, { type: 'turn.started' }], [90, { type: 'turn.completed' }]).progress, 90);
+  const failed = progressOf([1, { type: 'turn.started' }], [70, { type: 'turn.failed', error: { message: 'x' } }]);
+  assert.equal(failed.progress, 70);
+  assert.equal(failed.view.turnEndMs, 70);
+});
+
+test('the progress mark is the first one only and a fresh view has none', () => {
+  assert.equal(createPhaseTiming(() => 0).view().firstProgressMs, null);
+  assert.equal(progressOf([5, { type: 'assistant' }], [9, { type: 'result' }]).progress, 5);
+  const c = clock();
+  const timing = createPhaseTiming(c.now);
+  timing.observe({ type: 'stdout', chunk: '{"type":"assis' });
+  c.set(300);
+  timing.observe({ type: 'stdout', chunk: 'tant"}\n' });
+  assert.equal(timing.view().firstProgressMs, 300, 'a line split across chunks is read when it completes');
 });
 
 // ── 어댑터 경로(fake CLI, 실제 spawnCli) ──────────────────────────────────────
