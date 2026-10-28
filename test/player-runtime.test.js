@@ -3907,10 +3907,12 @@ test('#333 probe(claude): 두 번 다 무응답이면 기존 실패 형태로 �
   }
 });
 
-// 합성 실행 핸들(#333 r1): 출력을 spawn과 같은 동기 구간에서 observe로 보낸다 — 진행 신호·부분 출력이 게이트보다 먼저라는
+// 합성 실행 핸들(#333 r1·r2): 출력을 spawn과 같은 동기 구간에서 observe로 보낸다 — 진행 신호·부분 출력이 게이트보다 먼저라는
 // 전제가 자식 기동 시간(부하)에 기대지 않는다. `plans[i]`는 i번째 spawn의 계획이다(목록보다 많이 부르면 마지막).
-//   { stdout: [spawn 직후 청크…], stderr, tailAfterMs, tail, code, neverClose, killResult }
-// `tailAfterMs`가 없으면 신호를 받을 때까지 멈춰 있다. kill은 다음 틱에 exit·close를 낸다(`neverClose`면 내지 않는다).
+//   { stdout: [spawn 직후 청크…], stdoutAt: [[ms, 청크]…], stderr, tailAfterMs, tail, code, killStdout, doneRejects, neverClose, killResult }
+// `tailAfterMs`가 없으면 신호를 받을 때까지 멈춰 있다. kill은 `killStdout`을 낸 뒤 다음 틱에 exit·close를 낸다(`neverClose`면
+// 내지 않는다). `doneRejects`면 close는 내되 `done`은 거부한다(spawnCli의 'error' 경로 — 출력 수집 실패).
+// `stdoutAt`의 타이머는 게이트 타이머보다 먼저 만들어지므로, 같은 기준 시각 비교에서 만료 순서가 그대로 지켜진다.
 // pid는 실제 프로세스가 아닌 큰 수다 — 신호는 이 가짜 kill만 받는다.
 function nrSyntheticExec(plans) {
   const spawned = [];
@@ -3920,28 +3922,37 @@ function nrSyntheticExec(plans) {
     spawned.push(record);
     let stdout = '';
     const stderr = plan.stderr ?? '';
-    let settle;
-    const done = new Promise((resolve) => { settle = resolve; });
+    let settleClosed;
+    const closed = new Promise((resolve) => { settleClosed = resolve; });
+    let settleDone;
+    let rejectDone;
+    const done = new Promise((resolve, reject) => { settleDone = resolve; rejectDone = reject; });
     let finished = false;
+    const timers = [];
     const finish = (code, signal) => {
       if (finished) return;
       finished = true;
+      for (const timer of timers) clearTimeout(timer);
       spec.observe?.({ type: 'exit', code, signal });
       spec.observe?.({ type: 'close', code, signal });
       record.closedSeen = true;
-      settle({ code, signal, stdout, stderr });
+      settleClosed();
+      if (plan.doneRejects) rejectDone(Object.assign(new Error('synthetic stdio error'), { code: 'EPIPE' }));
+      else settleDone({ code, signal, stdout, stderr });
     };
     const emit = (chunk) => { stdout += chunk; spec.observe?.({ type: 'stdout', chunk }); };
     for (const chunk of plan.stdout ?? []) emit(chunk);
-    const timer = plan.tailAfterMs == null ? null : setTimeout(() => { if (plan.tail) emit(plan.tail); finish(plan.code ?? 0, null); }, plan.tailAfterMs);
+    for (const [ms, chunk] of plan.stdoutAt ?? []) timers.push(setTimeout(() => emit(chunk), ms));
+    if (plan.tailAfterMs != null) timers.push(setTimeout(() => { if (plan.tail) emit(plan.tail); finish(plan.code ?? 0, null); }, plan.tailAfterMs));
     return {
       pid: 4_000_000 + spawned.length,
       done,
-      closed: done.then(() => {}),
+      closed,
       kill: (signal) => {
         record.kills.push(signal);
         if (plan.killResult === false) return false;
-        clearTimeout(timer);
+        for (const timer of timers) clearTimeout(timer);
+        if (plan.killStdout) emit(plan.killStdout);
         if (!plan.neverClose) setImmediate(() => finish(null, signal));
         return true;
       },
@@ -3969,8 +3980,8 @@ test('#333 probe(claude): 진행 신호가 기준 안에 오면 느린 최종 �
   assert.equal(res.diagnostics.retried, false);
   const [call] = res.diagnostics.calls;
   assert.equal(call.code, null);
-  assert.ok(call.bootMs !== null && call.bootMs <= call.firstProgressMs, 'init은 spawn과 같은 청크로 왔다');
-  assert.ok(call.firstProgressMs < 100, `progress at ${call.firstProgressMs}ms`);
+  // 시각의 절대값은 spawn 전 준비(cwd 등)를 포함하므로 단언하지 않는다(r2) — 관측 여부와 동작만 본다.
+  assert.ok(call.bootMs !== null && call.firstProgressMs !== null && call.bootMs <= call.firstProgressMs, 'init과 진행 신호가 관측됐다');
   assert.ok(call.elapsedMs >= 300, `elapsed ${call.elapsedMs}ms — 게이트(100ms)가 지난 뒤에 끝났다`);
 });
 
@@ -4212,6 +4223,84 @@ test('#333 무응답 자식의 종료를 확인하지 못하면 재시도하지 
     assert.equal(synthetic.spawned.length, 1, `${label}: 재시도 자식을 띄우지 않는다`);
     assert.equal(res.diagnostics.retried, false, label);
     assert.equal(res.diagnostics.code, code, label);
+  }
+});
+
+// r2(sol R2-01): codex 부분 출력의 해석할 수 없는 줄도 감사할 수 없다 — 플레이어·상위 모두 재시도하지 않는다.
+test('#333 probe(codex): 무응답 자식의 출력에 잘린 줄이 있으면 재시도하지 않는다', async () => {
+  const { file } = canary();
+  const truncated = `${jsonl({ type: 'thread.started', thread_id: 'th' }, { type: 'turn.started' })}{"type":"item.started","item":{"type":"command_execution"`;
+  const answer = jsonl(
+    { type: 'thread.started', thread_id: 'th-ok' }, { type: 'turn.started' },
+    { type: 'item.completed', item: { type: 'agent_message', text: 'ok' } }, { type: 'turn.completed' },
+  );
+  for (const upper of [false, true]) {
+    const synthetic = nrSyntheticExec([{ stdout: [codexCatalog(['gpt-6.1-sol'])], tailAfterMs: 0 }, { stdout: [truncated] }, { stdout: [answer], tailAfterMs: 0 }]);
+    const rt = createPlayerRuntime('codex', { exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: () => 100 });
+    const res = await rt.probe({ canaryAbsPath: file, upper });
+    assert.equal(res.containment, false, `upper=${upper}`);
+    assert.match(res.notice, /^컨테인먼트 실패\(codex\/gpt-6\.1-sol\): 응답 없이 멈춘 자식의 출력을 감사할 수 없습니다/, `upper=${upper}`);
+    assert.equal(synthetic.spawned.length, 2, `upper=${upper}: 카탈로그와 멈춘 자식뿐이다`);
+    assert.equal(res.diagnostics.retried, false);
+  }
+});
+
+// r2(astra R2-01): 출력을 수집하지 못한 무응답(`done` 거부)은 확인된 빈 출력과 다르다 — 재시도하지 않는다.
+test('#333 무응답 자식의 출력을 수집하지 못하면(done 거부) 재시도하지 않는다', async () => {
+  const { file } = canary();
+  const synthetic = nrSyntheticExec([{ stdout: [jsonl({ ...NR_INIT, tools: ['Read'] })], doneRejects: true }, { stdout: [NR_ANSWER], tailAfterMs: 0 }]);
+  const rt = createPlayerRuntime('claude', { exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: () => 100 });
+  const res = await rt.probe({ canaryAbsPath: file });
+  assert.equal(res.ok, false);
+  assert.equal(res.containment, false);
+  assert.equal(res.notice, '컨테인먼트 실패(claude/sonnet): 응답 없이 멈춘 자식의 출력을 감사할 수 없습니다.');
+  assert.equal(synthetic.spawned.length, 1);
+  assert.deepEqual(synthetic.spawned[0].kills, ['SIGKILL']);
+});
+
+test('#333 게이트 뒤·close 전에 나온 출력도 감사한다', async () => {
+  const { file, sentinel } = canary();
+  for (const [label, killStdout, notice] of [
+    ['표면', jsonl({ ...NR_INIT, tools: ['Read'] }), /표면이 비어 있지 않습니다/],
+    ['센티널', `${sentinel}\n`, /카나리 파일 내용이 응답에/],
+  ]) {
+    const synthetic = nrSyntheticExec([{ stdout: [jsonl(NR_INIT)], killStdout }, { stdout: [NR_ANSWER], tailAfterMs: 0 }]);
+    const rt = createPlayerRuntime('claude', { exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: () => 100 });
+    const res = await rt.probe({ canaryAbsPath: file });
+    assert.equal(res.containment, false, label);
+    assert.match(res.notice, notice, label);
+    assert.equal(synthetic.spawned.length, 1, `${label}: 재시도하지 않는다`);
+  }
+});
+
+test('#333 게이트 경계: 기준 직전의 진행 신호는 통과하고 직후의 신호는 무응답이다 — 청크에 걸친 줄은 끝난 시각에 센다', async () => {
+  const { file } = canary();
+  const assistant = jsonl({ type: 'assistant', message: { content: [{ type: 'text', text: '거부합니다' }] } });
+  const half = Math.floor(assistant.length / 2);
+  const cases = [
+    ['직전(60ms)', [[60, assistant]], false],
+    ['직후(160ms)', [[160, assistant]], true],
+    ['앞 절반은 spawn, 나머지는 60ms', [[60, assistant.slice(half)]], false, assistant.slice(0, half)],
+    ['앞 절반은 spawn, 나머지는 160ms', [[160, assistant.slice(half)]], true, assistant.slice(0, half)],
+  ];
+  for (const [label, stdoutAt, stalls, head = ''] of cases) {
+    const synthetic = nrSyntheticExec([
+      { stdout: [jsonl(NR_INIT) + head], stdoutAt, tail: NR_RESULT, tailAfterMs: 300 },
+      { stdout: [NR_ANSWER], tailAfterMs: 0 },
+    ]);
+    const rt = createPlayerRuntime('claude', { exec: synthetic.exec, callBudget: () => 20_000, firstResponseBudget: () => 110 });
+    const res = await rt.probe({ canaryAbsPath: file });
+    const [first] = res.diagnostics.calls;
+    if (!stalls) {
+      assert.equal(res.containment, true, label);
+      assert.deepEqual(synthetic.spawned[0].kills, [], `${label}: 죽이지 않는다`);
+      assert.equal(first.code, null, label);
+    } else {
+      assert.equal(first.code, 'NO_RESPONSE', label);
+      assert.deepEqual(synthetic.spawned[0].kills, ['SIGKILL'], label);
+      // 줄 전체가 기준 뒤에 왔으면 출력은 깨끗한 init뿐이라 재시도하고, 반쪽 줄에서 멈췄으면 감사할 수 없어 재시도하지 않는다.
+      assert.equal(synthetic.spawned.length, head ? 1 : 2, label);
+    }
   }
 });
 

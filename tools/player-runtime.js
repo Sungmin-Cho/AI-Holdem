@@ -868,14 +868,14 @@ const diagnosticMs = (value) => (Number.isSafeInteger(value) && value >= 0 ? val
 
 // 무응답으로 죽인 자식의 부분 출력 감사(#333). 재시도는 그 호출이 아무 표면도 쓰지 못했다는 전제에서만 안전하다.
 // 그 호출의 센티널이 새어 나왔거나, claude가 init에서 비어 있지 않은 표면(도구·MCP·플러그인·hooks)을 보였거나
-// hook·tool_use 이벤트가 있으면 위반이다. init이 아예 없으면(기동 전 정체) 위반이 아니다. 해석할 수 없는 줄(중간에
-// 잘린 init 등)은 표면을 확인할 수 없으므로 `unverified`다 — 다음 자식의 깨끗한 응답이 그것을 덮게 두지 않는다.
+// hook·tool_use 이벤트가 있으면 위반이다. init이 아예 없으면(기동 전 정체) 위반이 아니다. 감사할 수 없는 출력은
+// `unverified`다 — 다음 자식의 깨끗한 응답이 그것을 덮게 두지 않는다: 출력을 수집하지 못했거나(`done` 거부 — 확인된
+// 빈 출력과 다르다), 형식과 무관하게 해석할 수 없는 줄(중간에 잘린 init·항목 등)이 있는 경우다.
 function auditNoResponseOutput(partial, sentinel) {
-  if (!partial) return null;
+  if (!partial) return 'unverified';
   const stdout = String(partial.stdout ?? '');
   const stderr = String(partial.stderr ?? '');
   if (sentinel && (stdout.includes(sentinel) || stderr.includes(sentinel))) return 'leak';
-  if (partial.format !== 'claude-stream') return null;
   for (const line of stdout.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -885,6 +885,7 @@ function auditNoResponseOutput(partial, sentinel) {
     } catch {
       return 'unverified';
     }
+    if (partial.format !== 'claude-stream') continue;
     if (event?.type === 'system' && event?.subtype === 'init' && !claudeInitSurfaceEmpty(event)) return 'surface';
     if (/hook/i.test(String(event?.type ?? '')) || /hook/i.test(String(event?.subtype ?? '')) || hasToolUse(event)) return 'surface';
   }
@@ -1255,6 +1256,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       }
       if (error?.code === 'NO_RESPONSE') {
         // 종료가 확인된 뒤의 부분 출력 — probe 재시도 전 컨테인먼트 감사용이다. 비열거 속성이라 로그·직렬화에 실리지 않는다.
+        // `done`이 거부되면(출력 수집 실패) 붙이지 않는다 — 감사가 그것을 감사 불가로 본다.
         const partial = await handle.done.catch(() => null);
         if (partial) {
           Object.defineProperty(error, 'partialOutput', {
