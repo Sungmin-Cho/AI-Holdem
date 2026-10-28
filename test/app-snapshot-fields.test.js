@@ -52,7 +52,7 @@ const RAW_SECRET = 'decision-meta dropped: /Users/someone/.secret --operator-con
 const HOST_LEAK = /operator-confirmed|pid: 4242|\.secret|sonnet/;
 const PARTICIPANT_LEAK = /secret|pid: 4242/;
 const PROBE_DETAIL = {
-  retried: true, code: null,
+  retried: true, modelFallback: false, code: null,
   calls: [
     { purpose: 'probe-upper', attempt: 1, code: 'NO_RESPONSE', bootMs: 150, turnStartMs: null, firstProgressMs: null, elapsedMs: 30_010 },
     { purpose: 'probe-upper', attempt: 2, code: null, bootMs: 160, turnStartMs: null, firstProgressMs: 1_700, elapsedMs: 2_300 },

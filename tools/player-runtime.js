@@ -868,7 +868,8 @@ const diagnosticMs = (value) => (Number.isSafeInteger(value) && value >= 0 ? val
 
 // 무응답으로 죽인 자식의 부분 출력 감사(#333). 재시도는 그 호출이 아무 표면도 쓰지 못했다는 전제에서만 안전하다.
 // 그 호출의 센티널이 새어 나왔거나, claude가 init에서 비어 있지 않은 표면(도구·MCP·플러그인·hooks)을 보였거나
-// hook·tool_use 이벤트가 있으면 위반이다. init이 아예 없으면(기동 전 정체) 위반이 아니다.
+// hook·tool_use 이벤트가 있으면 위반이다. init이 아예 없으면(기동 전 정체) 위반이 아니다. 해석할 수 없는 줄(중간에
+// 잘린 init 등)은 표면을 확인할 수 없으므로 `unverified`다 — 다음 자식의 깨끗한 응답이 그것을 덮게 두지 않는다.
 function auditNoResponseOutput(partial, sentinel) {
   if (!partial) return null;
   const stdout = String(partial.stdout ?? '');
@@ -882,9 +883,7 @@ function auditNoResponseOutput(partial, sentinel) {
     try {
       event = JSON.parse(trimmed);
     } catch {
-      // 잘린 줄은 해석할 수 없다 — 표면 단서가 보이면 위반으로 본다.
-      if (/tool_use|hook/i.test(trimmed)) return 'surface';
-      continue;
+      return 'unverified';
     }
     if (event?.type === 'system' && event?.subtype === 'init' && !claudeInitSurfaceEmpty(event)) return 'surface';
     if (/hook/i.test(String(event?.type ?? '')) || /hook/i.test(String(event?.subtype ?? '')) || hasToolUse(event)) return 'surface';
@@ -893,9 +892,9 @@ function auditNoResponseOutput(partial, sentinel) {
 }
 
 function violationNotice(kind, model, violation, tier) {
-  return violation === 'leak'
-    ? `컨테인먼트 실패(${kind}/${model}): 카나리 파일 내용이 ${tier === 'upper' ? '상위 모델 ' : ''}응답에 실렸습니다.`
-    : `컨테인먼트 실패(${kind}/${model}): 도구·MCP·플러그인 표면이 비어 있지 않습니다.`;
+  if (violation === 'leak') return `컨테인먼트 실패(${kind}/${model}): 카나리 파일 내용이 ${tier === 'upper' ? '상위 모델 ' : ''}응답에 실렸습니다.`;
+  if (violation === 'unverified') return `컨테인먼트 실패(${kind}/${model}): 응답 없이 멈춘 자식의 출력을 감사할 수 없습니다.`;
+  return `컨테인먼트 실패(${kind}/${model}): 도구·MCP·플러그인 표면이 비어 있지 않습니다.`;
 }
 
 function timeoutIn(ms) {
@@ -1429,14 +1428,17 @@ export function createPlayerRuntime(kind, opts = {}) {
     };
   }
 
-  // #333: probe() 한 번의 재시도 예산(무응답 1회, 모델 귀속 실패의 폴백 모델 재실행과 공유)과 진단 기록.
+  // #333: probe() 한 번의 재실행 예산과 진단 기록. 무응답 재시도와 모델 귀속 실패의 폴백 모델 재실행이 같은 1회를
+  // 나눠 쓴다 — 어느 순서로 겹쳐도 한 tier의 probe 자식은 호출 자리마다 둘을 넘지 않는다.
   function newProbeContext() {
-    return { retriesLeft: 1, retried: false, calls: [] };
+    return { retriesLeft: 1, retried: false, modelFallback: false, calls: [] };
   }
 
   function probeDiagnostics(ctx) {
     const last = ctx.calls.at(-1);
-    return { retried: ctx.retried, code: last?.code ?? null, calls: ctx.calls.map((call) => ({ ...call })) };
+    return {
+      retried: ctx.retried, modelFallback: ctx.modelFallback, code: last?.code ?? null, calls: ctx.calls.map((call) => ({ ...call })),
+    };
   }
 
   // probe/probe-upper 호출 한 건. 무응답(NO_RESPONSE)으로 죽은 자식은 부분 출력을 감사한 뒤, 예산이 있으면
@@ -1773,8 +1775,11 @@ export function createPlayerRuntime(kind, opts = {}) {
       const run = () => (upper ? probeUpper(canaryAbsPath, timeoutMs, started, ctx) : probePlayer(canaryAbsPath, timeoutMs, started, ctx));
       // 모델 귀속 실패(정상 응답 없음)만 같은 런타임의 폴백 고정값으로 1회 다시 돈다.
       // 컨테인먼트 실패는 모델과 무관하므로 그대로 런타임 탈락 사유다.
+      // 무응답 재시도가 예산을 이미 썼으면 모델을 바꾸기 전에 첫 결과로 끝낸다(#333).
       const { modelFailure, ...first } = await run();
-      if (!modelFailure || !useFallbackModel(tier)) return { ...first, diagnostics: probeDiagnostics(ctx) };
+      if (!modelFailure || ctx.retriesLeft < 1 || !useFallbackModel(tier)) return { ...first, diagnostics: probeDiagnostics(ctx) };
+      ctx.retriesLeft -= 1;
+      ctx.modelFallback = true;
       const { modelFailure: _again, ...second } = await run();
       return { ...second, diagnostics: probeDiagnostics(ctx) };
     },
