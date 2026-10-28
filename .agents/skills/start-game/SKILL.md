@@ -241,7 +241,7 @@ node engine/cli.js end --result abort --game-dir "$SESSION_DIR"
 
 ### 결과 화면과 수동 제어
 
-단독 인간 호스트의 결과 건너뛰기는 `POST /api/game/:gameId/skip-result`, soft 대기 중 AI 취소는 `POST /api/app/interrupt-decision`을 웹 UI가 호출한다. 취소 뒤 종료 확인된 복구 상태에서 재시도한다. 종료 결과는 리뷰 대기와 독립적으로 먼저 표시되며 테이블을 유지한다. 종료 요약은 호스트 `GET /api/game/:gameId/summary`, 참가자 `GET /api/p/game/:gameId/summary`로 읽는다. 참가자 요약은 토큰당 2초 제한이며 모든 요청은 인증·현재 게임 세대와 종료 상태 검사를 받는다.
+단독 인간 호스트의 결과 건너뛰기는 `POST /api/game/:gameId/skip-result`, soft 대기 중 AI 취소는 `POST /api/app/interrupt-decision`을 웹 UI가 호출한다. 취소 뒤 종료 확인된 복구 상태에서 재시도한다. 게임을 끝낸 핸드도 결과 표시 시간 동안 테이블에 남고(카운트다운 `최종 결과 N초`, 누구나 **결과 보기**로 바로 열기), 그 뒤 종료 결과가 리뷰 대기와 독립적으로 먼저 표시되며 테이블을 유지한다. 종료 요약은 호스트 `GET /api/game/:gameId/summary`, 참가자 `GET /api/p/game/:gameId/summary`로 읽는다. 참가자 요약은 토큰당 2초 제한이며 모든 요청은 인증·현재 게임 세대와 종료 상태 검사를 받는다.
 
 ## JEV 테이블 모드
 

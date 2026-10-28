@@ -22,7 +22,7 @@ import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ov
 import {aggregatePot, showPotBreakdown, logBlindContexts} from './table-presentation.js';
 import {createAmountEditor} from './amount-editor.js';
 import {createDialogController} from './dialog-controller.js';
-import {captureHandPrior, updateHandResult, handResultFrame, trackLatestResult} from './hand-result.js';
+import {captureHandPrior, updateHandResult, handResultFrame, trackLatestResult, finalResultHolding} from './hand-result.js';
 import {renderHandResultCard} from './hand-result-view.js';
 import {createShellEmbed} from './shell-embed.js';
 import {renderCard, renderMiniCard} from './card-render.js';
@@ -54,6 +54,9 @@ let announcedDeadline = null;
 let renderedDeadlineKey = null;
 let thinkingTurn = null;
 let skipHiddenForHand = null;
+// The game's last hand this viewer chose to leave for the final result ("결과 보기"),
+// and whether the final screen was last painted as waiting on that hand.
+let finalRevealedHand = null, finalHeld = false;
 let pendingAction = true;
 let revisionAtHintClear=-1;
 const hintState=createHintState();
@@ -763,6 +766,13 @@ function paintHandResult(handNo = ui.handResult?.handNo) {
     const counter=el('span','hand-result-countdown');counter.setAttribute('aria-hidden','true');live.append(counter);
     const skip=el('button','btn btn-ghost hand-result-skip','건너뛰기');skip.type='button';
     skip.onclick=async()=>{
+      // The game's last hand: nothing on the server waits on it, so "결과 보기"
+      // opens the final result in this page only.
+      if(ui.view?.gameOver && ui.view.handNo===result.handNo) {
+        finalRevealedHand=result.handNo;
+        if(document.activeElement===skip)(compactLayout()?$('side-open'):$('tab-log')).focus();
+        paintHandResult();settleLastResult(ui.view);paintReview(ui.view);return;
+      }
       const captured=result.handNo;const hadFocus=document.activeElement===skip;skip.disabled=true;
       try {
         const response=await appFetch('skip-result',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({handNo:captured})});
@@ -773,13 +783,18 @@ function paintHandResult(handNo = ui.handResult?.handNo) {
     };
     live.append(skip);
   }
+  // The hand that ended the game counts down to the final result, which any
+  // viewer may open at once; other hands count down to the next one.
+  const last=view?.gameOver===true,counting=frame.remainingSeconds!==null&&!(last&&finalRevealedHand===result.handNo);
   const countdown=box.querySelector('.hand-result-countdown');
-  const text=frame.remainingSeconds===null?'':`다음 핸드 ${frame.remainingSeconds}초`;
+  const text=counting?`${last?'최종 결과':'다음 핸드'} ${frame.remainingSeconds}초`:'';
   if(countdown.textContent!==text)countdown.textContent=text;
-  box.querySelector('.hand-result-skip').hidden=!(appGameId && !participantMode && !isSpectating(view)
-    && view.seats.filter(seat=>seat.kind==='human').length===1 && frame.remainingSeconds!==null && skipHiddenForHand!==result.handNo);
+  const skip=box.querySelector('.hand-result-skip'),label=last?'결과 보기':'건너뛰기';
+  if(skip.textContent!==label)skip.textContent=label;
+  skip.hidden=last?!counting:!(appGameId && !participantMode && !isSpectating(view)
+    && view.seats.filter(seat=>seat.kind==='human').length===1 && counting && skipHiddenForHand!==result.handNo);
 }
-setInterval(()=>{const handNo=ui.handResult?.handNo;if(handNo!=null)paintHandResult(handNo);},250);
+setInterval(()=>{const handNo=ui.handResult?.handNo;if(handNo!=null)paintHandResult(handNo);settleFinalHold();},250);
 
 // "직전 결과": the latest finished hand stays one click away through the next
 // hand and after the game. It waits while this hand's result is still staging,
@@ -805,7 +820,7 @@ function openLastResult() {
   if(!ui.lastHandResult||resultStaging)return;
   // The dialog keeps the hand it opened on, even if another hand finishes.
   lastResultShown=ui.lastHandResult;
-  lastResultOpenedAt={decision:ui.view?.legal?.decisionId??null,ended:!!ui.view?.gameOver||ui.sessionEnded,watching:isSpectating(ui.view)};
+  lastResultOpenedAt={decision:ui.view?.legal?.decisionId??null,ended:!!ui.view?.gameOver||ui.sessionEnded,final:finalState(ui.view).open,watching:isSpectating(ui.view)};
   paintLastResult();
   dialogs.open($('last-result-overlay'),closeLastResult);
 }
@@ -818,12 +833,13 @@ function closeLastResult({toAction=false}={}) {
   if(action)action.focus();
   else if(document.activeElement===document.body||trigger.disabled)(trigger.disabled?$('tab-log'):trigger).focus();
 }
-// A new turn, the game ending or a switch to watching (since it opened) closes
-// the recap: the action bar and the final screen must not wait behind it.
+// A new turn, the game ending, the final result opening or a switch to watching
+// (since it opened) closes the recap: the action bar, the last hand on the table
+// and the final screen must not wait behind it.
 function settleLastResult(view) {
   if(dialogs.active!==$('last-result-overlay')||!lastResultOpenedAt)return;
   const turn=!!view?.legal && !isSpectating(view) && view.legal.decisionId!==lastResultOpenedAt.decision;
-  const ended=(!!view?.gameOver||ui.sessionEnded)&&!lastResultOpenedAt.ended;
+  const ended=((!!view?.gameOver||ui.sessionEnded)&&!lastResultOpenedAt.ended)||(finalState(view).open&&!lastResultOpenedAt.final);
   if(turn||ended||isSpectating(view)!==lastResultOpenedAt.watching)closeLastResult({toAction:turn});
   else paintLastResult();
 }
@@ -1603,8 +1619,22 @@ function foldReviewSections(review) {
   }
   for(const details of review.querySelectorAll('details.is-practice'))if(details._cta)details.append(details._cta);
 }
+// The final screen waits while the game's last hand is held on the table. A
+// finished game's record (opened for its result) never waits.
+function finalHolding(view) {
+  return !terminalRecord && finalResultHolding({view,result:ui.handResult,hold:ui.resultHold,now:Date.now()+serverOffsetMs,revealedHandNo:finalRevealedHand});
+}
+function finalState(view) {
+  return finalScreen({view,sessionEnded:ui.sessionEnded,terminal:terminalRecord,review:ui.review,holding:finalHolding(view)});
+}
+// The hold running out opens the final screen without waiting for another frame.
+function settleFinalHold() {
+  if(!finalHeld || finalHolding(ui.view))return;
+  settleLastResult(ui.view);paintReview(ui.view);
+}
 function paintReview(view) {
-  const state=finalScreen({view,sessionEnded:ui.sessionEnded,terminal:terminalRecord,review:ui.review});
+  finalHeld=finalHolding(view);
+  const state=finalState(view);
   const overlay=$('review-overlay'),reopen=$('review-reopen');
   reopen.hidden=!state.open;
   reopen.textContent='결과 다시 보기'+(overlay.dataset.dismissed==='true' && ui.review && ui.review!==reviewSeen?' ·':'');

@@ -1,6 +1,7 @@
 /** Shared public result calculations. Missing totals remain unknown. */
-export function finalScreen({view,sessionEnded=false,terminal=false,review=null}) {
-  return {open:!!(view?.gameOver||sessionEnded||terminal),review:review?'ready':sessionEnded||terminal?'absent':'pending'};
+export function finalScreen({view,sessionEnded=false,terminal=false,review=null,holding=false}) {
+  // `holding`: the last hand's result is still on the table (finalResultHolding).
+  return {open:!!(view?.gameOver||sessionEnded||terminal)&&!holding,review:review?'ready':sessionEnded||terminal?'absent':'pending'};
 }
 export function rankPlayers({summary,view}) {
   const complete=summary?.complete===true;

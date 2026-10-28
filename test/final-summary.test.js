@@ -6,6 +6,9 @@ test('final screen opens before review and distinguishes final review absence',(
  assert.deepEqual(finalScreen({sessionEnded:true}),{open:true,review:'absent'});
  assert.deepEqual(finalScreen({terminal:true,review:'ok'}),{open:true,review:'ready'});
  assert.equal(finalScreen({view:{}}).open,false);
+ // While the game's last hand is held on the table the final screen waits, whatever ended it.
+ for(const ended of [{view:{gameOver:true}},{view:{gameOver:true},sessionEnded:true},{terminal:true}])
+  assert.deepEqual(finalScreen({...ended,holding:true}),{...finalScreen(ended),open:false});
 });
 test('rank uses complete totals, preserves ties, and omits unknown tournament totals',()=>{
  const seats=[{playerId:'a',name:'A',stack:100,out:false},{playerId:'b',name:'B',stack:120,out:true},{playerId:'c',name:'C',stack:90}];

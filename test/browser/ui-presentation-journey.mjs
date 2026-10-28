@@ -18,7 +18,7 @@ import {heroHandLabel} from '../../server/public/decision-aid.js';
 import {COMPACT_QUERY} from '../../server/public/layout-mode.js';
 import {createBrowserWorkspace,runOwnedCommand,hashTree} from '../helpers/learning-browser-fixture.mjs';
 
-export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','help-over-replay','help-touch-targets','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','hand-result-banner','hand-result-detail','last-result-recap','final-last-hand','seat-status-compact','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','amount-text-press','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','embedded-state-matrix','state-matrix','onboarding-timed-turn','final-geometry','plate-status-row','computed-contrast','mobile-raise-sheet','mobile-dock','mobile-turn-stability','mobile-drawer','mobile-hand-strength','mobile-landscape','layout-boundaries','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
+export const requiredJourneyChecks=['assets','bb-toggle','historical-bb','replay-arrival-focus','replay-fallback','replay-visual','replay-keyboard','replay-list-toggle','replay-mobile-sheet','replay-close-stops','replay-timeline-scroll','replay-crowded-layout','onboarding','help-display','help-over-replay','help-touch-targets','real-settlement','final-overlay-immediate','final-overlay-finalizing-reload','final-overlay-review-after-disconnect','final-overlay-terminal','final-hand-hold','hand-result-banner','hand-result-detail','last-result-recap','final-last-hand','seat-status-compact','hand-result-survives-side-frames','hand-result-reconnect','runout-staged','last-action-badge','cash-reset','pot-recovery','invalid-input','clamp-confirmation','chip-payload','amount-text-press','elimination','pot-total','keyboard-dialog','reading','responsive','geometry-matrix','embedded-state-matrix','state-matrix','onboarding-timed-turn','final-geometry','plate-status-row','computed-contrast','mobile-raise-sheet','mobile-dock','mobile-turn-stability','mobile-drawer','mobile-hand-strength','mobile-landscape','layout-boundaries','desktop-viewport-fit','very-short-desktop','desktop-log-follow','log-hand-fold','motion-decoration','award-motion','turn-layout-stability','bet-owner-spacing','blind-and-bet-markers','large-values','reload','owned-cleanup'];
 export const browserCliEnabled=(env=process.env)=>!env.NODE_TEST_CONTEXT;
 // The geometry matrix (design A5): every width × table size × height the gate
 // runs. The journey records what it measured and fails if that differs.
@@ -882,6 +882,40 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     assert.match(await evaluate("document.querySelector('#review-body').textContent"),/종합 리뷰가 없습니다/);
     checks.push('final-overlay-terminal');
     await browser(['open',`${origin}/?token=${token}`]);await ready();
+    await click('#review-close');
+    // The hand that ends the game is held like any other: its showdown stays on the
+    // table, counting down to the final result, which "결과 보기" opens at once; a
+    // reload during the hold waits again and the final result opens when it runs out.
+    let ending=createGame({aiCount:2,startStack:100,levelEvery:1000});ending.button=2;ending.handNo=90;
+    const endingDeal=startHand(ending,{deck:[...prefix,...newDeck().filter(c=>!prefix.includes(c))]});ending=endingDeal.state;
+    view=userView(ending);await publish(endingDeal.events);
+    // A fresh page: the dismissal above belongs to that page.
+    await browser(['open',`${origin}/?token=${token}`]);await ready();
+    let endingEvents;
+    for(let first=true;!legalFor(ending).handOver;first=false){
+      const legal=legalFor(ending);const step=applyAction(ending,legal.toAct,first?'raise':legal.canCheck?'check':'call',first?100:undefined);
+      ending=step.state;view=userView(ending);
+      if(legalFor(ending).handOver)endingEvents=step.events;else await publish(step.events);
+    }
+    assert.equal(view.gameOver,true,'the fixture hand ends the game');
+    const endingAt=Date.now();
+    await publish(endingEvents,{resultHold:{handNo:view.handNo,startAt:new Date(endingAt).toISOString(),until:new Date(endingAt+20000).toISOString(),runoutStepMs:0,runoutStreets:0}});
+    await browser(['wait','--fn',"document.querySelector('#hand-result')?.hidden===false"]);
+    const HELD="({overlay:document.querySelector('#review-overlay').hidden,reopen:document.querySelector('#review-reopen').hidden,countdown:document.querySelector('.hand-result-countdown')?.textContent,skip:document.querySelector('.hand-result-skip')?.hidden,label:document.querySelector('.hand-result-skip')?.textContent,board:document.querySelectorAll('#board .card[role=img]').length,shown:document.querySelectorAll('.seat:not(.is-hero) .card[role=img]').length})";
+    const held=await evaluate(HELD);
+    assert.ok(held.overlay&&held.reopen&&/^최종 결과 \d+초$/.test(held.countdown)&&held.skip===false&&held.label==='결과 보기'&&held.board===5&&held.shown>0,JSON.stringify(held));
+    await click('.hand-result-skip');
+    // "결과 보기" opens the final result now, with focus inside it.
+    await browser(['wait','--fn',"!document.querySelector('#review-overlay').hidden && document.querySelector('#review-overlay').contains(document.activeElement)"]);
+    await click('#review-close');
+    assert.equal(await evaluate("document.querySelector('#hand-result').hidden===false && document.querySelector('.hand-result-skip').hidden && document.querySelector('.hand-result-countdown').textContent===''"),true,'the last hand stays on the table');
+    await browser(['reload']);await browser(['wait','#board .card[role=img]']);
+    const reloaded=await evaluate(HELD);
+    assert.ok(reloaded.overlay&&/^최종 결과 \d+초$/.test(reloaded.countdown)&&reloaded.skip===false,JSON.stringify(reloaded));
+    await browser(['wait','--fn',"document.querySelector('#review-overlay')?.hidden===false"]);
+    assert.ok(Date.now()>=endingAt+19000,'the final result waited for the hold');
+    assert.equal(await evaluate("document.querySelector('.hand-result-countdown').textContent===''&&document.querySelector('.hand-result-skip').hidden"),true);
+    checks.push('final-hand-hold');
     await click('#review-close');
     // This synthetic scenario shares a relay; never reuse a retired decision ID.
     let cash=createGame({mode:'cash-training',aiCount:2,startStack:5000,levelEvery:null,handLimit:102});cash.handNo=100;

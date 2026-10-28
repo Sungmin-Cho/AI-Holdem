@@ -64,7 +64,25 @@ test(`pace ${scenario.pace ?? 'legacy'}${scenario.resultHoldSec!==undefined?` re
   const runoutMs=scenario.pace==='normal'?800:0;
   const expectedHold=holdMs>0 && scenario.error!=='BAD_ATTEMPT';
   assert.equal(holds.length,expectedHold?1:0);
-  const holdArgs=publishes.filter(args=>args.includes('--result-hold')).map(args=>args[args.indexOf('--result-hold')+1]);
+  const allHoldArgs=publishes.filter(args=>args.includes('--result-hold')).map(args=>args[args.indexOf('--result-hold')+1]);
+  const holdArgs=allHoldArgs.filter(arg=>arg.split('|')[0]==='1');
+  // The hand that ends the game (hand 2) is held too, so the table shows it before the
+  // final screen, but the loop neither sleeps on it (one 'result' wait, hand 1's) nor
+  // lets a skip claim it.
+  const finalHoldArgs=[...new Set(allHoldArgs.filter(arg=>arg.split('|')[0]==='2'))];
+  assert.equal(allHoldArgs.length,holdArgs.length+allHoldArgs.filter(arg=>arg.split('|')[0]==='2').length);
+  const finalSnapshot=JSON.parse(fs.readFileSync(path.join(root,'ui-snapshot.json')));
+  assert.equal(finalSnapshot.view.gameOver,true);
+  assert.ok(finalHoldArgs.length<=1,'one absolute deadline for the last hand');
+  if (holdMs>0) assert.equal(finalHoldArgs.length,1,'the game-ending hand is held');
+  if (finalHoldArgs.length) {
+    const [,startAt,until,stepMs,streets]=finalHoldArgs[0].split('|');
+    assert.equal(Date.parse(until)-Date.parse(startAt),holdMs+runoutMs*Number(streets));
+    assert.equal(Number(stepMs),runoutMs);
+    assert.deepEqual(finalSnapshot.resultHold,{handNo:2,startAt,until,runoutStepMs:Number(stepMs),runoutStreets:Number(streets)},
+      'finalization keeps the last hand\'s hold');
+  } else assert.equal(finalSnapshot.resultHold,null);
+  assert.deepEqual(loop.skipHandResult(2),{skipped:false});
   if (expectedHold) {
     assert.equal(holds[0].hold.handNo,1);
     assert.equal(Date.parse(holds[0].hold.until)-Date.parse(holds[0].hold.startAt),holdMs+runoutMs*holds[0].hold.runoutStreets);
@@ -84,7 +102,6 @@ test(`pace ${scenario.pace ?? 'legacy'}${scenario.resultHoldSec!==undefined?` re
     if(scenario.pace!=='normal')assert.equal(waits.length,0);
   }
   for(const args of publishes.filter(args=>args.includes('--view-only')))assert.equal(args.includes('--result-hold'),false);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(root,'ui-snapshot.json'))).resultHold,null);
   assert.deepEqual(loop.skipHandResult(1),{skipped:false});
 });
 }

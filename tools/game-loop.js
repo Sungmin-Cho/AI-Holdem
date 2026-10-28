@@ -4444,7 +4444,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     }
     envelope = await prepareHintEnvelope(envelope);
     let hold = null;
-    if (envelope.handOver === true && !envelope.gameOver && !flags.includes('--view-only') && !flags.includes('--retry')) {
+    // The hand that ends the game holds too, so its runout and showdown are seen before
+    // the final screen; the loop never waits on that one (finalization goes on at once).
+    if (envelope.handOver === true && !flags.includes('--view-only') && !flags.includes('--retry')) {
       const events = envelope.events ?? [];
       const runoutStreets = events.some(event => event.type === 'showdown' || event.type === 'pot_award')
         ? events.filter(event => event.type === 'street').length : 0;
@@ -4474,7 +4476,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     let out;
     // Register before invoking the publisher: the browser can receive the hold
     // before its ACK returns. Keep any skip/pause admitted in that interval.
-    const registeredHold = hold ? { handNo: hold.handNo, until: Date.parse(hold.until), skipped: pauseRequested } : null;
+    const registeredHold = hold && !envelope.gameOver ? { handNo: hold.handNo, until: Date.parse(hold.until), skipped: pauseRequested } : null;
     if (registeredHold) resultHoldState = registeredHold;
     try {
       for (;;) {
