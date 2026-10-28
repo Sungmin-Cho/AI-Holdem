@@ -2470,9 +2470,10 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         canaryAbsPath,
         registerAdapter,
         lockRoot,
-        onProbe: ({ tier, runtime, round, ok, elapsedMs }) => {
+        onProbe: ({ tier, runtime, round, ok, elapsedMs, detail }) => {
+          // 스냅샷 boot.probe는 닫힌 5필드다. 진단(#333)은 로그에만 싣는다.
           bootProbe = { tier, runtime, round, ok, elapsedMs };
-          if (ok !== null) log('runtime-probe', bootProbe);
+          if (ok !== null) log('runtime-probe', { ...bootProbe, ...detail });
         },
       }));
     } finally {

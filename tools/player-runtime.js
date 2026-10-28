@@ -152,6 +152,10 @@ const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PROMPT_FILE = fileURLToPath(new URL('./player-prompt.md', import.meta.url));
 
 const PROBE_TIMEOUT_MS = 120_000;
+// #333: probe 자식이 이 시간 안에 모델 응답 진행 신호(cli-phase-timing의 firstProgressMs)를 하나도 내지 않으면
+// 무응답으로 보고 종료한다. 실측 첫 진행 신호는 claude 1.7초·codex 5.4초(2026-10-28)로, 관측 최댓값의 3배 이상이다.
+// 진행 신호가 이 안에 오면 이후는 PROBE_TIMEOUT_MS를 그대로 따른다. claude·codex 스트림 형식에만 건다.
+const PROBE_FIRST_RESPONSE_MS = 30_000;
 const CATALOG_TIMEOUT_MS = 15_000;
 // 게임 루프가 시작·재개 warmup에 같은 값을 명시해 기록한다(#312).
 export const WARMUP_TIMEOUT_MS = 120_000;
@@ -846,6 +850,54 @@ function isAlive(pid) {
   }
 }
 
+// 진행 신호가 아직 없을 때만 깨어나 거부하는 게이트. 신호가 먼저 오면 아무 일도 하지 않고 끝까지 pending이다.
+function noResponseIn(ms, stalled) {
+  let timer = null;
+  const promise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      if (stalled()) reject(runtimeError('NO_RESPONSE', `NO_RESPONSE: ${ms}ms 안에 모델 응답 진행 신호가 없었습니다.`));
+    }, ms);
+  });
+  return { promise, cancel: () => clearTimeout(timer) };
+}
+
+// 진단 코드는 닫힌 형식만 싣는다 — 목록 밖의 값(메시지 조각 등)은 `ERROR`다.
+const DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const diagnosticCode = (code) => (typeof code === 'string' && DIAGNOSTIC_CODE.test(code) ? code : 'ERROR');
+const diagnosticMs = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : null);
+
+// 무응답으로 죽인 자식의 부분 출력 감사(#333). 재시도는 그 호출이 아무 표면도 쓰지 못했다는 전제에서만 안전하다.
+// 그 호출의 센티널이 새어 나왔거나, claude가 init에서 비어 있지 않은 표면(도구·MCP·플러그인·hooks)을 보였거나
+// hook·tool_use 이벤트가 있으면 위반이다. init이 아예 없으면(기동 전 정체) 위반이 아니다.
+function auditNoResponseOutput(partial, sentinel) {
+  if (!partial) return null;
+  const stdout = String(partial.stdout ?? '');
+  const stderr = String(partial.stderr ?? '');
+  if (sentinel && (stdout.includes(sentinel) || stderr.includes(sentinel))) return 'leak';
+  if (partial.format !== 'claude-stream') return null;
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let event;
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      // 잘린 줄은 해석할 수 없다 — 표면 단서가 보이면 위반으로 본다.
+      if (/tool_use|hook/i.test(trimmed)) return 'surface';
+      continue;
+    }
+    if (event?.type === 'system' && event?.subtype === 'init' && !claudeInitSurfaceEmpty(event)) return 'surface';
+    if (/hook/i.test(String(event?.type ?? '')) || /hook/i.test(String(event?.subtype ?? '')) || hasToolUse(event)) return 'surface';
+  }
+  return null;
+}
+
+function violationNotice(kind, model, violation, tier) {
+  return violation === 'leak'
+    ? `컨테인먼트 실패(${kind}/${model}): 카나리 파일 내용이 ${tier === 'upper' ? '상위 모델 ' : ''}응답에 실렸습니다.`
+    : `컨테인먼트 실패(${kind}/${model}): 도구·MCP·플러그인 표면이 비어 있지 않습니다.`;
+}
+
 function timeoutIn(ms) {
   let timer = null;
   const promise = new Promise((_, reject) => {
@@ -886,6 +938,20 @@ export function createPlayerRuntime(kind, opts = {}) {
     if (!opts.callBudget) return call.timeoutMs;
     const ms = opts.callBudget(call);
     if (!Number.isSafeInteger(ms) || ms < 1) throw runtimeError('BAD_CALL_BUDGET', 'BAD_CALL_BUDGET: 호출 상한은 양의 정수여야 합니다.');
+    return ms;
+  };
+  // #333: tests only, same shape as callBudget. A test names the first-response budget of each probe call
+  // (`attempt` 1 is the first child, 2 the retry) so a stalled child is killed in milliseconds while the
+  // child that answers keeps a budget a loaded runner cannot outrun. Production passes nothing.
+  if (opts.firstResponseBudget !== undefined && typeof opts.firstResponseBudget !== 'function') {
+    throw runtimeError('BAD_FIRST_RESPONSE_BUDGET', 'BAD_FIRST_RESPONSE_BUDGET: firstResponseBudget는 함수여야 합니다.');
+  }
+  const firstResponseBudgetOf = (call) => {
+    if (!opts.firstResponseBudget) return call.firstResponseMs;
+    const ms = opts.firstResponseBudget(call);
+    if (!Number.isSafeInteger(ms) || ms < 1) {
+      throw runtimeError('BAD_FIRST_RESPONSE_BUDGET', 'BAD_FIRST_RESPONSE_BUDGET: 첫 응답 기준은 양의 정수여야 합니다.');
+    }
     return ms;
   };
   const platform = opts.platform ?? process.platform;
@@ -1157,7 +1223,7 @@ export function createPlayerRuntime(kind, opts = {}) {
   }
 
   // decide/warmup/probe의 공통 실행: 타임아웃이 이기면 **여기서** 자식을 죽인다.
-  async function runOnce({ purpose, model, sessionId = null, input, timeoutMs, modelArgs = [], signal, catalogHome = null }) {
+  async function runOnce({ purpose, model, sessionId = null, input, timeoutMs, modelArgs = [], signal, catalogHome = null, firstResponseMs = null }) {
     if(signal?.aborted)throw runtimeError('INTERRUPTED','INTERRUPTED: 사용자가 결정을 중단했습니다.');
     const started = Date.now();
     // #312: 구간 시각(이벤트 이름·exit·close)만 본다. 결과와 오류에 그대로 붙어 게임 루프 기록으로 간다.
@@ -1165,6 +1231,9 @@ export function createPlayerRuntime(kind, opts = {}) {
     const budgetMs = callBudgetOf({ purpose, model, input, timeoutMs });
     const { handle, format, args, entry } = start({ purpose, model, sessionId, input, modelArgs, catalogHome, observe: timing.observe });
     const timer = timeoutIn(budgetMs);
+    // #333: 진행 신호를 읽을 수 있는 형식에서, 전체 상한보다 짧은 첫 응답 기준이 있을 때만 건다.
+    const gated = firstResponseMs !== null && (format === 'claude-stream' || format === 'codex-jsonl') && firstResponseMs < budgetMs;
+    const gate = gated ? noResponseIn(firstResponseMs, () => timing.view().firstProgressMs === null) : null;
     let abort;
     const interrupted=new Promise((_,reject)=>{
       abort=()=>{if(!entry.closed)reject(runtimeError('INTERRUPTED','INTERRUPTED: 사용자가 결정을 중단했습니다.'));};
@@ -1172,7 +1241,7 @@ export function createPlayerRuntime(kind, opts = {}) {
       if(signal?.aborted)abort();
     });
     try {
-      const result = await Promise.race([handle.done, timer.promise, interrupted]);
+      const result = await Promise.race([handle.done, timer.promise, interrupted, ...(gate ? [gate.promise] : [])]);
       return { ...result, format, args, elapsedMs: Date.now() - started, timing: timing.view() };
     } catch (error) {
       if (!entry.closed) {
@@ -1185,9 +1254,20 @@ export function createPlayerRuntime(kind, opts = {}) {
           throw withTiming(closeError, timing.view());
         }
       }
+      if (error?.code === 'NO_RESPONSE') {
+        // 종료가 확인된 뒤의 부분 출력 — probe 재시도 전 컨테인먼트 감사용이다. 비열거 속성이라 로그·직렬화에 실리지 않는다.
+        const partial = await handle.done.catch(() => null);
+        if (partial) {
+          Object.defineProperty(error, 'partialOutput', {
+            value: { stdout: String(partial.stdout ?? ''), stderr: String(partial.stderr ?? ''), format },
+            enumerable: false,
+          });
+        }
+      }
       throw withTiming(error, timing.view());
     } finally {
       timer.cancel();
+      gate?.cancel();
       signal?.removeEventListener('abort',abort);
     }
   }
@@ -1349,10 +1429,52 @@ export function createPlayerRuntime(kind, opts = {}) {
     };
   }
 
+  // #333: probe() 한 번의 재시도 예산(무응답 1회, 모델 귀속 실패의 폴백 모델 재실행과 공유)과 진단 기록.
+  function newProbeContext() {
+    return { retriesLeft: 1, retried: false, calls: [] };
+  }
+
+  function probeDiagnostics(ctx) {
+    const last = ctx.calls.at(-1);
+    return { retried: ctx.retried, code: last?.code ?? null, calls: ctx.calls.map((call) => ({ ...call })) };
+  }
+
+  // probe/probe-upper 호출 한 건. 무응답(NO_RESPONSE)으로 죽은 자식은 부분 출력을 감사한 뒤, 예산이 있으면
+  // 새 자식으로 한 번 더 부른다. 다른 모든 실패(TIMEOUT·CHILD_*·컨테인먼트)는 그대로 던진다 — 재시도하지 않는다.
+  // `sentinel`은 그 호출이 읽게 한 카나리의 센티널(없으면 null)이다. 감사 위반은 던진 오류의 `violation`에 실린다.
+  async function probeCall(ctx, { purpose, model, modelArgs, input, timeoutMs, sentinel = null }) {
+    for (let attempt = 1; ; attempt += 1) {
+      // grok은 텍스트 형식이라 진행 신호가 없다 — 기준을 묻지도 않는다.
+      const firstResponseMs = kind === 'grok' ? null
+        : firstResponseBudgetOf({ purpose, model, attempt, firstResponseMs: PROBE_FIRST_RESPONSE_MS });
+      const callStarted = Date.now();
+      const record = (code, timing, elapsedMs) => {
+        ctx.calls.push({
+          purpose, attempt, code: code == null ? null : diagnosticCode(code),
+          bootMs: diagnosticMs(timing?.bootMs), turnStartMs: diagnosticMs(timing?.turnStartMs),
+          firstProgressMs: diagnosticMs(timing?.firstProgressMs), elapsedMs: diagnosticMs(elapsedMs),
+        });
+      };
+      try {
+        const result = await runOnce({ purpose, model, modelArgs, input, timeoutMs, firstResponseMs });
+        record(null, result.timing, result.elapsedMs);
+        return result;
+      } catch (error) {
+        record(error?.code ?? 'ERROR', error?.timing, Date.now() - callStarted);
+        if (error?.code !== 'NO_RESPONSE') throw error;
+        const violation = auditNoResponseOutput(error.partialOutput, sentinel);
+        if (violation) throw Object.assign(error, { violation });
+        if (ctx.retriesLeft < 1) throw error;
+        ctx.retriesLeft -= 1;
+        ctx.retried = true;
+      }
+    }
+  }
+
   // 상위 적격(②)도 왕복만으로는 부족하다: 정확한 상위 probe-upper argv에서 fresh 카나리
   // 부정 검증까지 통과해야 한다 — 유출 CLI가 상위로 선택되면 코치·리뷰 프롬프트가 그
   // CLI의 도구 표면에 노출되기 때문이다. 확인 불가는 통과가 아니다.
-  async function probeUpper(canaryAbsPath, timeoutMs, started) {
+  async function probeUpper(canaryAbsPath, timeoutMs, started, ctx) {
     if (kind === 'grok') {
       const inspected = await ensureGrokInspect(timeoutMs);
       if (!inspected.ok) {
@@ -1371,12 +1493,14 @@ export function createPlayerRuntime(kind, opts = {}) {
       let upperServed = null;
       let round;
       try {
-        round = await runOnce({ purpose: 'probe-upper', model, modelArgs: table.upperArgs, input: UPPER_PROBE_PROMPT, timeoutMs });
+        round = await probeCall(ctx, { purpose: 'probe-upper', model, modelArgs: table.upperArgs, input: UPPER_PROBE_PROMPT, timeoutMs });
       } catch (error) {
         verification.upper = false;
         return {
           ok: false, containment: false, upper: false, elapsedMs: Date.now() - started,
-          notice: `상위 모델 probe 실패(${kind}/${model}): ${error.code}`,
+          notice: error.violation
+            ? violationNotice(kind, model, error.violation, 'upper')
+            : `상위 모델 probe 실패(${kind}/${model}): ${error.code}`,
         };
       }
       if (round.format === 'claude-stream') {
@@ -1416,12 +1540,16 @@ export function createPlayerRuntime(kind, opts = {}) {
       }
       let result;
       try {
-        result = await runOnce({ purpose: 'probe-upper', model, modelArgs: table.upperArgs, input: canaryPrompt(canary.file, kind), timeoutMs });
+        result = await probeCall(ctx, {
+          purpose: 'probe-upper', model, modelArgs: table.upperArgs, input: canaryPrompt(canary.file, kind), timeoutMs, sentinel: canary.sentinel,
+        });
       } catch (error) {
         verification.upper = false;
         return {
           ok: true, containment: false, upper: false, elapsedMs: Date.now() - started,
-          notice: `상위 컨테인먼트 probe 실패(${kind}/${model}): ${error.code}`,
+          notice: error.violation
+            ? violationNotice(kind, model, error.violation, 'upper')
+            : `상위 컨테인먼트 probe 실패(${kind}/${model}): ${error.code}`,
         };
       }
       if (result.format === 'claude-stream') {
@@ -1477,7 +1605,7 @@ export function createPlayerRuntime(kind, opts = {}) {
     return null;
   }
 
-  async function probePlayer(canaryAbsPath, timeoutMs, started) {
+  async function probePlayer(canaryAbsPath, timeoutMs, started, ctx) {
     const sentinel = readSentinel(canaryAbsPath);
     if (kind === 'grok') {
       const inspected = await ensureGrokInspect(timeoutMs);
@@ -1495,14 +1623,16 @@ export function createPlayerRuntime(kind, opts = {}) {
     const model = models.player;
     let result;
     try {
-      result = await runOnce({ purpose: 'probe', model, modelArgs: playerArgs, input: canaryPrompt(canaryAbsPath, kind), timeoutMs });
+      result = await probeCall(ctx, { purpose: 'probe', model, modelArgs: playerArgs, input: canaryPrompt(canaryAbsPath, kind), timeoutMs, sentinel });
     } catch (error) {
       verification.player = false;
       return {
         ok: false, containment: false, upper: null, elapsedMs: Date.now() - started,
-        notice: error.code && String(error.code).startsWith('GROK_')
-          ? grokIsolationNotice(kind, model, error.code)
-          : `플레이어 probe 실패(${kind}/${model}): ${error.code}`,
+        notice: error.violation
+          ? violationNotice(kind, model, error.violation, 'player')
+          : error.code && String(error.code).startsWith('GROK_')
+            ? grokIsolationNotice(kind, model, error.code)
+            : `플레이어 probe 실패(${kind}/${model}): ${error.code}`,
       };
     }
     const audit = result.format === 'claude-stream' ? claudeStreamAudit(result.stdout) : null;
@@ -1623,6 +1753,8 @@ export function createPlayerRuntime(kind, opts = {}) {
     async probe({ canaryAbsPath = null, upper = false, timeoutMs = PROBE_TIMEOUT_MS } = {}) {
       const started = Date.now();
       const tier = upper ? 'upper' : 'player';
+      // #333: 무응답 재시도 예산과 호출별 진단은 probe() 한 번(=tier 하나)의 것이다.
+      const ctx = newProbeContext();
       try {
         if (kind === 'grok') ensureGrokHome();
       } catch (error) {
@@ -1633,17 +1765,18 @@ export function createPlayerRuntime(kind, opts = {}) {
             upper: upper ? false : null,
             elapsedMs: Date.now() - started,
             notice: grokIsolationNotice(kind, models[tier], error.code),
+            diagnostics: probeDiagnostics(ctx),
           };
         }
         throw error;
       }
-      const run = () => (upper ? probeUpper(canaryAbsPath, timeoutMs, started) : probePlayer(canaryAbsPath, timeoutMs, started));
+      const run = () => (upper ? probeUpper(canaryAbsPath, timeoutMs, started, ctx) : probePlayer(canaryAbsPath, timeoutMs, started, ctx));
       // 모델 귀속 실패(정상 응답 없음)만 같은 런타임의 폴백 고정값으로 1회 다시 돈다.
       // 컨테인먼트 실패는 모델과 무관하므로 그대로 런타임 탈락 사유다.
       const { modelFailure, ...first } = await run();
-      if (!modelFailure || !useFallbackModel(tier)) return first;
+      if (!modelFailure || !useFallbackModel(tier)) return { ...first, diagnostics: probeDiagnostics(ctx) };
       const { modelFailure: _again, ...second } = await run();
-      return second;
+      return { ...second, diagnostics: probeDiagnostics(ctx) };
     },
 
     // 세션 생성 + 페르소나 카드 1회. 첫 결정에서 세션 생성 비용을 뺀다.
@@ -1886,14 +2019,20 @@ export async function resolveRuntimes({
     const started = Date.now();
     observe({ tier, runtime: kind, round, ok: null, elapsedMs: 0 });
     let ok = false;
+    // #333: 로그용 진단(재시도 여부·호출별 코드와 구간 시각). 원문은 어댑터가 애초에 싣지 않는다.
+    let detail;
     try {
       const result = await run();
       ok = tier === 'upper'
         ? !!(result?.ok && result.upper && result.containment)
         : !!(result?.ok && result.containment);
+      if (result?.diagnostics) detail = result.diagnostics;
       return result;
+    } catch (error) {
+      detail = { code: diagnosticCode(error?.code) };
+      throw error;
     } finally {
-      observe({ tier, runtime: kind, round, ok, elapsedMs: Date.now() - started });
+      observe({ tier, runtime: kind, round, ok, elapsedMs: Date.now() - started, ...(detail ? { detail } : {}) });
     }
   };
   const notices = [];
