@@ -4125,7 +4125,9 @@ test('#333 probe(upper): 카나리 호출만 무응답이면 그 호출만 다�
   }
 });
 
-test('#333 probe(upper): 멈춘 카나리 호출이 센티널을 흘렸으면 재시도하지 않는다 — 실제 자식의 stderr', async () => {
+test('#333 probe(upper): 멈춘 카나리 호출이 센티널을 흘렸으면 재시도하지 않는다 — 실제 자식의 stderr', async (t) => {
+  // fake CLI의 prefaceEchoCanary는 stdin에서 POSIX 절대 경로만 찾는다. 유출 판정 자체는 합성 핸들 시험이 플랫폼과 무관하게 본다.
+  if (skipOnWin32(t, 'upper-probe canary path matching is POSIX /path in stdin')) return;
   const { file } = canary();
   let n = 0;
   // 실제 자식의 부분 출력(stderr) 수집 경로를 본다. 자식은 기동 직후 stderr를 쓰므로 기준을 넉넉히(8초) 준다.
