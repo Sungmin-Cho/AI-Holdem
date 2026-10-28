@@ -40,6 +40,17 @@ test('a finished game shows the spectator the last showdown from its public reve
   assert.deepEqual(context.seatCards({playerId:'p2'},finished,revealed,mucks).items,[],'a muck stays unseen');
   const live={viewer:null,gameOver:false,holeCardsByPlayerId:{p1:['As','Kd'],p2:['7c','2d']}};
   assert.deepEqual(context.seatCards({playerId:'p2'},live,revealed,mucks).items,['7c','2d'],'live play shows every hand as before');
+  // The reveals come from the current hand only: a later hand, or a reused
+  // number's new hand, never carries an earlier showdown.
+  const from=source.indexOf('function revealedCards()'),to=source.indexOf('\nfunction ',from+1);
+  const ui={view:{handNo:5},log:[]};vm.runInNewContext(source.slice(from,to)+'\nthis.revealedCards=revealedCards;',Object.assign(context,{ui}));
+  const showdown={type:'showdown',reveals:[{playerId:'p1',cards:['As','Kd']}],mucks:['p2']};
+  ui.log=[{type:'hand_start',handNo:5},showdown];
+  assert.deepEqual(Object.keys(context.revealedCards().map),['p1']);
+  ui.log=[{type:'hand_start',handNo:5},showdown,{type:'hand_start',handNo:6}];ui.view={handNo:6};
+  assert.deepEqual(Object.keys(context.revealedCards().map),[],'the next hand starts with nothing revealed');
+  ui.log=[{type:'hand_start',handNo:5},showdown,{type:'hand_start',handNo:5}];ui.view={handNo:5};
+  assert.deepEqual(Object.keys(context.revealedCards().map),[],'a reused number\'s new hand starts with nothing revealed');
 });
 
 test('spectator snapshot resultHold reaches the shared result builder and current countdown',async()=>{
