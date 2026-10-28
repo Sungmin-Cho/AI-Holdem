@@ -29,6 +29,19 @@ test('spectator reset does not restore a disconnected action controller',()=>{
   assert.equal(context.revision,2);
 });
 
+test('a finished game shows the spectator the last showdown from its public reveals',()=>{
+  const start=source.indexOf('function seatCards('),end=source.indexOf('\nfunction ',start+1);
+  const node=()=>({items:[],append(...items){this.items.push(...items);}});
+  const context={el:()=>node(),cardNode:code=>code,isSpectating:()=>true,viewerId:()=>null,seatPresentation:()=>({showBacks:false})};
+  vm.runInNewContext(source.slice(start,end)+'\nthis.seatCards=seatCards;',context);
+  const revealed={p1:{playerId:'p1',cards:['As','Kd']}},mucks=new Set(['p2']);
+  const finished={viewer:null,gameOver:true,holeCardsByPlayerId:{}};
+  assert.deepEqual(context.seatCards({playerId:'p1'},finished,revealed,mucks).items,['As','Kd']);
+  assert.deepEqual(context.seatCards({playerId:'p2'},finished,revealed,mucks).items,[],'a muck stays unseen');
+  const live={viewer:null,gameOver:false,holeCardsByPlayerId:{p1:['As','Kd'],p2:['7c','2d']}};
+  assert.deepEqual(context.seatCards({playerId:'p2'},live,revealed,mucks).items,['7c','2d'],'live play shows every hand as before');
+});
+
 test('spectator snapshot resultHold reaches the shared result builder and current countdown',async()=>{
   const {buildHandResult,handResultFrame}=await import('../server/public/hand-result.js');
   const snapshot={revision:2,view:{viewer:null,holeCardsByPlayerId:{p1:['As','Ah']},handNo:1,handInProgress:false,board:[],seats:[]},

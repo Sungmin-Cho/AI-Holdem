@@ -572,7 +572,9 @@ function avatarRing() {
 function seatCards(seat, view, revealed, mucks) {
   const box = el('div', 'seat-cards');
   if (isSpectating(view)) {
-    for (const code of view.holeCardsByPlayerId[seat.playerId] ?? []) box.append(cardNode(code, {small:true}));
+    // A finished game's spectator view carries no hole cards; the showdown's
+    // public reveals still show what the last hand was won with.
+    for (const code of view.holeCardsByPlayerId?.[seat.playerId] ?? revealed[seat.playerId]?.cards ?? []) box.append(cardNode(code, {small:true}));
     return box;
   }
   if (seat.playerId === viewerId(view)) {
@@ -783,9 +785,9 @@ function paintHandResult(handNo = ui.handResult?.handNo) {
     };
     live.append(skip);
   }
-  // The hand that ended the game counts down to the final result, which any
-  // viewer may open at once; other hands count down to the next one.
-  const last=view?.gameOver===true,counting=frame.remainingSeconds!==null&&!(last&&finalRevealedHand===result.handNo);
+  // The hand that ended the game counts down to the final result while that
+  // waits on it (any viewer may open it at once); other hands count down to the next one.
+  const last=view?.gameOver===true,counting=frame.remainingSeconds!==null&&(!last||finalHolding(view));
   const countdown=box.querySelector('.hand-result-countdown');
   const text=counting?`${last?'최종 결과':'다음 핸드'} ${frame.remainingSeconds}초`:'';
   if(countdown.textContent!==text)countdown.textContent=text;

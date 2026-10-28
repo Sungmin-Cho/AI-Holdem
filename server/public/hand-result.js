@@ -198,10 +198,11 @@ export function updateHandResult(previous, input) {
 
 /** Whether the final screen still waits for the game's last hand: its result is
  * on the table and that hand's hold (runout, then the result) has not run out,
- * unless this viewer asked to see the final result now. */
+ * unless this viewer asked to see the final result now. A game ended early
+ * (abort) never waits, even on a finished hand's hold kept from before. */
 export function finalResultHolding({view, result, hold, now=Date.now(), revealedHandNo=null}) {
-  if (view?.gameOver !== true || !result || result.handNo !== view.handNo || hold?.handNo !== view.handNo
-    || revealedHandNo === view.handNo) return false;
+  if (view?.gameOver !== true || view.result === 'abort' || !result || result.handNo !== view.handNo
+    || hold?.handNo !== view.handNo || revealedHandNo === view.handNo) return false;
   const until = Date.parse(hold.until);
   return Number.isFinite(until) && until > now;
 }

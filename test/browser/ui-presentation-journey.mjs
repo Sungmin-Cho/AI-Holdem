@@ -899,7 +899,7 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     }
     assert.equal(view.gameOver,true,'the fixture hand ends the game');
     const endingAt=Date.now();
-    await publish(endingEvents,{resultHold:{handNo:view.handNo,startAt:new Date(endingAt).toISOString(),until:new Date(endingAt+20000).toISOString(),runoutStepMs:0,runoutStreets:0}});
+    await publish(endingEvents,{resultHold:{handNo:view.handNo,startAt:new Date(endingAt).toISOString(),until:new Date(endingAt+30000).toISOString(),runoutStepMs:0,runoutStreets:0}});
     await browser(['wait','--fn',"document.querySelector('#hand-result')?.hidden===false"]);
     const HELD="({overlay:document.querySelector('#review-overlay').hidden,reopen:document.querySelector('#review-reopen').hidden,countdown:document.querySelector('.hand-result-countdown')?.textContent,skip:document.querySelector('.hand-result-skip')?.hidden,label:document.querySelector('.hand-result-skip')?.textContent,board:document.querySelectorAll('#board .card[role=img]').length,shown:document.querySelectorAll('.seat:not(.is-hero) .card[role=img]').length})";
     const held=await evaluate(HELD);
@@ -909,11 +909,15 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await browser(['wait','--fn',"!document.querySelector('#review-overlay').hidden && document.querySelector('#review-overlay').contains(document.activeElement)"]);
     await click('#review-close');
     assert.equal(await evaluate("document.querySelector('#hand-result').hidden===false && document.querySelector('.hand-result-skip').hidden && document.querySelector('.hand-result-countdown').textContent===''"),true,'the last hand stays on the table');
-    await browser(['reload']);await browser(['wait','#board .card[role=img]']);
+    // A finished game's record is opened for its result: it never waits.
+    await browser(['open',`${origin}/?token=${token}&terminal=1`]);await browser(['wait','#review-overlay:not([hidden])']);
+    assert.equal(await evaluate("document.querySelector('.hand-result-countdown')?.textContent??''"),'','the record shows no countdown');
+    assert.ok(Date.now()<endingAt+30000,'the record opened while the hold still ran');
+    await browser(['open',`${origin}/?token=${token}`]);await browser(['wait','#board .card[role=img]']);
     const reloaded=await evaluate(HELD);
     assert.ok(reloaded.overlay&&/^최종 결과 \d+초$/.test(reloaded.countdown)&&reloaded.skip===false,JSON.stringify(reloaded));
     await browser(['wait','--fn',"document.querySelector('#review-overlay')?.hidden===false"]);
-    assert.ok(Date.now()>=endingAt+19000,'the final result waited for the hold');
+    assert.ok(Date.now()>=endingAt+29000,'the final result waited for the hold');
     assert.equal(await evaluate("document.querySelector('.hand-result-countdown').textContent===''&&document.querySelector('.hand-result-skip').hidden"),true);
     checks.push('final-hand-hold');
     await click('#review-close');

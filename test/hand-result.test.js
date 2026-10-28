@@ -65,6 +65,7 @@ test('the final screen waits only while the game-ending hand is held on the tabl
   assert.equal(finalResultHolding({view,result,hold,now:2000,revealedHandNo:3}),false,'"결과 보기" opens it at once');
   assert.equal(finalResultHolding({view,result,hold,now:2000,revealedHandNo:2}),true,'another hand\'s choice does not');
   assert.equal(finalResultHolding({view:input.view,result,hold,now:2000}),false,'a hand that did not end the game');
+  assert.equal(finalResultHolding({view:{...view,result:'abort'},result,hold,now:2000}),false,'a game ended early never waits on a kept hold');
   assert.equal(finalResultHolding({view,result:null,hold,now:2000}),false,'no result on the table, no wait');
   assert.equal(finalResultHolding({view,result:{...result,handNo:2},hold,now:2000}),false);
   assert.equal(finalResultHolding({view,result,hold:{...hold,handNo:2},now:2000}),false,'another hand\'s hold');

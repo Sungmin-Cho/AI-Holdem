@@ -106,6 +106,42 @@ test(`pace ${scenario.pace ?? 'legacy'}${scenario.resultHoldSec!==undefined?` re
 });
 }
 
+test('a skip cannot claim the game-ending hand\'s hold, which only the table waits on',{timeout:60000},async t=>{
+  const root=createOwnedTempDir('holdem-final-hold');
+  let clock=Date.now(),loopRef=null;const claims=[],waits=[];
+  const {loop}=await prepareGameSession({gameDir:root,port:0,pace:'normal',opponentRuntime:'policy'}, {resolver:async()=>({player:null,upper:null,notices:[]}),loopOptions:{
+    waitMs:0,now:()=>new Date(clock),
+    // The hold is registered before the publisher runs: a skip here is what a click
+    // during the publish would do. Hand 1's claim is the control.
+    onPublishInvoke:args=>{
+      const at=args.indexOf('--result-hold');
+      if(at>=0){const handNo=Number(args[at+1].split('|')[0]);claims.push({handNo,...loopRef.skipHandResult(handNo)});}
+    },
+    paceSleep:async(ms,{kind})=>{waits.push(kind);clock+=ms;},
+  }});
+  loopRef=loop;
+  t.after(()=>loop.requestStop());
+  await loop.bootstrap({ai:1,mode:'cash-training',hands:2,stackBb:100,opponentRuntime:'policy'});
+  let posting=false;
+  const timer=setInterval(async()=>{
+    if(posting)return;posting=true;
+    try {
+      const snap=JSON.parse(fs.readFileSync(path.join(root,'ui-snapshot.json'))),legal=snap.view?.legal;
+      if(snap.view?.toAct==='user' && legal?.decisionId) {
+        const lock=JSON.parse(fs.readFileSync(path.join(root,'lock.json')));
+        await fetch(`http://127.0.0.1:${lock.port}/api/action`,{method:'POST',headers:{'content-type':'application/json'},
+          body:JSON.stringify({token:lock.sessionToken,decisionId:legal.decisionId,requestId:randomUUID(),action:legal.canCheck?'check':'fold'})});
+      }
+    } catch {} finally {posting=false;}
+  },20);
+  t.after(()=>clearInterval(timer));
+  try {await loop.run();} finally {clearInterval(timer);}
+  assert.deepEqual(claims,[{handNo:1,skipped:true},{handNo:2,skipped:false}]);
+  assert.equal(waits.filter(kind=>kind==='result').length,0,'the skipped hold and the final one: no result wait');
+  const snapshot=JSON.parse(fs.readFileSync(path.join(root,'ui-snapshot.json')));
+  assert.equal(snapshot.view.gameOver,true);assert.equal(snapshot.resultHold.handNo,2);
+});
+
 async function managedPaceFixture(t, targetKind, {multi=false,afterHand=0,beforeWait=null,publishFailure=false}={}) {
   const root=createOwnedTempDir('holdem-pace-controls');
   let clock=Date.now(),first=true,enteredResolve;
