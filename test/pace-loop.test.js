@@ -64,7 +64,25 @@ test(`pace ${scenario.pace ?? 'legacy'}${scenario.resultHoldSec!==undefined?` re
   const runoutMs=scenario.pace==='normal'?800:0;
   const expectedHold=holdMs>0 && scenario.error!=='BAD_ATTEMPT';
   assert.equal(holds.length,expectedHold?1:0);
-  const holdArgs=publishes.filter(args=>args.includes('--result-hold')).map(args=>args[args.indexOf('--result-hold')+1]);
+  const allHoldArgs=publishes.filter(args=>args.includes('--result-hold')).map(args=>args[args.indexOf('--result-hold')+1]);
+  const holdArgs=allHoldArgs.filter(arg=>arg.split('|')[0]==='1');
+  // The hand that ends the game (hand 2) is held too, so the table shows it before the
+  // final screen, but the loop neither sleeps on it (one 'result' wait, hand 1's) nor
+  // lets a skip claim it.
+  const finalHoldArgs=[...new Set(allHoldArgs.filter(arg=>arg.split('|')[0]==='2'))];
+  assert.equal(allHoldArgs.length,holdArgs.length+allHoldArgs.filter(arg=>arg.split('|')[0]==='2').length);
+  const finalSnapshot=JSON.parse(fs.readFileSync(path.join(root,'ui-snapshot.json')));
+  assert.equal(finalSnapshot.view.gameOver,true);
+  assert.ok(finalHoldArgs.length<=1,'one absolute deadline for the last hand');
+  if (holdMs>0) assert.equal(finalHoldArgs.length,1,'the game-ending hand is held');
+  if (finalHoldArgs.length) {
+    const [,startAt,until,stepMs,streets]=finalHoldArgs[0].split('|');
+    assert.equal(Date.parse(until)-Date.parse(startAt),holdMs+runoutMs*Number(streets));
+    assert.equal(Number(stepMs),runoutMs);
+    assert.deepEqual(finalSnapshot.resultHold,{handNo:2,startAt,until,runoutStepMs:Number(stepMs),runoutStreets:Number(streets)},
+      'finalization keeps the last hand\'s hold');
+  } else assert.equal(finalSnapshot.resultHold,null);
+  assert.deepEqual(loop.skipHandResult(2),{skipped:false});
   if (expectedHold) {
     assert.equal(holds[0].hold.handNo,1);
     assert.equal(Date.parse(holds[0].hold.until)-Date.parse(holds[0].hold.startAt),holdMs+runoutMs*holds[0].hold.runoutStreets);
@@ -84,10 +102,45 @@ test(`pace ${scenario.pace ?? 'legacy'}${scenario.resultHoldSec!==undefined?` re
     if(scenario.pace!=='normal')assert.equal(waits.length,0);
   }
   for(const args of publishes.filter(args=>args.includes('--view-only')))assert.equal(args.includes('--result-hold'),false);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(root,'ui-snapshot.json'))).resultHold,null);
   assert.deepEqual(loop.skipHandResult(1),{skipped:false});
 });
 }
+
+test('a skip cannot claim the game-ending hand\'s hold, which only the table waits on',{timeout:60000},async t=>{
+  const root=createOwnedTempDir('holdem-final-hold');
+  let clock=Date.now(),loopRef=null;const claims=[],waits=[];
+  const {loop}=await prepareGameSession({gameDir:root,port:0,pace:'normal',opponentRuntime:'policy'}, {resolver:async()=>({player:null,upper:null,notices:[]}),loopOptions:{
+    waitMs:0,now:()=>new Date(clock),
+    // The hold is registered before the publisher runs: a skip here is what a click
+    // during the publish would do. Hand 1's claim is the control.
+    onPublishInvoke:args=>{
+      const at=args.indexOf('--result-hold');
+      if(at>=0){const handNo=Number(args[at+1].split('|')[0]);claims.push({handNo,...loopRef.skipHandResult(handNo)});}
+    },
+    paceSleep:async(ms,{kind})=>{waits.push(kind);clock+=ms;},
+  }});
+  loopRef=loop;
+  t.after(()=>loop.requestStop());
+  await loop.bootstrap({ai:1,mode:'cash-training',hands:2,stackBb:100,opponentRuntime:'policy'});
+  let posting=false;
+  const timer=setInterval(async()=>{
+    if(posting)return;posting=true;
+    try {
+      const snap=JSON.parse(fs.readFileSync(path.join(root,'ui-snapshot.json'))),legal=snap.view?.legal;
+      if(snap.view?.toAct==='user' && legal?.decisionId) {
+        const lock=JSON.parse(fs.readFileSync(path.join(root,'lock.json')));
+        await fetch(`http://127.0.0.1:${lock.port}/api/action`,{method:'POST',headers:{'content-type':'application/json'},
+          body:JSON.stringify({token:lock.sessionToken,decisionId:legal.decisionId,requestId:randomUUID(),action:legal.canCheck?'check':'fold'})});
+      }
+    } catch {} finally {posting=false;}
+  },20);
+  t.after(()=>clearInterval(timer));
+  try {await loop.run();} finally {clearInterval(timer);}
+  assert.deepEqual(claims,[{handNo:1,skipped:true},{handNo:2,skipped:false}]);
+  assert.equal(waits.filter(kind=>kind==='result').length,0,'the skipped hold and the final one: no result wait');
+  const snapshot=JSON.parse(fs.readFileSync(path.join(root,'ui-snapshot.json')));
+  assert.equal(snapshot.view.gameOver,true);assert.equal(snapshot.resultHold.handNo,2);
+});
 
 async function managedPaceFixture(t, targetKind, {multi=false,afterHand=0,beforeWait=null,publishFailure=false}={}) {
   const root=createOwnedTempDir('holdem-pace-controls');

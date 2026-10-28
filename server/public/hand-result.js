@@ -135,7 +135,9 @@ export function summarizeHand(log, handNo, options = {}) {
 }
 
 export function buildHandResult({log, view, viewer, prior}) {
-  if (!view || view.handInProgress !== false || view.gameOver) return null;
+  // The hand that ended the game is a finished hand too: its result shows on the
+  // table (held like any other) before the final screen, and stays there after.
+  if (!view || view.handInProgress !== false) return null;
   const rows = Array.isArray(log) ? log : [];
   const result = summarizeHand(rows, view.handNo, {pots:view.pots, viewer:typeof viewer === 'string' && view.viewer !== null ? viewer : null});
   if (!result) return null;
@@ -177,14 +179,14 @@ export function trackLatestResult(previous, {log, view, viewer, prior}) {
   const atEnd = start === rows.findLastIndex(event => event?.type === 'hand_start')
     && view?.handNo === latest.handNo && view.handInProgress === false;
   if (previous?.key === latest.key && previous.viewer === who && (previous.fromView || !atEnd)) return previous;
-  const built = atEnd ? buildHandResult({log:rows, view:{...view, gameOver:false}, viewer, prior}) : null;
+  const built = atEnd ? buildHandResult({log:rows, view, viewer, prior}) : null;
   if (built?.key === latest.key) return {...built, fromView:true};
   return {...latest, viewer:who};
 }
 
 export function updateHandResult(previous, input) {
   const view = input.view;
-  if (!view || view.handInProgress !== false || view.gameOver) return null;
+  if (!view || view.handInProgress !== false) return null;
   const viewer = typeof input.viewer === 'string' && view.viewer !== null ? input.viewer : null;
   const fresh = buildHandResult(input);
   // Side frames of the same finished hand keep the same object (and its DOM).
@@ -192,6 +194,17 @@ export function updateHandResult(previous, input) {
   // or another viewer replaces it, and an unreadable hand shows nothing.
   if (fresh && previous?.key === fresh.key && previous.viewer === viewer) return previous;
   return fresh;
+}
+
+/** Whether the final screen still waits for the game's last hand: its result is
+ * on the table and that hand's hold (runout, then the result) has not run out,
+ * unless this viewer asked to see the final result now. A game ended early
+ * (abort) never waits, even on a finished hand's hold kept from before. */
+export function finalResultHolding({view, result, hold, now=Date.now(), revealedHandNo=null}) {
+  if (view?.gameOver !== true || view.result === 'abort' || !result || result.handNo !== view.handNo
+    || hold?.handNo !== view.handNo || revealedHandNo === view.handNo) return false;
+  const until = Date.parse(hold.until);
+  return Number.isFinite(until) && until > now;
 }
 
 /** A late/reconnecting viewer sees the stage at now, rather than replaying it. */

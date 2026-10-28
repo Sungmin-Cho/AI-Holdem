@@ -48,8 +48,31 @@ test('unknown baseline and spectators omit net; tournament uses captured hand-st
   assert.equal(buildHandResult({...input,prior:{...input.prior,handNo:2}}).myNet,null);
   assert.equal(buildHandResult({...input,view:{...input.view,mode:'tournament'}}).myNet,100);
   assert.equal(buildHandResult({...input,view:{...input.view,handInProgress:true}}),null);
-  assert.equal(buildHandResult({...input,view:{...input.view,gameOver:true}}),null);
+  // The hand that ended the game is still a finished hand, with the viewer's net.
+  assert.equal(buildHandResult({...input,view:{...input.view,gameOver:true}}).myNet,100);
   assert.equal(buildHandResult({...input,log:[{type:'hand_start',handNo:3}]}),null);
+});
+
+test('the final screen waits only while the game-ending hand is held on the table',async()=>{
+  const {buildHandResult,updateHandResult,finalResultHolding,handResultFrame}=await import('../server/public/hand-result.js');
+  const input=fixture(),view={...input.view,gameOver:true},result=buildHandResult({...input,view});
+  assert.equal(result.handNo,3);
+  assert.equal(updateHandResult(null,{...input,view}).key,result.key,'the table shows the last hand at game over');
+  const hold={handNo:3,startAt:new Date(1000).toISOString(),until:new Date(5000).toISOString(),runoutStepMs:0,runoutStreets:0};
+  const at=now=>finalResultHolding({view,result,hold,now});
+  assert.equal(at(4999),true);
+  assert.equal(at(5000),false,'the hold has run out');
+  assert.equal(finalResultHolding({view,result,hold,now:2000,revealedHandNo:3}),false,'"결과 보기" opens it at once');
+  assert.equal(finalResultHolding({view,result,hold,now:2000,revealedHandNo:2}),true,'another hand\'s choice does not');
+  assert.equal(finalResultHolding({view:input.view,result,hold,now:2000}),false,'a hand that did not end the game');
+  assert.equal(finalResultHolding({view:{...view,result:'abort'},result,hold,now:2000}),false,'a game ended early never waits on a kept hold');
+  assert.equal(finalResultHolding({view,result:null,hold,now:2000}),false,'no result on the table, no wait');
+  assert.equal(finalResultHolding({view,result:{...result,handNo:2},hold,now:2000}),false);
+  assert.equal(finalResultHolding({view,result,hold:{...hold,handNo:2},now:2000}),false,'another hand\'s hold');
+  assert.equal(finalResultHolding({view,result,hold:null,now:2000}),false,'no hold (0 seconds, instant pace): at once');
+  assert.equal(finalResultHolding({view,result,hold:{...hold,until:'bad'},now:2000}),false);
+  // The held last hand counts down like any other and stages its runout.
+  assert.deepEqual(handResultFrame({result,hold,log:input.log,view,now:2000}),{board:[],visible:true,remainingSeconds:3});
 });
 
 test('same-hand side frames preserve result identity and a new hand clears it',async()=>{
