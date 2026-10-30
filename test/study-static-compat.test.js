@@ -4,7 +4,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
-import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createDrillHandler } from '../tools/drill-server.js';
 import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 
@@ -43,72 +45,102 @@ const OLD_SERVICE_ASSETS = [
 ];
 const OLD_FILE = new Map(OLD_SERVICE_ASSETS.map(([url, file]) => [url, file]));
 
-/** Module paths this source may request: every quoted relative or root path ending in .js or .mjs (a query or
- * fragment may follow), wherever it
- * stands. A static import or re-export, an import() of a literal and a mention in a comment or string all count.
- * This is a superset on purpose: no parsing (comments, templates, regular expressions, line continuations) can hide
- * a dependency; a mention that is not an import can only fail the check, never let a missing path pass. */
-function moduleMentions(text) {
-  return [...new Set([...text.matchAll(/(['"])((?:\.{1,2}\/|\/)[^'"\s]*?\.m?js(?:[?#][^'"\s]*)?)\1/g)].map((match) => match[2]))];
+// A resolve hook for a child Node process: it records every module request the ES module loader itself makes while
+// linking the graph (static imports and re-exports, with the specifier as the parser decoded it) and the file it
+// resolved to. Nothing here scans source text, so no comment, string, template, escape or line ending can hide one.
+// `registerHooks` runs in the thread (Node 22.15+); older Node uses `register` (off-thread, writes the same file).
+const RECORDING_HOOK = `import fs from 'node:fs';
+let out;
+export async function initialize(data) { out = data.out; }
+export async function resolve(specifier, context, next) {
+  const result = await next(specifier, context);
+  fs.appendFileSync(out, JSON.stringify({ parent: context.parentURL ?? null, specifier, url: result.url }) + '\\n');
+  return result;
+}`;
+// File URLs as the loader writes them: real paths (macOS /private/var, Windows long names), compared by path.
+const realFileUrl = (file) => pathToFileURL(fs.realpathSync(file)).href;
+
+/** The module requests the loader makes when it imports `entryFile`: [{ parent, specifier, url }] with real file URLs.
+ * A request the loader cannot resolve (an extensionless or remote path, a missing file) fails the import, and so
+ * the caller. */
+function loaderRequests(entryFile, workDir) {
+  const out = path.join(workDir, 'requests.jsonl');
+  fs.writeFileSync(out, '');
+  const script = `import * as mod from 'node:module';
+import fs from 'node:fs';
+const out = ${JSON.stringify(out)};
+if (typeof mod.registerHooks === 'function') {
+  mod.registerHooks({ resolve(specifier, context, next) {
+    const result = next(specifier, context);
+    fs.appendFileSync(out, JSON.stringify({ parent: context.parentURL ?? null, specifier, url: result.url }) + '\\n');
+    return result;
+  } });
+} else mod.register(${JSON.stringify(`data:text/javascript,${encodeURIComponent(RECORDING_HOOK)}`)}, import.meta.url, { data: { out } });
+await import(${JSON.stringify(realFileUrl(entryFile))});`;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 60_000 });
+  assert.equal(child.status, 0, `the loader could not import ${entryFile}: ${child.stderr}`);
+  return fs.readFileSync(out, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
 }
 
-/** Every module reachable from /drill.js, resolved as a browser does, reading each module through `read(url)`
- * (null when it is not served). Returns url -> served (true/false). */
-async function importGraph(read, entry = '/drill.js') {
-  const seen = new Map();
-  const pending = [entry];
-  while (pending.length) {
-    const url = pending.pop();
-    if (seen.has(url)) continue;
-    const text = await read(url);
-    seen.set(url, text !== null);
-    if (text === null) continue;
-    for (const specifier of moduleMentions(text)) {
-      pending.push(new URL(specifier, `http://page.invalid${url}`).pathname);
+/** Every module the page loads, as browser URLs, from the loader's own requests: each request is resolved against the
+ * browser URL of the module that made it. Returns url -> the file the loader used for it. A request that leaves the
+ * page's origin is reported as such. */
+function pageGraph(workDir) {
+  const entry = path.join(ROOT, OLD_FILE.get('/drill.js'));
+  const requests = loaderRequests(entry, workDir);
+  const browserUrlOf = new Map([[realFileUrl(entry), '/drill.js']]);
+  const graph = new Map([['/drill.js', realFileUrl(entry)]]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const { parent, specifier, url } of requests) {
+      const from = browserUrlOf.get(parent);
+      if (!from || specifier.startsWith('node:')) continue;
+      const target = new URL(specifier, `http://page.invalid${from}`);
+      const key = target.origin === 'http://page.invalid' ? target.pathname : `EXTERNAL ${target.href}`;
+      if (!graph.has(key)) { graph.set(key, url); grew = true; }
+      if (!browserUrlOf.has(url) && target.origin === 'http://page.invalid') { browserUrlOf.set(url, target.pathname); grew = true; }
     }
   }
-  return seen;
+  return graph;
 }
-const readOldFile = async (url) => (OLD_FILE.has(url) ? fs.readFileSync(`${ROOT}${OLD_FILE.get(url)}`, 'utf8') : null);
 
-test('every import form is found, and nothing a comment, string, template or regular expression holds can hide one', () => {
+test('the graph comes from the loader, so syntax that fools a text scan cannot hide an import', () => {
+  const dir = createOwnedTempDir('static-compat-loader');
+  const files = { 'a.js': '', 'b.js': '', 'c.js': '', 'd.js': '', 'e.js': '', 'f.js': '', 'g.js': '', 'h.js': '' };
+  for (const name of Object.keys(files)) fs.writeFileSync(path.join(dir, name), 'export const x = 1;\n');
   const lines = [
-    "import{a}from'./a.js';",
-    'import {',
-    '  b,',
-    "  c as d } from \"./b.js\";",
-    "import './side.js';",
-    "import * as ns from '../shared/ns.js';",
-    "export * from './star.js';",
-    "export { e } from './re.js';",
-    "const lazy = () => import('./lazy.js');",
-    "const marker = '//'; import './after-string.js';",
-    "const begin = '/*';",
-    "import './between-strings.js';",
-    "const end = '*/';",
-    'const t = `${`/*`}`; import "./after-nested-template.js";',
-    "const u = `${import(/* why */ './in-template.js')}`;",
-    "if (ok) {} /[/*]/g.test(text); import './after-block-regex.js';",
-    "const half = width / 2; import './after-division.js';",
-    "import { v } from './versioned.js?v=2';",
+    "/*'./decoy.js?*/import'./a.js';",
+    "const marker = '//'; import './b.js';",
+    'const t = `${`/*`}`; import "./c.js";',
+    "if (globalThis) {} /[/*]/g.test('x'); import './d.js';",
     'const s = "a\\',
-    '/*"; import "./after-continuation.js";',
+    '/*"; import "./e.js";',
+    "import '\\u002e/f.js';",
+    "export * from './g.js?label=a b';",
+    "import{x as h}from'./h.js';",
   ];
-  const expected = ['../shared/ns.js', './a.js', './b.js', './lazy.js', './re.js', './side.js', './star.js', './after-string.js',
-    './between-strings.js', './after-nested-template.js', './in-template.js', './after-block-regex.js', './after-division.js',
-    './after-continuation.js', './versioned.js?v=2'].sort();
-  for (const newline of ['\n', '\r\n']) assert.deepEqual(moduleMentions(lines.join(newline)).sort(), expected, JSON.stringify(newline));
-  // A mention that is not an import counts too: it can only fail the check. Other strings do not.
-  assert.deepEqual(moduleMentions("// see './commented.js'\nconst api = '/api/summary'; const site = 'http://example.invalid/x.js';"), ['./commented.js']);
+  for (const newline of ['\n', '\r\n']) {
+    fs.writeFileSync(path.join(dir, 'entry.js'), lines.join(newline));
+    fs.rmSync(path.join(dir, 'requests.jsonl'), { force: true });
+    const requested = loaderRequests(path.join(dir, 'entry.js'), dir)
+      .filter((row) => row.parent === realFileUrl(path.join(dir, 'entry.js')))
+      .map((row) => path.basename(fileURLToPath(row.url)));
+    assert.deepEqual([...new Set(requested)].sort(), Object.keys(files).sort(), JSON.stringify(newline));
+  }
+  // An extensionless path does not load at all, so it cannot pass the check.
+  fs.writeFileSync(path.join(dir, 'bare.js'), "import './a';\n");
+  assert.throws(() => loaderRequests(path.join(dir, 'bare.js'), dir), /could not import/);
 });
 
-test('the page imports only paths that a service from before issue 335 serves', async () => {
-  const graph = await importGraph(readOldFile);
+test('the page imports only paths that a service from before issue 335 serves, from the same files', () => {
+  const graph = pageGraph(createOwnedTempDir('static-compat-graph'));
   assert.ok(graph.has('/study-format.js') && graph.has('/spot-chart.js') && graph.has('/shared/reference.js'), 'the walk really follows the imports');
-  assert.deepEqual([...graph].filter(([, served]) => !served).map(([url]) => url), [], 'paths the old allow-list does not serve');
+  assert.deepEqual([...graph.keys()].filter((url) => !OLD_FILE.has(url)), [], 'paths the old allow-list does not serve');
+  for (const [url, fileUrl] of graph) assert.equal(fileUrl, realFileUrl(path.join(ROOT, OLD_FILE.get(url))), url);
 });
 
-async function serveGraph(staticAssets) {
+async function statusesOf(urls, staticAssets) {
   const storeDir = createOwnedTempDir('static-compat');
   const handler = createDrillHandler({ storeDir, token: 'compat-token', ...(staticAssets ? { staticAssets } : {}) });
   const server = http.createServer(handler);
@@ -116,23 +148,20 @@ async function serveGraph(staticAssets) {
   const { port } = server.address();
   try {
     const statuses = {};
-    // The walk reads each module from the response body, as a browser would.
-    const graph = await importGraph(async (url) => {
+    for (const url of ['/', ...urls]) {
       const response = await fetch(`http://127.0.0.1:${port}${url}`);
       statuses[url] = response.status;
-      const body = await response.text();
-      return response.status === 200 ? body : null;
-    });
-    assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 200, '/');
-    return { graph, statuses };
+      await response.arrayBuffer();
+    }
+    return statuses;
   } finally { await new Promise((resolve) => { server.close(resolve); server.closeAllConnections?.(); }); }
 }
 
-test('the old allow-list and the current service both serve the whole import graph with 200', async () => {
-  const old = await serveGraph(new Map(OLD_SERVICE_ASSETS.map(([url, file, mime]) => [url, [file, mime]])));
-  assert.ok(old.graph.size >= 5, 'the walk followed the served modules');
-  assert.deepEqual(Object.entries(old.statuses).filter(([, status]) => status !== 200), [], 'old allow-list');
-  const current = await serveGraph(null);
-  assert.deepEqual(Object.entries(current.statuses).filter(([, status]) => status !== 200), [], 'current service');
-  assert.deepEqual([...current.graph.keys()].sort(), [...old.graph.keys()].sort());
+test('the old allow-list and the current service both serve the whole page graph with 200', async () => {
+  const urls = [...pageGraph(createOwnedTempDir('static-compat-graph')).keys()];
+  assert.ok(urls.length >= 5, 'the graph has the page modules');
+  const old = await statusesOf(urls, new Map(OLD_SERVICE_ASSETS.map(([url, file, mime]) => [url, [file, mime]])));
+  assert.deepEqual(Object.entries(old).filter(([, status]) => status !== 200), [], 'old allow-list');
+  const current = await statusesOf(urls, null);
+  assert.deepEqual(Object.entries(current).filter(([, status]) => status !== 200), [], 'current service');
 });
