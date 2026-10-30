@@ -27,8 +27,9 @@ import { strataForSpot } from '../training/drill-strata.js';
 import { lookup } from '../training/providers/preflop-json.js';
 import { CANONICAL_REFERENCE_SOURCE, referenceSchemaOf } from '../shared/reference.js';
 import {
-  LEARNING_EFFECT_PROTOCOL_V1, PROTOCOL_SHA256, evaluateLearningEffect, sealPlan,
+  LEARNING_EFFECT_PROTOCOL_V1, PROTOCOL_SHA256, enrollmentReasons, evaluateLearningEffect, measurementSlots, sealPlan,
 } from '../training/learning-effect.js';
+import { validateLearningEvents } from '../training/study-history.js';
 
 export const ENROLLMENT_FILE = 'learning-evaluation.json';
 const EVENTS_FILE = 'profile-events.jsonl';
@@ -214,6 +215,45 @@ export function buildReport(storeDir, { id = null, now = new Date().toISOString(
     events: snapshot.events, exposureLog: snapshot.exposureLog, runLog: snapshot.runLog, enrollment, now,
     chartOf: helpers.chartOf ?? undefined, stratumOf: helpers.stratumOf, currentRunId: snapshot.currentRunId, inputs: snapshot.inputs,
   });
+}
+
+// ── 학습 화면용 등록 뷰 ────────────────────────────────────────────────────────
+
+const VIEW_CODE_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const unavailableView = (...codes) => ({ status: 'unavailable', reasons: codes });
+const slotView = (entries) => entries.map((entry, i) => ({ slot: i + 1, runId: entry.runId, status: entry.status }));
+
+/**
+ * 학습 화면의 등록 슬롯 뷰(공개 투영). 열린 등록이 없으면 null이다 — 이때는 등록 파일 하나만 읽는다.
+ * 열린 등록이 있으면 보고서와 같은 snapshot과 같은 평가기 규칙(`enrollmentReasons`·`measurementSlots`)으로 슬롯을 계산한다.
+ * 등록 뷰의 오류는 이 안에서만 격리한다(코드만 싣는다). `reader`는 시험 이음새로 readSnapshot과 같다.
+ */
+export function readEnrollmentView(storeDir, { now = new Date().toISOString(), reader = readFile } = {}) {
+  const root = trainingRootOf(storeDir);
+  try {
+    const first = parseEnrollments(reader(root, ENROLLMENT_FILE, LIMITS.small)).enrollments.at(-1) ?? null;
+    if (!first || !isOpen(first, now)) return null;
+    const snapshot = readSnapshot(storeDir, { reader });
+    // 첫 판독과 snapshot 사이에 철회되거나 새 등록이 생겼을 수 있다 — snapshot 기준으로 다시 판정한다.
+    const enrollment = snapshot.enrollments.at(-1) ?? null;
+    if (!enrollment || !isOpen(enrollment, now)) return null;
+    const valid = validateLearningEvents(snapshot.events);
+    let sourceAvailable = true;
+    try { loadReferenceDataset(enrollment.source); } catch { sourceAvailable = false; }
+    const reasons = enrollmentReasons({ enrollment, runLog: snapshot.runLog, sourceAvailable });
+    if (reasons.length) return unavailableView(...reasons);
+    const slots = measurementSlots({ valid, runLog: snapshot.runLog, enrollment, now, currentRunId: snapshot.currentRunId });
+    return {
+      status: 'active', postOpen: Date.parse(now) >= Date.parse(enrollment.postOpensAt),
+      consentedAt: enrollment.consentedAt, postOpensAt: enrollment.postOpensAt, postClosesAt: enrollment.postClosesAt,
+      baselineRuns: slots.k,
+      baselines: slotView(slots.baseline.selected), post: slotView(slots.post.selected),
+      retention: slots.retention.map((entry, i) => ({ slot: i + 1, assessmentId: entry.assessmentId, runId: entry.runId, status: entry.status,
+        current: entry.runId !== null && entry.runId === snapshot.currentRunId })),
+    };
+  } catch (error) {
+    return unavailableView(VIEW_CODE_RE.test(error?.code ?? '') ? error.code : 'ENROLLMENT_VIEW_FAILED');
+  }
 }
 
 // ── 출력·CLI ─────────────────────────────────────────────────────────────────

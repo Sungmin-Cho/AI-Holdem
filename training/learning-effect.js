@@ -276,6 +276,56 @@ function slotsOf({ starts, from, to, k, source, history, confirmed, mode, extraF
   };
 }
 
+/** 등록 한 건이 평가 가능한지의 불가 사유(순서 보존). 철회·미등록은 호출 전에 걸러진다. */
+export function enrollmentReasons({ enrollment, runLog, sourceAvailable }) {
+  const P = LEARNING_EFFECT_PROTOCOL_V1;
+  const reasons = [];
+  if (enrollment.protocolId !== P.id || enrollment.protocolSha256 !== PROTOCOL_SHA256) reasons.push('PROTOCOL_MISMATCH');
+  let sealed = null;
+  try { sealed = sealPlan(enrollment.plan, enrollment.consentedAt); } catch { reasons.push('PLAN_INVALID'); }
+  if (sealed && (sealed.planSha256 !== enrollment.planSha256 || sealed.postOpensAt !== enrollment.postOpensAt
+    || sealed.postClosesAt !== enrollment.postClosesAt)) reasons.push('PLAN_SEAL_MISMATCH');
+  if (!sourceAvailable) reasons.push('SOURCE_UNAVAILABLE');
+  if (runLog?.status !== 'ok' || Date.parse(runLog.ledger.coverageFrom) > Date.parse(enrollment.consentedAt)) reasons.push('RUN_LOG_INCOMPLETE');
+  return reasons;
+}
+
+/**
+ * 등록의 측정 슬롯(기준·사후·retest 유지 측정)과 그 계산에 쓰는 중간값. 평가기와 학습 화면의 등록 뷰가 같은 규칙을 쓰도록 분리했다.
+ * valid는 validateLearningEvents를 거친 이벤트다.
+ */
+export function measurementSlots({ valid, runLog, enrollment, now, currentRunId = null }) {
+  const { consentedAt, postOpensAt, postClosesAt, source } = enrollment;
+  const k = enrollment.plan.baselineRuns;
+  const final = !before(now, postClosesAt);
+  // 기준 실행은 사후 창이 열리기 전에 완료돼야 한다. 사후·retest는 창이 닫히기 전(appliedAt < postClosesAt)의 응답만 본다.
+  const baseAsOf = minusMs(postOpensAt, 1);
+  const postAsOf = final ? minusMs(postClosesAt, 1) : now;
+  const historyBase = studyHistory(valid, before(now, baseAsOf) ? now : baseAsOf);
+  const historyPost = studyHistory(valid, postAsOf);
+  const runRows = [...runLog.ledger.rows].sort((a, b) => Date.parse(timeOfRow(a)) - Date.parse(timeOfRow(b)));
+  const starts = runRows.filter((row) => row.type === 'start' && !before(row.startedAt, consentedAt) && !before(postAsOf, row.startedAt));
+  const answeredRuns = new Set(valid.map((event) => event.studyRun?.id).filter(Boolean));
+  const replacedRuns = new Set(runRows.filter((row) => row.type === 'replace').map((row) => row.replacedRunId));
+  const confirmed = (runId) => answeredRuns.has(runId) || runId === currentRunId || replacedRuns.has(runId);
+  const baseline = slotsOf({ starts, from: consentedAt, to: postOpensAt, k, source, history: historyBase, confirmed, mode: 'assessment' });
+  const post = slotsOf({ starts, from: postOpensAt, to: postClosesAt, k, source, history: historyPost, confirmed, mode: 'assessment' });
+  const retestStarts = starts.filter((row) => row.mode === 'retest');
+  // retest 슬롯은 항상 K개다. 기준 슬롯이 없거나 기준이 사후 창 전에 끝나지 않았으면 그 retest는 유지 측정이 아니다.
+  const retention = Array.from({ length: k }, (_, i) => {
+    const entry = baseline.selected[i];
+    if (!entry) return { assessmentId: null, runId: null, startedAt: null, status: 'NO_BASELINE' };
+    const slot = slotsOf({ starts: retestStarts, from: postOpensAt, to: postClosesAt, k: 1, source, history: historyPost, confirmed,
+      mode: 'retest', extraFilter: (row) => row.assessmentId === entry.runId });
+    const picked = slot.selected[0] ?? { runId: null, startedAt: null, status: 'NOT_STARTED' };
+    return { assessmentId: entry.runId, ...picked,
+      status: entry.status !== 'complete' && picked.status === 'complete' ? 'BASELINE_INCOMPLETE' : picked.status };
+  });
+  // 사후 창 retest 시작 전체의 분모(첫 retest 말고 나머지·미확인·빈 큐·다른 source·기준 아닌 평가의 retest).
+  const retestWindow = slotsOf({ starts: retestStarts, from: postOpensAt, to: postClosesAt, k: 0, source, history: historyPost, confirmed, mode: 'retest' });
+  return { k, final, baseAsOf, postAsOf, historyBase, historyPost, runRows, starts, baseline, post, retention, retestWindow, retestStarts };
+}
+
 /**
  * evaluateLearningEffect({ events, exposureLog, runLog, enrollment, now, chartOf, stratumOf, currentRunId, inputs })
  *   events        검증 전 프로필 이벤트 배열(전체 이력)
@@ -303,46 +353,15 @@ export function evaluateLearningEffect({ events, exposureLog, runLog, enrollment
   };
   if (!enrollment) return { ...base, status: 'NOT_ENROLLED', reasons: [] };
   if (enrollment.withdrawnAt) return { ...base, status: 'WITHDRAWN', reasons: [] };
-  const reasons = [];
-  if (enrollment.protocolId !== P.id || enrollment.protocolSha256 !== PROTOCOL_SHA256) reasons.push('PROTOCOL_MISMATCH');
-  let sealed = null;
-  try { sealed = sealPlan(enrollment.plan, enrollment.consentedAt); } catch { reasons.push('PLAN_INVALID'); }
-  if (sealed && (sealed.planSha256 !== enrollment.planSha256 || sealed.postOpensAt !== enrollment.postOpensAt
-    || sealed.postClosesAt !== enrollment.postClosesAt)) reasons.push('PLAN_SEAL_MISMATCH');
-  if (typeof chartOf !== 'function') reasons.push('SOURCE_UNAVAILABLE');
-  if (runLog?.status !== 'ok' || Date.parse(runLog.ledger.coverageFrom) > Date.parse(enrollment.consentedAt)) reasons.push('RUN_LOG_INCOMPLETE');
+  const reasons = enrollmentReasons({ enrollment, runLog, sourceAvailable: typeof chartOf === 'function' });
   if (reasons.length) return { ...base, status: 'NON_COMPARABLE', reasons };
 
   const { consentedAt, postOpensAt, postClosesAt, source } = enrollment;
   const k = enrollment.plan.baselineRuns;
   const schedule = { consentedAt, postOpensAt, postClosesAt };
   const valid = validateLearningEvents(events);
-  const final = !before(now, postClosesAt);
-  // 기준 실행은 사후 창이 열리기 전에 완료돼야 한다. 사후·retest는 창이 닫히기 전(appliedAt < postClosesAt)의 응답만 본다.
-  const baseAsOf = minusMs(postOpensAt, 1);
-  const postAsOf = final ? minusMs(postClosesAt, 1) : now;
-  const historyBase = studyHistory(valid, before(now, baseAsOf) ? now : baseAsOf);
-  const historyPost = studyHistory(valid, postAsOf);
-  const runRows = [...runLog.ledger.rows].sort((a, b) => Date.parse(timeOfRow(a)) - Date.parse(timeOfRow(b)));
-  const starts = runRows.filter((row) => row.type === 'start' && !before(row.startedAt, consentedAt) && !before(postAsOf, row.startedAt));
-  const answeredRuns = new Set(valid.map((event) => event.studyRun?.id).filter(Boolean));
-  const replacedRuns = new Set(runRows.filter((row) => row.type === 'replace').map((row) => row.replacedRunId));
-  const confirmed = (runId) => answeredRuns.has(runId) || runId === currentRunId || replacedRuns.has(runId);
-  const baseline = slotsOf({ starts, from: consentedAt, to: postOpensAt, k, source, history: historyBase, confirmed, mode: 'assessment' });
-  const post = slotsOf({ starts, from: postOpensAt, to: postClosesAt, k, source, history: historyPost, confirmed, mode: 'assessment' });
-  const retestStarts = starts.filter((row) => row.mode === 'retest');
-  // retest 슬롯은 항상 K개다. 기준 슬롯이 없거나 기준이 사후 창 전에 끝나지 않았으면 그 retest는 유지 측정이 아니다.
-  const retention = Array.from({ length: k }, (_, i) => {
-    const entry = baseline.selected[i];
-    if (!entry) return { assessmentId: null, runId: null, startedAt: null, status: 'NO_BASELINE' };
-    const slot = slotsOf({ starts: retestStarts, from: postOpensAt, to: postClosesAt, k: 1, source, history: historyPost, confirmed,
-      mode: 'retest', extraFilter: (row) => row.assessmentId === entry.runId });
-    const picked = slot.selected[0] ?? { runId: null, startedAt: null, status: 'NOT_STARTED' };
-    return { assessmentId: entry.runId, ...picked,
-      status: entry.status !== 'complete' && picked.status === 'complete' ? 'BASELINE_INCOMPLETE' : picked.status };
-  });
-  // 사후 창 retest 시작 전체의 분모(첫 retest 말고 나머지·미확인·빈 큐·다른 source·기준 아닌 평가의 retest).
-  const retestWindow = slotsOf({ starts: retestStarts, from: postOpensAt, to: postClosesAt, k: 0, source, history: historyPost, confirmed, mode: 'retest' });
+  const { final, baseAsOf, postAsOf, historyPost, runRows, starts, baseline, post, retention, retestWindow } = measurementSlots({
+    valid, runLog, enrollment, now, currentRunId });
   const selectedRetests = new Set(retention.map((entry) => entry.runId).filter(Boolean));
   // 기준표 답이 있는(supported) 결정인데 관측이 없어(coverage 투영·보조 사용) 동치군을 알 수 없는 것만 센다.
   const untrackedDecisions = valid.filter((event) => event.status === 'supported' && sameSource(event.sourceIdentity, source) && !observationOf(event)

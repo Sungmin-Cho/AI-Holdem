@@ -196,9 +196,16 @@ test('the shipped drill client sends its token in the header, never in the URL',
     await globalThis.__api('/api/answer', { method: 'POST', body: { action: 'fold' } });
     process.stdout.write(JSON.stringify(calls));
   `;
-  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
-    encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024,
-  });
+  // The script embeds the whole client, which is longer than a Windows command line (32,767 characters) allows:
+  // run it from a file instead of -e.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'drill-client-'));
+  const scriptFile = path.join(dir, 'client-token.mjs');
+  fs.writeFileSync(scriptFile, script);
+  let child;
+  try {
+    child = spawnSync(process.execPath, [scriptFile], { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  assert.equal(child.error, undefined, String(child.error));
   assert.equal(child.status, 0, child.stderr);
   assert.equal(child.signal, null);
   const calls = JSON.parse(child.stdout);

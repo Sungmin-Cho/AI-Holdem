@@ -277,6 +277,13 @@
 .spot-cell.is-hand { outline: 2px solid var(--c-focus); outline-offset: 1px; }
 .chart-legend { margin-top: var(--sp-2); color: var(--c-text-2); font-size: var(--fs-12); }
 .assessment-baseline { color: var(--c-text-2); font-size: var(--fs-13); }
+.assessment-title { margin-right: var(--sp-2); }
+.assessment-badge { display: inline-block; padding: 1px var(--sp-2); border: 1px solid var(--c-line-strong); border-radius: var(--r-card); color: var(--c-text); font-size: var(--fs-12); font-weight: 700; vertical-align: middle; }
+.assessment-meta { font-size: var(--fs-12); }
+.assessment-note { color: var(--c-text-2); }
+.assessment [hidden] { display: none; }
+.assessments-enrollment { color: var(--c-text); }
+.assessments-gate:empty { display: none; }
 .trends, .pot-odds { margin-top: var(--sp-4); }
 .trend-title { margin: var(--sp-3) 0 var(--sp-1); font-size: var(--fs-13); color: var(--c-text-2); }
 .trend-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-1); }

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatQuestion, formatFeedback, formatFeedbackStep, formatSummary, formatStudyError, drillRequest, readStudyEntry, formatSource, formatSourceShort, spotDiagram, handCards, feedbackBars, runProgress, modeAvailability, STUDY_MODE_HELP, STUDY_MODES } from '../server/drill-public/study-format.js';
-import { LEGACY_REFERENCE_SOURCE as source } from '../shared/reference.js';
+import { formatQuestion, formatFeedback, formatFeedbackStep, formatSummary, formatStudyError, drillRequest, readStudyEntry, formatSource, formatSourceShort, spotDiagram, handCards, feedbackBars, runProgress, modeAvailability, STUDY_MODE_HELP, STUDY_MODES, formatWhen, enrollmentView, cardEnrollment, cardGate, nextEnrollmentBoundary, enrollmentBoundaryCrossed, boundaryDelay } from '../server/drill-public/study-format.js';
+import { LEGACY_REFERENCE_SOURCE as source, V3_REFERENCE_SOURCE } from '../shared/reference.js';
 import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
 import { startDrillServer } from '../tools/drill-server.js';
 import * as drillUi from '../server/drill-public/drill.js';
@@ -479,4 +479,190 @@ test('the study page keeps one honesty statement and its help entry', () => {
   for (const id of ['start', 'actions', 'next', 'feedback', 'run-progress', 'prompt', 'context', 'goal', 'assessments', 'status', 'reference-source', 'open-help', 'source-help']) {
     assert.match(html, new RegExp(`id="${id}"`), id);
   }
+});
+
+// ── issue 335: cards, enrollment display, gate wording, boundaries ────────────
+
+const V3 = { ...V3_REFERENCE_SOURCE };
+const T = (hours) => new Date(Date.parse('2026-10-10T00:00:00.000Z') + hours * 3_600_000).toISOString();
+const run = (id, startedAt, extra = {}) => ({ id, mode: 'assessment', total: 10, startedAt, complete: true, completedAt: startedAt, sourceIdentity: V3,
+  result: { allowed: 6, total: 10, allowedActionRate: 0.6, foldBaselineRate: 0.3 }, retest: { eligible: true, nextAvailableAt: startedAt }, ...extra });
+const retestRun = (id, assessmentId, startedAt) => run(id, startedAt, { mode: 'retest', assessmentId });
+const slotRows = (...entries) => entries.map(([runId, status], i) => ({ slot: i + 1, runId, status }));
+const active = (overrides = {}) => ({ status: 'active', postOpen: false, consentedAt: T(-100), postOpensAt: T(100), postClosesAt: T(300), baselineRuns: 2,
+  baselines: slotRows(['a1', 'complete'], ['a2', 'complete']), post: [],
+  retention: [{ slot: 1, assessmentId: 'a1', runId: null, status: 'NOT_STARTED', current: false },
+    { slot: 2, assessmentId: 'a2', runId: null, status: 'NOT_STARTED', current: false }], ...overrides });
+const cardSummary = (overrides = {}) => ({ source: V3, game: {}, practice: {}, bank: {}, goal: { origin: 'default' },
+  assessments: [run('a1', T(-50)), run('a2', T(-40)), run('a3', T(-30))], retests: [], trends: {}, ...overrides });
+
+test('cards: new-problem cards newest first, then retests newest first; an invalid start sorts last and ties keep the summary order', () => {
+  const cards = formatSummary(cardSummary({
+    assessments: [run('old', T(-50)), run('bad', 'not-a-time'), run('new', T(-10)), run('tieA', T(-30)), run('tieB', T(-30))],
+    retests: [retestRun('r-old', 'old', T(-20)), retestRun('r-new', 'new', T(-5))],
+  })).cards;
+  assert.deepEqual(cards.map((card) => card.key), ['new', 'tieA', 'tieB', 'old', 'bad', 'r-new', 'r-old']);
+  assert.deepEqual(cards.map((card) => card.kind), ['assessment', 'assessment', 'assessment', 'assessment', 'assessment', 'retest', 'retest']);
+});
+
+test('cards: the meta line names the start time and the table version, or says the source cannot be confirmed', () => {
+  const [a, c, b] = formatSummary(cardSummary({ assessments: [run('a', T(-10)), run('b', 'garbage'),
+    run('c', T(-20), { sourceIdentity: { id: 'x', version: '9', contentSha256: '0'.repeat(64) } })] })).cards;
+  assert.equal(a.meta, `${formatWhen(T(-10))} 시작 · 기준표 v${V3.version}`);
+  assert.equal(b.meta, `기준표 v${V3.version}`, 'no invented time');
+  assert.equal(c.meta, `${formatWhen(T(-20))} 시작 · 출처 확인 불가`);
+  assert.equal(formatWhen('garbage'), null);
+  assert.equal(formatWhen(undefined), null);
+  assert.equal(typeof formatWhen(T(0)), 'string');
+});
+
+test('cards: a retest names the time of the assessment it repeats, or says it is an earlier one', () => {
+  const cards = formatSummary(cardSummary({ assessments: [run('a1', T(-50))], retests: [retestRun('r1', 'a1', T(-20)), retestRun('r2', 'gone', T(-10))] })).cards;
+  assert.equal(cards.find((card) => card.key === 'r1').relation, `${formatWhen(T(-50))} 평가의 재평가`);
+  assert.equal(cards.find((card) => card.key === 'r2').relation, '이전 평가의 재평가');
+  assert.equal(cards.find((card) => card.key === 'a1').relation, null);
+  // The old arrays and their order are untouched.
+  const formatted = formatSummary(cardSummary({ assessments: [run('x', T(-50)), run('y', T(-10))] }));
+  assert.deepEqual(formatted.assessments.map((row) => row.id), ['x', 'y']);
+});
+
+test('enrollment cards: the first matching row of the table decides the badge and the note', () => {
+  const E = (overrides) => enrollmentView(active(overrides));
+  const open = formatWhen(T(100));
+  const close = formatWhen(T(300));
+  const card = (id, kind = 'assessment') => ({ id, kind });
+  // before the post window
+  assert.deepEqual(cardEnrollment(card('a1'), E()), { badge: '등록 기준 ①',
+    note: `학습 효과 평가의 기준 평가입니다. 지연 재평가는 사후 기간(${open} ~ ${close})에 하세요. 그 전에 재평가해 답한 문항은 지연 유지 측정에서 제외됩니다.` });
+  assert.equal(cardEnrollment(card('a2'), E()).badge, '등록 기준 ②');
+  // post window, baseline never completed in time
+  const late = E({ postOpen: true, baselines: slotRows(['a1', 'INCOMPLETE_RUN'], ['a2', 'complete']) });
+  assert.deepEqual(cardEnrollment(card('a1'), late), { badge: '등록 기준 ①',
+    note: '이 기준 평가는 사후 기간이 시작되기 전에 완료되지 않아 지연 유지 측정에 쓰이지 않습니다. 재평가는 연습으로만 기록됩니다.' });
+  // post window, complete baseline, slot still open
+  assert.deepEqual(cardEnrollment(card('a2'), late), { badge: '등록 기준 ②',
+    note: `이번 등록의 지연 재평가 슬롯은 사후 기간에 이 평가를 처음 재평가한 실행으로 정해집니다. 시작하면 ${close} 전에 끝까지 풀어 주세요.` });
+  // slot taken by the run that is open now
+  const taken = E({ postOpen: true, retention: [{ slot: 1, assessmentId: 'a1', runId: 'r1', status: 'UNANSWERED', current: true },
+    { slot: 2, assessmentId: 'a2', runId: 'r2', status: 'complete', current: false }] });
+  assert.deepEqual(cardEnrollment(card('a1'), taken), { badge: '등록 기준 ①', note: '이 기준의 지연 재평가가 진행 중입니다. 이어서 끝까지 풀어 주세요.' });
+  // slot taken by a run that is not open now
+  assert.deepEqual(cardEnrollment(card('a2'), taken), { badge: '등록 기준 ②',
+    note: '이 기준의 지연 재평가 슬롯은 이미 정해졌습니다(완료). 다시 재평가해도 이번 등록의 슬롯으로 선택되지 않습니다.' });
+  const odd = E({ postOpen: true, retention: [{ slot: 1, assessmentId: 'a1', runId: 'r1', status: 'INCONSISTENT_RUN', current: false },
+    { slot: 2, assessmentId: 'a2', runId: null, status: 'NOT_STARTED', current: false }] });
+  assert.match(cardEnrollment(card('a1'), odd).note, /\(확인 불가\)/);
+  // post slot, other assessment, the retest that took the slot
+  const withPost = E({ postOpen: true, post: slotRows(['p1', 'complete']), retention: taken.retention });
+  assert.deepEqual(cardEnrollment(card('p1'), withPost), { badge: '사후 평가 ①',
+    note: '학습 효과 평가의 사후 평가입니다. 이 평가의 재평가는 이번 등록의 지연 재평가 슬롯으로 선택되지 않습니다.' });
+  assert.deepEqual(cardEnrollment(card('zzz'), withPost), { badge: null,
+    note: '이번 등록의 기준 평가가 아닙니다. 재평가해도 지연 재평가 슬롯으로 선택되지 않습니다.' });
+  assert.deepEqual(cardEnrollment(card('r2', 'retest'), withPost), { badge: '등록 기준 ② 지연 재평가', note: '이번 등록의 지연 재평가 슬롯으로 선택된 실행입니다.' });
+  assert.deepEqual(cardEnrollment(card('other', 'retest'), withPost), { badge: null, note: null });
+});
+
+test('enrollment cards: the slot status wording never claims an end or a replacement', () => {
+  const taken = (status) => enrollmentView(active({ postOpen: true, retention: [{ slot: 1, assessmentId: 'a1', runId: 'r1', status, current: false },
+    { slot: 2, assessmentId: 'a2', runId: null, status: 'NOT_STARTED', current: false }] }));
+  const wording = Object.fromEntries(['complete', 'UNANSWERED', 'INCOMPLETE_RUN', 'BASELINE_INCOMPLETE', 'whatever'].map((status) => [status,
+    cardEnrollment({ id: 'a1', kind: 'assessment' }, taken(status)).note.match(/\((.+?)\)/)[1]]));
+  assert.deepEqual(wording, { complete: '완료', UNANSWERED: '아직 확인된 응답 없음', INCOMPLETE_RUN: '미완료', BASELINE_INCOMPLETE: '기준 평가 미완료', whatever: '확인 불가' });
+});
+
+test('enrollment display: absent, null and unavailable claim nothing or say so; active shows the window', () => {
+  const none = formatSummary(cardSummary());
+  assert.equal(none.enrollment, null); assert.equal(none.enrollmentLine, null);
+  assert.ok(none.cards.every((card) => card.badge === null && card.note === null), 'a missing key (an older service) adds nothing');
+  const nul = formatSummary(cardSummary({ enrollment: null }));
+  assert.equal(nul.enrollmentLine, null); assert.ok(nul.cards.every((card) => card.badge === null && card.note === null));
+  const unavailable = formatSummary(cardSummary({ enrollment: { status: 'unavailable', reasons: ['RUN_LOG_INCOMPLETE'] } }));
+  assert.equal(unavailable.enrollmentLine, '학습 효과 평가 등록 정보를 확인하지 못해 등록 기준 평가를 표시하지 않습니다.');
+  assert.ok(unavailable.cards.every((card) => card.badge === null && card.note === null));
+  // A shape the page cannot trust is treated as unavailable, never as active.
+  assert.equal(formatSummary(cardSummary({ enrollment: { status: 'active', postOpensAt: 'x' } })).enrollmentLine, unavailable.enrollmentLine);
+  assert.equal(formatSummary(cardSummary({ enrollment: 'active' })).enrollmentLine, unavailable.enrollmentLine);
+  const on = formatSummary(cardSummary({ enrollment: active() }));
+  assert.equal(on.enrollmentLine, `학습 효과 평가 진행 중 · 사후 기간 ${formatWhen(T(100))} ~ ${formatWhen(T(300))} · 기준 평가마다 지연 재평가 1회`);
+  assert.deepEqual(on.cards.map((card) => [card.key, card.badge]), [['a3', null], ['a2', '등록 기준 ②'], ['a1', '등록 기준 ①']]);
+});
+
+test('retest mode help adds one enrollment sentence, only when the summary carries an active enrollment', () => {
+  const plain = modeAvailability('retest', formatSummary(cardSummary({ enrollment: undefined })));
+  const before = modeAvailability('retest', formatSummary(cardSummary({ enrollment: active() })));
+  assert.equal(before, `${plain} 학습 효과 평가 진행 중: 등록 기준 평가의 지연 재평가는 사후 기간(${formatWhen(T(100))}부터)에 합니다.`);
+  const during = modeAvailability('retest', formatSummary(cardSummary({ enrollment: active({ postOpen: true }) })));
+  assert.equal(during, `${plain} 학습 효과 평가의 지연 재평가는 아래 '등록 기준' 카드에서 시작하세요. 연습 시작은 가장 최근 평가를 재평가합니다.`);
+  assert.equal(modeAvailability('retest', formatSummary(cardSummary({ enrollment: { status: 'unavailable', reasons: [] } }))), plain);
+  assert.equal(modeAvailability('retest', formatSummary(cardSummary({ enrollment: null }))), plain);
+  assert.equal(modeAvailability('free', formatSummary(cardSummary({ enrollment: active() }))), '');
+  assert.equal(modeAvailability('retest', { assessments: [], retests: [] }).includes('학습 효과'), false);
+});
+
+test('the card gate is the next-step gate with the card wording for an unfinished run', () => {
+  const idle = { session: null, pending: null, busy: false, recovery: false, awaitNext: false, replacementOnly: false };
+  assert.equal(cardGate(idle), null);
+  assert.equal(cardGate({ ...idle, session: { sessionId: 's', done: false } }).text, '진행 중인 연습이 있습니다. 끝낸 뒤 재평가할 수 있습니다.');
+  assert.equal(cardGate({ ...idle, session: { sessionId: 's', done: false } }).code, 'UNFINISHED');
+  assert.equal(cardGate({ ...idle, busy: true }).code, 'BUSY');
+  assert.equal(cardGate({ ...idle, recovery: true }).code, 'RECOVERY');
+  assert.equal(cardGate({ ...idle, replacementOnly: true }).code, 'REPLACEMENT_ONLY');
+  assert.equal(cardGate(idle, { authenticated: false }).code, 'UNAUTHORIZED');
+  assert.equal(cardGate(null).code, 'LOADING');
+});
+
+test('enrollment boundaries: the next one after now, crossing since receipt, and a capped timer delay', () => {
+  const e = active();
+  const ms = (hours) => Date.parse(T(hours));
+  assert.equal(nextEnrollmentBoundary(e, ms(0)), ms(100));
+  assert.equal(nextEnrollmentBoundary(e, ms(100)), ms(300), 'a boundary at now is already past');
+  assert.equal(nextEnrollmentBoundary(e, ms(300)), null);
+  assert.equal(nextEnrollmentBoundary({ status: 'unavailable' }, ms(0)), null);
+  assert.equal(nextEnrollmentBoundary(undefined, ms(0)), null);
+  assert.equal(enrollmentBoundaryCrossed(e, ms(0), ms(99)), false);
+  assert.equal(enrollmentBoundaryCrossed(e, ms(0), ms(100)), true);
+  assert.equal(enrollmentBoundaryCrossed(e, ms(100), ms(200)), false, 'a boundary at receipt was already known');
+  assert.equal(enrollmentBoundaryCrossed(e, ms(200), ms(301)), true);
+  assert.equal(enrollmentBoundaryCrossed(null, ms(0), ms(999)), false);
+  assert.equal(boundaryDelay(ms(1), ms(0)), 3_600_000);
+  assert.equal(boundaryDelay(ms(0), ms(5)), 0);
+  assert.equal(boundaryDelay(ms(100_000), ms(0)), 2 ** 31 - 1, 'beyond the timer limit it re-arms in pieces');
+});
+
+test('enrollment cards: a finished retest that is still the current session is "already decided", not "in progress"', () => {
+  const taken = (status, current = true) => enrollmentView(active({ postOpen: true, retention: [{ slot: 1, assessmentId: 'a1', runId: 'r1', status, current },
+    { slot: 2, assessmentId: 'a2', runId: null, status: 'NOT_STARTED', current: false }] }));
+  const note = (status, current) => cardEnrollment({ id: 'a1', kind: 'assessment' }, taken(status, current)).note;
+  assert.match(note('complete', true), /이미 정해졌습니다\(완료\)/);
+  assert.doesNotMatch(note('complete', true), /진행 중/);
+  assert.match(note('UNANSWERED', true), /진행 중입니다/);
+  assert.match(note('INCOMPLETE_RUN', true), /진행 중입니다/);
+  assert.match(note('INCOMPLETE_RUN', false), /이미 정해졌습니다\(미완료\)/);
+});
+
+test('enrollmentView accepts a well-formed active view and refuses each malformed one as unavailable', () => {
+  const good = active();
+  assert.equal(enrollmentView(good).status, 'active');
+  assert.equal(enrollmentView(enrollmentView(good)).status, 'active', 'the checked view is itself valid input');
+  const bad = {
+    'postOpen not boolean': { postOpen: 'yes' },
+    'postOpen missing': { postOpen: undefined },
+    'baselineRuns 0': { baselineRuns: 0 },
+    'baselineRuns 6': { baselineRuns: 6 },
+    'baselineRuns fraction': { baselineRuns: 1.5 },
+    'baselineRuns missing': { baselineRuns: undefined },
+    'retention shorter than baselineRuns': { retention: good.retention.slice(0, 1) },
+    'retention longer than baselineRuns': { retention: [...good.retention, { slot: 3, assessmentId: null, runId: null, status: 'NO_BASELINE', current: false }] },
+    'baselines longer than baselineRuns': { baselines: slotRows(['a1', 'complete'], ['a2', 'complete'], ['a3', 'complete']) },
+    'post longer than baselineRuns': { post: slotRows(['p1', 'complete'], ['p2', 'complete'], ['p3', 'complete']) },
+    'duplicate baseline slot': { baselines: [{ slot: 1, runId: 'a1', status: 'complete' }, { slot: 1, runId: 'a2', status: 'complete' }] },
+    'gap in post slots': { post: [{ slot: 2, runId: 'p2', status: 'complete' }] },
+    'retention slots out of order': { retention: [{ ...good.retention[1] }, { ...good.retention[0] }] },
+    'opens at closes': { postClosesAt: good.postOpensAt },
+    'opens after closes': { postOpensAt: good.postClosesAt, postClosesAt: good.postOpensAt },
+    'consentedAt not ISO': { consentedAt: 'yesterday' },
+    'consentedAt missing': { consentedAt: undefined },
+    'current not boolean': { retention: good.retention.map((row) => ({ ...row, current: 1 })) },
+  };
+  for (const [name, change] of Object.entries(bad)) assert.deepEqual(enrollmentView({ ...good, ...change }), { status: 'unavailable' }, name);
 });
