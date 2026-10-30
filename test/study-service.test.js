@@ -1,4 +1,4 @@
-import {CANONICAL_REFERENCE_SOURCE} from '../shared/reference.js';
+import {CANONICAL_REFERENCE_SOURCE, V3_REFERENCE_SOURCE} from '../shared/reference.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { isPrivatePath } from '../shared/platform-files.js';
@@ -25,6 +25,7 @@ import { skipOnWin32 } from './helpers/platform.js';
 import { acquireOwnedLock, releaseOwnedLock, ownedProcessStartTime as processStartTime } from '../engine/state.js';
 import { startDrill, nextQuestion, answerQuestion } from '../tools/drill-cli.js';
 import { createProfileStore } from '../tools/training-stores.js';
+import { enroll } from '../tools/learning-eval.js';
 import {
   descriptorPath,
   lockPath,
@@ -156,7 +157,30 @@ test('REQ-002: summary is origin-explicit and practice cannot alter game evidenc
   for (const forbidden of ['processed', 'mixGroups', 'events', 'mastery', 'evLossBb', storeDir]) {
     assert.equal(JSON.stringify(summary).includes(forbidden), false, forbidden);
   }
-  assert.deepEqual(Object.keys(summary).sort(), ['schemaVersion','source','game','practice','bank','goal','assessments','retests','trends'].sort());
+  assert.deepEqual(Object.keys(summary).sort(), ['schemaVersion','source','game','practice','bank','goal','assessments','retests','trends','enrollment'].sort());
+  assert.equal(summary.enrollment, null, 'no open enrollment');
+});
+
+test('issue 335: the summary carries the open enrollment slots, and a failing enrollment view does not fail the summary', async (t) => {
+  const { storeDir, port, token } = await standalone(t);
+  await enroll(storeDir, { consent: true, plan: { baselineRuns: 2 } });
+  const run = await startDrill(storeDir, { mode: 'assessment', idempotencyKey: 'enrolled-baseline', source: V3_REFERENCE_SOURCE });
+  const response = await request(port, token, '/api/summary');
+  assert.equal(response.status, 200);
+  const view = response.body.summary.enrollment;
+  assert.equal(view.status, 'active');
+  assert.equal(view.postOpen, false);
+  assert.equal(view.baselines[0].runId, run.studyRun.id);
+  assert.equal(view.baselines[0].slot, 1);
+  assert.equal(view.baselines.length, 1);
+  assert.equal(view.retention.length, 2);
+  assert.equal(JSON.stringify(view).includes(storeDir), false);
+
+  fs.writeFileSync(path.join(storeDir, '.training', 'learning-evaluation.json'), '{ broken');
+  const broken = await request(port, token, '/api/summary');
+  assert.equal(broken.status, 200, 'the enrollment view is isolated');
+  assert.deepEqual(broken.body.summary.enrollment, { status: 'unavailable', reasons: ['ENROLLMENT_INVALID'] });
+  assert.deepEqual(broken.body.summary.assessments, []);
 });
 
 test('REQ-011: assessment summary omits question records and reports retest wait', async (t) => {

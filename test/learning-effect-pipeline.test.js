@@ -9,7 +9,8 @@ import { createProfileStore } from '../tools/training-stores.js';
 import { loadReferenceDataset } from '../tools/preflop-dataset.js';
 import { lookup } from '../training/providers/preflop-json.js';
 import { V2_REFERENCE_SOURCE, V3_REFERENCE_SOURCE } from '../shared/reference.js';
-import { LEARNING_EFFECT_PROTOCOL_V1, PROTOCOL_SHA256, evaluateLearningEffect, sealPlan } from '../training/learning-effect.js';
+import { LEARNING_EFFECT_PROTOCOL_V1, PROTOCOL_SHA256, enrollmentReasons, evaluateLearningEffect, measurementSlots, sealPlan } from '../training/learning-effect.js';
+import { validateLearningEvents } from '../training/study-history.js';
 
 const source = { ...V3_REFERENCE_SOURCE };
 const dataset = loadReferenceDataset(source);
@@ -478,4 +479,130 @@ test('an index outside the plan is not a duplicate; both diagnostics stay apart 
   assert.equal(report.items.post.excluded.INCOMPLETE_RUN, 4);
   assert.equal(report.items.post.excluded.UNANSWERED, 6);
   assert.equal(report.items.post.clean + Object.values(report.items.post.excluded).reduce((sum, n) => sum + n, 0), 20);
+});
+
+// ── measurementSlots / enrollmentReasons: 학습 화면의 등록 뷰가 평가기와 같은 규칙을 쓴다(독립적으로 정한 runId·순서 단언) ──
+
+function slotsOfScenario(overrides = {}, { now = at(8 * DAY + 12 * H) } = {}) {
+  const { parts, input } = scenario(overrides);
+  const slots = measurementSlots({ valid: validateLearningEvents(input.events), runLog: input.runLog, enrollment: input.enrollment, now,
+    currentRunId: input.currentRunId });
+  return { parts, input, slots };
+}
+const idsOf = (selection) => selection.selected.map((entry) => entry.runId);
+const startRow = (runId, startMs, extra = {}) => ({ type: 'start', startId: randomUUID(), runId, mode: 'assessment', total: 10, startedAt: at(startMs), sourceIdentity: source, ...extra });
+
+test('measurementSlots: the default schedule selects the placed runs in start order, one retest per baseline', () => {
+  const { parts, slots } = slotsOfScenario({}, { now: at(15 * DAY) });
+  assert.deepEqual(idsOf(slots.baseline), parts.baseline.map((run) => run.runId));
+  assert.deepEqual(idsOf(slots.post), parts.post.map((run) => run.runId));
+  assert.deepEqual(slots.retention.map((entry) => [entry.assessmentId, entry.runId, entry.status]),
+    parts.baseline.map((run, i) => [run.runId, parts.retests[i].runId, 'complete']));
+  assert.equal(slots.final, true);
+  assert.equal(slots.k, 2);
+});
+
+test('measurementSlots: runs started at the same instant keep ledger order; an empty-queue start and another source never take a slot', () => {
+  const [b1, b2] = pool.runs;
+  const first = placeRun(b1, { startMs: 1 * H });
+  const second = placeRun(b2, { startMs: 1 * H });
+  const empty = { ...startRow(null, 30 * M), total: 0 };
+  const foreign = startRow(randomUUID(), 20 * M, { sourceIdentity: { ...V2_REFERENCE_SOURCE } });
+  const { slots } = slotsOfScenario({ baseline: [first, second], extraRows: [empty, foreign] });
+  assert.deepEqual(idsOf(slots.baseline), [first.runId, second.runId]);
+  assert.equal(slots.baseline.denominators.emptyQueueStarts, 1);
+  assert.equal(slots.baseline.denominators.sourceMismatch, 1);
+});
+
+test('measurementSlots: an unanswered start counts only when it is the current run or a later row replaced it', () => {
+  const ghost = randomUUID();
+  const ghostRows = [startRow(ghost, 7 * DAY + H)];
+  const plain = slotsOfScenario({ extraRows: ghostRows });
+  assert.deepEqual(idsOf(plain.slots.post), plain.parts.post.map((run) => run.runId), 'unconfirmed start takes no slot');
+  assert.equal(plain.slots.post.denominators.unconfirmedStarts, 1);
+
+  const current = slotsOfScenario({ extraRows: ghostRows, currentRunId: ghost });
+  assert.deepEqual(idsOf(current.slots.post), [ghost, current.parts.post[0].runId]);
+  assert.equal(current.slots.post.selected[0].status, 'UNANSWERED');
+
+  const replaced = slotsOfScenario({ extraRows: [...ghostRows,
+    { type: 'replace', startId: randomUUID(), at: at(7 * DAY + 2 * H), mode: 'free', replacedRunId: ghost }] });
+  assert.deepEqual(idsOf(replaced.slots.post), [ghost, replaced.parts.post[0].runId]);
+  assert.equal(replaced.slots.post.selected[0].status, 'UNANSWERED');
+});
+
+test('measurementSlots: the post window opens at its first millisecond and closes exclusively', () => {
+  const [b1, , p1] = pool.runs;
+  const lastBaseline = randomUUID();
+  const firstPost = randomUUID();
+  const lastPost = randomUUID();
+  const atClose = randomUUID();
+  const { slots } = slotsOfScenario({
+    baseline: [placeRun(b1, { startMs: 1 * H })],
+    post: [placeRun(p1, { startMs: 8 * DAY })],
+    retests: [],
+    extraRows: [startRow(lastBaseline, 7 * DAY - 1), startRow(firstPost, 7 * DAY), startRow(lastPost, 14 * DAY - 1), startRow(atClose, 14 * DAY)],
+    currentRunId: null,
+  }, { now: at(15 * DAY) });
+  // 확인되지 않은 시작은 슬롯이 아니다 — 경계 행을 확인하려고 교체 행을 붙여 다시 계산한다.
+  const confirmedRows = [lastBaseline, firstPost, lastPost, atClose].map((runId) => ({ type: 'replace', startId: randomUUID(), at: at(14 * DAY + H), mode: 'free', replacedRunId: runId }));
+  const again = slotsOfScenario({
+    baseline: [placeRun(b1, { startMs: 1 * H })],
+    post: [placeRun(p1, { startMs: 8 * DAY })],
+    retests: [],
+    extraRows: [startRow(lastBaseline, 7 * DAY - 1), startRow(firstPost, 7 * DAY), startRow(lastPost, 14 * DAY - 1), startRow(atClose, 14 * DAY), ...confirmedRows],
+  }, { now: at(15 * DAY) });
+  assert.equal(slots.baseline.denominators.unconfirmedStarts, 1);
+  assert.equal(again.slots.baseline.selected[1].runId, lastBaseline, '1 ms before the post window belongs to the baseline window');
+  assert.deepEqual(idsOf(again.slots.post), [firstPost, again.parts.post[0].runId], 'the first post start is at exactly the opening');
+  assert.equal(again.slots.post.denominators.extra, 1, 'the start 1 ms before close is a third post run, the start at close is not in the window');
+  assert.equal(again.slots.post.denominators.started, 3);
+  assert.ok(!idsOf(again.slots.post).includes(atClose));
+  assert.ok(!idsOf(again.slots.baseline).includes(firstPost));
+});
+
+test('measurementSlots: a baseline completed after the post window opened keeps its slot but anchors no retention', () => {
+  const [b1, b2] = pool.runs;
+  const late = placeRun(b2, { startMs: 7 * DAY - 5 * M });
+  const early = placeRun(b1, { startMs: 1 * H });
+  const retests = [
+    placeRun(b1, { mode: 'retest', startMs: 9 * DAY, assessmentId: early.runId }),
+    placeRun(b2, { mode: 'retest', startMs: 9 * DAY + H, assessmentId: late.runId }),
+  ];
+  const { slots } = slotsOfScenario({ baseline: [early, late], retests }, { now: at(10 * DAY) });
+  assert.deepEqual(idsOf(slots.baseline), [early.runId, late.runId]);
+  assert.equal(slots.baseline.selected[0].status, 'complete');
+  assert.notEqual(slots.baseline.selected[1].status, 'complete');
+  assert.deepEqual(slots.retention.map((entry) => [entry.assessmentId, entry.runId, entry.status]), [
+    [early.runId, retests[0].runId, 'complete'], [late.runId, retests[1].runId, 'BASELINE_INCOMPLETE'],
+  ]);
+});
+
+test('measurementSlots: only the first retest of a baseline in the post window is its slot; an intervention retest is not', () => {
+  const [b1, b2] = pool.runs;
+  const baseline = [placeRun(b1, { startMs: 1 * H }), placeRun(b2, { startMs: 2 * H })];
+  const early = placeRun(b1, { mode: 'retest', startMs: 3 * DAY, assessmentId: baseline[0].runId });
+  const first = placeRun(b1, { mode: 'retest', startMs: 8 * DAY, assessmentId: baseline[0].runId });
+  const second = placeRun(b1, { mode: 'retest', startMs: 9 * DAY, assessmentId: baseline[0].runId });
+  const { slots } = slotsOfScenario({ baseline, retests: [early, first, second] }, { now: at(10 * DAY) });
+  assert.deepEqual(slots.retention.map((entry) => [entry.assessmentId, entry.runId, entry.status]), [
+    [baseline[0].runId, first.runId, 'complete'], [baseline[1].runId, null, 'NOT_STARTED'],
+  ]);
+  assert.equal(slots.retestWindow.denominators.started, 2);
+});
+
+test('measurementSlots: an empty ledger gives K empty retention slots and no selected runs', () => {
+  const { slots } = slotsOfScenario({ baseline: [], post: [], retests: [] });
+  assert.deepEqual([idsOf(slots.baseline), idsOf(slots.post)], [[], []]);
+  assert.deepEqual(slots.retention.map((entry) => entry.status), ['NO_BASELINE', 'NO_BASELINE']);
+});
+
+test('enrollmentReasons: the sealed-plan, source and ledger checks keep their order', () => {
+  const { input } = scenario();
+  const ok = { enrollment: input.enrollment, runLog: input.runLog, sourceAvailable: true };
+  assert.deepEqual(enrollmentReasons(ok), []);
+  assert.deepEqual(enrollmentReasons({ ...ok, sourceAvailable: false, runLog: { status: 'absent' } }), ['SOURCE_UNAVAILABLE', 'RUN_LOG_INCOMPLETE']);
+  assert.deepEqual(enrollmentReasons({ ...ok, enrollment: { ...input.enrollment, protocolSha256: 'x', planSha256: 'y' }, sourceAvailable: false, runLog: null }),
+    ['PROTOCOL_MISMATCH', 'PLAN_SEAL_MISMATCH', 'SOURCE_UNAVAILABLE', 'RUN_LOG_INCOMPLETE']);
+  assert.deepEqual(enrollmentReasons({ ...ok, enrollment: { ...input.enrollment, plan: { baselineRuns: 99 } } }), ['PLAN_INVALID']);
 });
