@@ -304,10 +304,15 @@ test('cli step envelope views·legal·stateVersion·toProcessReview', () => {
   assert.equal(init.status, 0, init.stderr);
   const statePath = path.join(dir, 'state.json');
   const seeded = JSON.parse(fs.readFileSync(statePath, 'utf8'));
-  // init shuffles multiplayer seats; pin the host-first ring this scripted hand assumes.
+  // init shuffles multiplayer seats; pin the host-first ring this scripted hand assumes,
+  // and keep players.json's seat indexes in step with it.
   seeded.seats = ['user', 'h1', 'p1'].map((id) => seeded.seats.find((seat) => seat.playerId === id));
   seeded.button = seeded.seats.length - 1;
   fs.writeFileSync(statePath, JSON.stringify(seeded));
+  const playersPath = path.join(dir, 'players.json');
+  const roster = JSON.parse(fs.readFileSync(playersPath, 'utf8'));
+  for (const row of roster) row.seat = seeded.seats.findIndex((seat) => seat.playerId === row.playerId);
+  fs.writeFileSync(playersPath, JSON.stringify(roster));
   const started = cli(dir, ['step', '--new-hand', '--deck', dealDeck([['7h', '2c'], ['3c', '3d'], ['As', 'Ah']]).join(',')]);
   assert.equal(started.status, 0, started.stderr);
   const env = started.json;
@@ -399,16 +404,19 @@ test('참가자가 있는 게임의 좌석 순서는 무작위 순열이고 solo
   assert.equal(Object.keys(st.stats).length, defaults.length);
   assert.ok(Number.isInteger(st.button) && st.button >= 0 && st.button < st.seats.length);
 
-  const seen = Array.from({ length: 3 }, () => new Map());
+  // All six orders of a three-seat table must appear, which a rotation of the fixed ring
+  // (three orders) cannot fake. A uniform shuffle misses one in 600 games with
+  // probability below 6 * (5/6)^600, about 1e-47.
+  const orders = new Set();
   for (let i = 0; i < 600; i += 1) {
     const trial = createGame({ aiCount: 1, participants: people(1), hostName: '호스트' });
     const ids = trial.seats.map((s) => s.playerId);
     assert.deepEqual([...ids].sort(), ['h1', 'p1', 'user']);
-    ids.forEach((id, index) => seen[index].set(id, true));
+    orders.add(ids.join(','));
   }
-  for (const atSeat of seen) {
-    assert.deepEqual([...atSeat.keys()].sort(), ['h1', 'p1', 'user']);
-  }
+  assert.deepEqual([...orders].sort(), [
+    'h1,p1,user', 'h1,user,p1', 'p1,h1,user', 'p1,user,h1', 'user,h1,p1', 'user,p1,h1',
+  ]);
 
   for (let i = 0; i < 20; i += 1) {
     const solo = createGame({ aiCount: 3 });
@@ -435,6 +443,8 @@ test('seatOrder는 좌석 순서를 그대로 쓰고 정확한 순열이 아니�
     ['user', 'h1', 'h2', 'p1', 'p2', 'p3'],
     ['user', 'h1', 'h2', 'p1', 'p1'],
     ['user', 'h1', 'h2', 'p1', 'p9'],
+    // A hole: the right length and five distinct values (undefined among them).
+    ['user', 'h1', , 'p1', 'p2'],
     'user,h1,h2,p1,p2',
     null,
     {},

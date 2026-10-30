@@ -15,15 +15,16 @@ import {createRoomManager} from '../tools/room-manager.js';
 import {createOwnedTempDir,registerOwnedServer} from './helpers/owned-fixtures.mjs';
 
 const TOKEN='spectator-relay-token';
-function game() {
-  const state=createGame({aiCount:1,participants:[{playerId:'h1',name:'Guest',participantId:'guest'}],hostName:'Host',names:['AI'],seatOrder:['user','h1','p1']});
+// Multiplayer seats are shuffled by default; tests pin the host-first ring unless they ask for another.
+function game(seatOrder=['user','h1','p1']) {
+  const state=createGame({aiCount:1,participants:[{playerId:'h1',name:'Guest',participantId:'guest'}],hostName:'Host',names:['AI'],seatOrder});
   state.sessionToken=TOKEN;state.button=2;
   return startHand(state,{deck:newDeck()}).state;
 }
 
-async function fixture(t,{fault}={}) {
+async function fixture(t,{fault,seatOrder}={}) {
   const dir=createOwnedTempDir('spectator-relay');
-  const state=game();saveState(dir,state);
+  const state=game(seatOrder);saveState(dir,state);
   writeJsonAtomic(path.join(dir,'players.json'),state.seats.map((s,i)=>({...s,seat:i,...(s.playerId==='h1'?{participantId:'guest'}:{})})));
   const relay=await startServer({gameDir:dir,port:0,token:TOKEN,publishCheckpoint:stage=>fault?.(stage)});
   registerOwnedServer(relay.server,'spectator-relay');t.after(()=>relay.close());
@@ -95,8 +96,8 @@ test('only settled tournament elimination changes viewer role; game over wins',(
   assert.equal(viewerRole(viewFor(state,'user'),SPECTATOR_ID),'finished');
 });
 
-test('full cards only reach observer snapshot/SSE and do not persist in host history',async t=>{
-  const f=await fixture(t);assert.equal((await f.publish()).status,200);
+async function assertFullCardsOnlyReachObserver(t,f) {
+  assert.equal((await f.publish()).status,200);
   const observer=await f.request('snapshot',{seat:SPECTATOR_ID});
   assert.equal(observer.status,200);assert.deepEqual(observer.body.view.holeCardsByPlayerId,f.state.hand.holes);
   for(const seat of ['user','h1']) {
@@ -115,7 +116,18 @@ test('full cards only reach observer snapshot/SSE and do not persist in host his
   assert.ok(raw.projectionAnchor);
   for(const card of f.state.hand.holes.h1)assert.equal(JSON.stringify(raw).includes(JSON.stringify(card)),false);
   assert.equal(JSON.stringify(raw).includes('holeCardsByPlayerId'),false);
+}
+
+test('full cards only reach observer snapshot/SSE and do not persist in host history',async t=>{
+  await assertFullCardsOnlyReachObserver(t,await fixture(t));
 });
+
+// Random seating can put the host last or an AI between the humans.
+for(const seatOrder of [['p1','user','h1'],['h1','p1','user']]) {
+  test(`full cards only reach the observer when the host is not seated first (${seatOrder.join(',')})`,async t=>{
+    await assertFullCardsOnlyReachObserver(t,await fixture(t,{seatOrder}));
+  });
+}
 
 test('exact durable anchor restores spectators; ahead engine and legacy snapshots fail closed',async t=>{
   const f=await fixture(t);await f.publish();

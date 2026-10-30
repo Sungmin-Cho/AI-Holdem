@@ -157,7 +157,8 @@ export function createGame({
     const exact = Array.isArray(seatOrder)
       && seatOrder.length === seats.length
       && new Set(seatOrder).size === seats.length
-      && seatOrder.every((id) => byId.has(id));
+      // Array.from visits the holes of a sparse array, which every() skips.
+      && Array.from(seatOrder).every((id) => byId.has(id));
     if (!exact) {
       throwBadConfig('seatOrder는 모든 좌석 playerId를 정확히 한 번씩 담은 배열이어야 합니다.');
     }
