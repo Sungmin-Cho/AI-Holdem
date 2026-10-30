@@ -395,13 +395,13 @@ export async function runCoachingStudyJourney(outDir) {
     // Only long delays (the boundary timer) are dropped; the API's 8 s abort timer keeps working.
     const dropLongTimers = () => evaluate('(() => { const real = window.setTimeout; window.setTimeout = (fn, ms, ...rest) => (ms > 9000 ? 0 : real(fn, ms, ...rest)); return true; })()');
     const MARGINS = [12_000, 20_000, 32_000];
-    const retrying = async (label, attempt) => {
-      for (const margin of MARGINS) {
+    const retrying = async (label, attempt, margins = MARGINS) => {
+      for (const margin of margins) {
         const result = await attempt(margin);
         if (result !== 'RETRY') return result;
         console.log(`journey: ${label} precondition missed with a ${margin} ms margin; retrying wider`);
       }
-      throw new Error(`${label}: precondition not met after ${MARGINS.length} attempts`);
+      throw new Error(`${label}: precondition not met after ${margins.length} attempts`);
     };
 
     // 14. A boundary passes after the summary was received (long timers dropped so only the click can notice):
@@ -446,21 +446,22 @@ export async function runCoachingStudyJourney(outDir) {
     check('enrollment-boundary-timer-refresh', cards.cards[0].badge === '등록 기준 ②' && fixture.starts.length === 0, { note: cards.cards[0].note.slice(0, 40) });
 
     // 16. The boundary passes while the summary request is in flight: the old answer is shown, then the page asks
-    //     again by itself (no click) and the post-window notes appear. Nothing starts.
+    //     again by itself (no click) and the post-window notes appear. Nothing starts. The page aborts a request after
+    //     8 s (a failed summary drops the guidance), so the hold — request arrival to boundary + 300 ms — stays under it.
     cards = await retrying('in-flight', async (margin) => {
       await readyPage();
-      const opens = Date.now() + Math.min(margin, 12_000);
+      const opens = Date.now() + margin;
       fixture.summary = preSummary(opens);
       fixture.holdSummary();
       const requests = fixture.summaryRequests;
       await click('#recover');
       await waitFor(() => fixture.summaryRequests, (value) => value > requests, 'held summary request reached the server');
       if (Date.now() > opens - 1500) { fixture.releaseSummary(); return 'RETRY'; }
-      await waitFor(() => Date.now(), (value) => value > opens + 300, 'boundary passed while held', 20_000);
+      await waitFor(() => Date.now(), (value) => value > opens + 300, 'boundary passed while held', 10_000);
       fixture.summary = postSummary(opens);
       fixture.releaseSummary();
       return waitCards((value) => /처음 재평가한 실행/.test(value.cards[0].note), 'refetch without a click after the stale answer', 20_000);
-    });
+    }, [3_000, 4_500, 6_000]);
     check('enrollment-boundary-during-request-refetch', cards.cards[0].badge === '등록 기준 ②' && fixture.starts.length === 0 && fixture.summaryRequests >= 2,
       { requests: fixture.summaryRequests });
 
