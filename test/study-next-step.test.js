@@ -762,12 +762,12 @@ test('enrollment: in the post window an open measuring slot comes before today\'
 });
 
 test('enrollment: completion guidance and the plan read the same enrollment only for an enrolled baseline before the window', () => {
-  const summary = base({ assessments: [assessment('run-1', { retest: { eligible: false, nextAvailableAt: iso(23) } })], enrollment: enrolled({ baselines: slotRows(['run-1', 'complete']), retention: [] }) });
+  const summary = base({ assessments: [assessment('run-1', { retest: { eligible: false, nextAvailableAt: iso(23) } })], enrollment: enrolled({ baselines: slotRows(['run-1', 'complete']) }) });
   const done = completionGuidance(idle({ session: finishedSession('assessment') }), summary);
   assert.equal(done.retest, `지연 재평가: 이 평가는 학습 효과 평가의 등록 기준입니다. 지연 재평가는 사후 기간(${formatWhen(iso(100))} ~ ${formatWhen(iso(300))})에 하세요.`);
-  const during = completionGuidance(idle({ session: finishedSession('assessment') }), { ...summary, enrollment: enrolled({ postOpen: true, baselines: slotRows(['run-1', 'complete']), retention: [] }) });
+  const during = completionGuidance(idle({ session: finishedSession('assessment') }), { ...summary, enrollment: enrolled({ postOpen: true, baselines: slotRows(['run-1', 'complete']) }) });
   assert.match(during.retest, /24시간 뒤부터/);
-  const notBaseline = completionGuidance(idle({ session: finishedSession('assessment') }), { ...summary, enrollment: enrolled({ baselines: slotRows(['other', 'complete']), retention: [] }) });
+  const notBaseline = completionGuidance(idle({ session: finishedSession('assessment') }), { ...summary, enrollment: enrolled({ baselines: slotRows(['other', 'complete']) }) });
   assert.match(notBaseline.retest, /24시간 뒤부터/);
   const noKey = completionGuidance(idle({ session: finishedSession('assessment') }), { ...summary, enrollment: undefined });
   assert.match(noKey.retest, /24시간 뒤부터/);

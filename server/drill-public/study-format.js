@@ -269,12 +269,20 @@ const slotStatusText = (status) => SLOT_STATUS[status] ?? '확인 불가';
  * (an older service) claims nothing. */
 export function enrollmentView(raw) {
   if (raw === undefined || raw === null) return null;
-  if (!plain(raw) || raw.status !== 'active') return { status: 'unavailable' };
-  const slots = (rows, keys) => Array.isArray(rows) && rows.every((row) => plain(row) && Number.isSafeInteger(row.slot) && row.slot > 0
+  const unavailable = { status: 'unavailable' };
+  if (!plain(raw) || raw.status !== 'active') return unavailable;
+  const n = raw.baselineRuns;
+  // Slots are 1..length with no gap or repeat; ids are a string or null.
+  const slots = (rows, keys, max) => Array.isArray(rows) && rows.length <= max && rows.every((row, index) => plain(row) && row.slot === index + 1
     && keys.every((key) => row[key] === null || typeof row[key] === 'string') && typeof row.status === 'string');
-  if (isoTime(raw.postOpensAt) === null || isoTime(raw.postClosesAt) === null || !slots(raw.baselines, ['runId']) || !slots(raw.post, ['runId'])
-    || !slots(raw.retention, ['runId', 'assessmentId']) || raw.retention.some((row) => typeof row.current !== 'boolean')) return { status: 'unavailable' };
-  return { status: 'active', postOpen: raw.postOpen === true, postOpensAt: raw.postOpensAt, postClosesAt: raw.postClosesAt,
+  const opens = isoTime(raw.postOpensAt);
+  const closes = isoTime(raw.postClosesAt);
+  if (typeof raw.postOpen !== 'boolean' || !Number.isSafeInteger(n) || n < 1 || n > 5 || isoTime(raw.consentedAt) === null
+    || opens === null || closes === null || opens >= closes
+    || !slots(raw.baselines, ['runId'], n) || !slots(raw.post, ['runId'], n)
+    || !slots(raw.retention, ['runId', 'assessmentId'], n) || raw.retention.length !== n
+    || raw.retention.some((row) => typeof row.current !== 'boolean')) return unavailable;
+  return { status: 'active', postOpen: raw.postOpen, baselineRuns: n, consentedAt: raw.consentedAt, postOpensAt: raw.postOpensAt, postClosesAt: raw.postClosesAt,
     baselines: raw.baselines.map((row) => ({ slot: row.slot, runId: row.runId, status: row.status })),
     post: raw.post.map((row) => ({ slot: row.slot, runId: row.runId, status: row.status })),
     retention: raw.retention.map((row) => ({ slot: row.slot, assessmentId: row.assessmentId, runId: row.runId, status: row.status, current: row.current })) };
@@ -309,7 +317,7 @@ export function cardEnrollment(card, enrollment) {
     if (kept?.status === 'NOT_STARTED') {
       return { badge, note: `이번 등록의 지연 재평가 슬롯은 사후 기간에 이 평가를 처음 재평가한 실행으로 정해집니다. 시작하면 ${close} 전에 끝까지 풀어 주세요.` };
     }
-    if (kept?.current === true) return { badge, note: '이 기준의 지연 재평가가 진행 중입니다. 이어서 끝까지 풀어 주세요.' };
+    if (kept?.current === true && kept.status !== 'complete') return { badge, note: '이 기준의 지연 재평가가 진행 중입니다. 이어서 끝까지 풀어 주세요.' };
     return { badge, note: `이 기준의 지연 재평가 슬롯은 이미 정해졌습니다(${slotStatusText(kept?.status)}). 다시 재평가해도 이번 등록의 슬롯으로 선택되지 않습니다.` };
   }
   const post = enrollment.post.find((row) => row.runId !== null && row.runId === card.id);

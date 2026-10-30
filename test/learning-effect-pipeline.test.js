@@ -606,3 +606,12 @@ test('enrollmentReasons: the sealed-plan, source and ledger checks keep their or
     ['PROTOCOL_MISMATCH', 'PLAN_SEAL_MISMATCH', 'SOURCE_UNAVAILABLE', 'RUN_LOG_INCOMPLETE']);
   assert.deepEqual(enrollmentReasons({ ...ok, enrollment: { ...input.enrollment, plan: { baselineRuns: 99 } } }), ['PLAN_INVALID']);
 });
+
+test('measurementSlots: a finished retest that is still the current session reports complete (the view marks it current and complete)', () => {
+  const [b1, b2] = pool.runs;
+  const baseline = [placeRun(b1, { startMs: 1 * H }), placeRun(b2, { startMs: 2 * H })];
+  const retests = baseline.map((run, i) => placeRun(i === 0 ? b1 : b2, { mode: 'retest', startMs: 9 * DAY + i * H, assessmentId: run.runId }));
+  const { slots } = slotsOfScenario({ baseline, retests, currentRunId: retests[0].runId }, { now: at(10 * DAY) });
+  const entry = slots.retention.find((row) => row.runId === retests[0].runId);
+  assert.equal(entry.status, 'complete');
+});

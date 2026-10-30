@@ -628,3 +628,41 @@ test('enrollment boundaries: the next one after now, crossing since receipt, and
   assert.equal(boundaryDelay(ms(0), ms(5)), 0);
   assert.equal(boundaryDelay(ms(100_000), ms(0)), 2 ** 31 - 1, 'beyond the timer limit it re-arms in pieces');
 });
+
+test('enrollment cards: a finished retest that is still the current session is "already decided", not "in progress"', () => {
+  const taken = (status, current = true) => enrollmentView(active({ postOpen: true, retention: [{ slot: 1, assessmentId: 'a1', runId: 'r1', status, current },
+    { slot: 2, assessmentId: 'a2', runId: null, status: 'NOT_STARTED', current: false }] }));
+  const note = (status, current) => cardEnrollment({ id: 'a1', kind: 'assessment' }, taken(status, current)).note;
+  assert.match(note('complete', true), /이미 정해졌습니다\(완료\)/);
+  assert.doesNotMatch(note('complete', true), /진행 중/);
+  assert.match(note('UNANSWERED', true), /진행 중입니다/);
+  assert.match(note('INCOMPLETE_RUN', true), /진행 중입니다/);
+  assert.match(note('INCOMPLETE_RUN', false), /이미 정해졌습니다\(미완료\)/);
+});
+
+test('enrollmentView accepts a well-formed active view and refuses each malformed one as unavailable', () => {
+  const good = active();
+  assert.equal(enrollmentView(good).status, 'active');
+  assert.equal(enrollmentView(enrollmentView(good)).status, 'active', 'the checked view is itself valid input');
+  const bad = {
+    'postOpen not boolean': { postOpen: 'yes' },
+    'postOpen missing': { postOpen: undefined },
+    'baselineRuns 0': { baselineRuns: 0 },
+    'baselineRuns 6': { baselineRuns: 6 },
+    'baselineRuns fraction': { baselineRuns: 1.5 },
+    'baselineRuns missing': { baselineRuns: undefined },
+    'retention shorter than baselineRuns': { retention: good.retention.slice(0, 1) },
+    'retention longer than baselineRuns': { retention: [...good.retention, { slot: 3, assessmentId: null, runId: null, status: 'NO_BASELINE', current: false }] },
+    'baselines longer than baselineRuns': { baselines: slotRows(['a1', 'complete'], ['a2', 'complete'], ['a3', 'complete']) },
+    'post longer than baselineRuns': { post: slotRows(['p1', 'complete'], ['p2', 'complete'], ['p3', 'complete']) },
+    'duplicate baseline slot': { baselines: [{ slot: 1, runId: 'a1', status: 'complete' }, { slot: 1, runId: 'a2', status: 'complete' }] },
+    'gap in post slots': { post: [{ slot: 2, runId: 'p2', status: 'complete' }] },
+    'retention slots out of order': { retention: [{ ...good.retention[1] }, { ...good.retention[0] }] },
+    'opens at closes': { postClosesAt: good.postOpensAt },
+    'opens after closes': { postOpensAt: good.postClosesAt, postClosesAt: good.postOpensAt },
+    'consentedAt not ISO': { consentedAt: 'yesterday' },
+    'consentedAt missing': { consentedAt: undefined },
+    'current not boolean': { retention: good.retention.map((row) => ({ ...row, current: 1 })) },
+  };
+  for (const [name, change] of Object.entries(bad)) assert.deepEqual(enrollmentView({ ...good, ...change }), { status: 'unavailable' }, name);
+});
