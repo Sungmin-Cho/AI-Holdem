@@ -33,6 +33,7 @@ const STATIC = new Map([
   ['/shared/reference.js', ['shared/reference.js', 'text/javascript; charset=utf-8']],
   ['/pot-odds-drill.js', ['server/drill-public/pot-odds-drill.js', 'text/javascript; charset=utf-8']],
   ['/spot-chart.js', ['server/drill-public/spot-chart.js', 'text/javascript; charset=utf-8']],
+  ['/run-cards.js', ['server/drill-public/run-cards.js', 'text/javascript; charset=utf-8']],
 ]);
 // Only the study listener exposes the replay library; these resources include
 // the complete browser import closure, with paths preserved for ES modules.
