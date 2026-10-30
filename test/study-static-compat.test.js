@@ -41,55 +41,91 @@ const OLD_SERVICE_ASSETS = [
   ['/public/replay.css', 'server/public/replay.css', 'text/css; charset=utf-8'],
   ...['decision-facts', 'poker-eval'].map((name) => [`/shared/${name}.js`, `shared/${name}.js`, JS]),
 ];
-const OLD_PATHS = new Set(OLD_SERVICE_ASSETS.map(([url]) => url));
+const OLD_FILE = new Map(OLD_SERVICE_ASSETS.map(([url, file]) => [url, file]));
 
-// url path -> file as the current service maps it (read from the source: the map is private to the module).
-function currentFileOf(url) {
-  const source = fs.readFileSync(`${ROOT}tools/drill-server.js`, 'utf8');
-  const match = source.match(new RegExp(`\\['${url.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}', \\['([^']+)'`));
-  return match?.[1] ?? null;
+/** Module specifiers a browser would request for this source: static imports and re-exports (with or without
+ * whitespace, over several lines) and dynamic import() of a string literal. Comments are removed first so a
+ * commented-out import is not a dependency. A specifier spelled inside a string literal is out of scope. */
+function importSpecifiers(text) {
+  const code = text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:\\])\/\/.*$/gm, '$1');
+  const lead = '(?:^|[^.\\w$])';
+  const patterns = [
+    new RegExp(`${lead}import\\s*(?:[\\w$*{}\\s,]+?\\s*from\\s*)?(['"])([^'"\\n]+)\\1`, 'g'),
+    new RegExp(`${lead}export\\s*[\\w$*{}\\s,]+?\\s*from\\s*(['"])([^'"\\n]+)\\1`, 'g'),
+    new RegExp(`${lead}import\\s*\\(\\s*(['"])([^'"\\n]+)\\1\\s*\\)`, 'g'),
+  ];
+  return [...new Set(patterns.flatMap((pattern) => [...code.matchAll(pattern)].map((match) => match[2])))];
 }
 
-/** Every static import/re-export reachable from /drill.js, resolved as a browser does. */
-function importGraph(entry = '/drill.js') {
+/** Every module reachable from /drill.js, resolved as a browser does, reading each module through `read(url)`
+ * (null when it is not served). Returns url -> served (true/false). */
+async function importGraph(read, entry = '/drill.js') {
   const seen = new Map();
   const pending = [entry];
   while (pending.length) {
     const url = pending.pop();
     if (seen.has(url)) continue;
-    const file = currentFileOf(url);
-    seen.set(url, file);
-    if (!file) continue;
-    const text = fs.readFileSync(`${ROOT}${file}`, 'utf8');
-    const specifiers = [...text.matchAll(/(?:^|[\s;])(?:import|export)\s[^'";]*?\sfrom\s*['"]([^'"]+)['"]/gm), ...text.matchAll(/(?:^|[\s;])import\s*['"]([^'"]+)['"]/gm)].map((m) => m[1]);
-    for (const specifier of specifiers) {
+    const text = await read(url);
+    seen.set(url, text !== null);
+    if (text === null) continue;
+    for (const specifier of importSpecifiers(text)) {
       if (!specifier.startsWith('.') && !specifier.startsWith('/')) continue;
       pending.push(new URL(specifier, `http://page.invalid${url}`).pathname);
     }
   }
   return seen;
 }
+const readOldFile = async (url) => (OLD_FILE.has(url) ? fs.readFileSync(`${ROOT}${OLD_FILE.get(url)}`, 'utf8') : null);
 
-test('the page imports only paths that a service from before issue 335 serves', () => {
-  const graph = importGraph();
-  assert.ok(graph.has('/study-format.js') && graph.has('/spot-chart.js') && graph.has('/shared/reference.js'), 'the walk really follows the imports');
-  const missing = [...graph.keys()].filter((url) => !OLD_PATHS.has(url));
-  assert.deepEqual(missing, [], 'paths the old allow-list does not serve');
-  assert.deepEqual([...graph].filter(([, file]) => file === null).map(([url]) => url), [], 'every imported path is served by the current service too');
+test('the import scanner finds every form a browser loads and skips comments', () => {
+  const source = [
+    "import{a}from'./a.js';",
+    'import {',
+    '  b,',
+    "  c as d } from \"./b.js\";",
+    "import './side.js';",
+    "import * as ns from '../shared/ns.js';",
+    "export * from './star.js';",
+    "export { e } from './re.js';",
+    "const lazy = () => import('./lazy.js');",
+    "// import gone from './commented.js';",
+    "/* import './blocked.js'; */",
+    "const url = 'http://example.invalid/x.js'; obj.import('./method.js');",
+  ].join('\n');
+  assert.deepEqual(importSpecifiers(source).sort(), ['../shared/ns.js', './a.js', './b.js', './lazy.js', './re.js', './side.js', './star.js'].sort());
 });
 
-test('the old allow-list serves the whole import graph with 200 from the current files', async () => {
+test('the page imports only paths that a service from before issue 335 serves', async () => {
+  const graph = await importGraph(readOldFile);
+  assert.ok(graph.has('/study-format.js') && graph.has('/spot-chart.js') && graph.has('/shared/reference.js'), 'the walk really follows the imports');
+  assert.deepEqual([...graph].filter(([, served]) => !served).map(([url]) => url), [], 'paths the old allow-list does not serve');
+});
+
+async function serveGraph(staticAssets) {
   const storeDir = createOwnedTempDir('static-compat');
-  const staticAssets = new Map(OLD_SERVICE_ASSETS.map(([url, file, mime]) => [url, [file, mime]]));
-  const handler = createDrillHandler({ storeDir, token: 'compat-token', staticAssets });
+  const handler = createDrillHandler({ storeDir, token: 'compat-token', ...(staticAssets ? { staticAssets } : {}) });
   const server = http.createServer(handler);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
   try {
-    const { port } = server.address();
-    for (const url of ['/', ...importGraph().keys()]) {
+    const statuses = {};
+    // The walk reads each module from the response body, as a browser would.
+    const graph = await importGraph(async (url) => {
       const response = await fetch(`http://127.0.0.1:${port}${url}`);
-      assert.equal(response.status, 200, url);
-      await response.arrayBuffer();
-    }
+      statuses[url] = response.status;
+      const body = await response.text();
+      return response.status === 200 ? body : null;
+    });
+    assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 200, '/');
+    return { graph, statuses };
   } finally { await new Promise((resolve) => { server.close(resolve); server.closeAllConnections?.(); }); }
+}
+
+test('the old allow-list and the current service both serve the whole import graph with 200', async () => {
+  const old = await serveGraph(new Map(OLD_SERVICE_ASSETS.map(([url, file, mime]) => [url, [file, mime]])));
+  assert.ok(old.graph.size >= 5, 'the walk followed the served modules');
+  assert.deepEqual(Object.entries(old.statuses).filter(([, status]) => status !== 200), [], 'old allow-list');
+  const current = await serveGraph(null);
+  assert.deepEqual(Object.entries(current.statuses).filter(([, status]) => status !== 200), [], 'current service');
+  assert.deepEqual([...current.graph.keys()].sort(), [...old.graph.keys()].sort());
 });

@@ -353,12 +353,21 @@ export async function runCoachingStudyJourney(outDir) {
     await freshPage({ summary: fixtureSummary({ runs, enrollment: fixtureEnrollment({ postOpen: true, postOpensAt: iso(-1) }) }) });
     cards = await waitCards((value) => value.cards.length === 2 && /처음 재평가한 실행/.test(value.cards[0].note), 'post-window cards');
     await evaluate("(() => { const button = document.querySelector('#assessments .assessment button'); button.__kept = 'same'; window.__button = button; return true; })()");
+    // The reloaded summary changes the first card's note (its slot was taken), so the comparison runs only after
+    // the page has really applied the new summary.
+    fixture.summary = fixtureSummary({ runs, enrollment: fixtureEnrollment({ postOpen: true, postOpensAt: iso(-1),
+      retention: [{ slot: 1, assessmentId: 'a1', runId: null, status: 'NOT_STARTED', current: false },
+        { slot: 2, assessmentId: 'a2', runId: 'r-taken', status: 'UNANSWERED', current: false }] }) });
     const before = fixture.summaryRequests;
     await click('#recover');
     await waitFor(() => fixture.summaryRequests, (value) => value > before, 'summary requested again');
-    await pause(400);
+    await waitCards((value) => /이미 정해졌습니다\(아직 확인된 응답 없음\)/.test(value.cards[0].note), 'the reloaded summary applied in place');
     const kept = await evaluate("(() => { const button = document.querySelector('#assessments .assessment button'); return button === window.__button && button.__kept === 'same'; })()");
     check('card-dom-stable-across-summary', kept === true, { requests: fixture.summaryRequests - before });
+    // Back to an open slot for the dispatch checks below.
+    fixture.summary = fixtureSummary({ runs, enrollment: fixtureEnrollment({ postOpen: true, postOpensAt: iso(-1) }) });
+    await click('#recover');
+    await waitCards((value) => /처음 재평가한 실행/.test(value.cards[0].note), 'open slot again');
 
     // 12. Clicking a card starts a protected retest of exactly that assessment; a second click while the
     //     request is in flight does nothing (a disabled button, and a forced click refused by the handler).
