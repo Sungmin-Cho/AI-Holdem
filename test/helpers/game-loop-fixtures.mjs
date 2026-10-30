@@ -476,6 +476,13 @@ export async function terminateIfAlive(child) {
 export function putAiFirst(gameDir) {
   const statePath = path.join(gameDir, 'state.json');
   const state = readJson(statePath);
+  // Multiplayer init shuffles the seats; pin the host, participants, AIs layout these tests script.
+  const rank = (seat) => (seat.playerId === 'user' ? 0 : seat.kind === 'ai' ? 2 : 1);
+  const ordinal = (seat) => Number(String(seat.playerId).replace(/\D+/g, '')) || 0;
+  state.seats = state.seats
+    .map((seat, at) => ({ seat, at }))
+    .sort((a, b) => rank(a.seat) - rank(b.seat) || ordinal(a.seat) - ordinal(b.seat) || a.at - b.at)
+    .map(({ seat }) => seat);
   state.button = 0;
   fs.writeFileSync(statePath, JSON.stringify(state));
 }

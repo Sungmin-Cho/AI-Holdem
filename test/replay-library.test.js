@@ -87,7 +87,10 @@ function buildGame(store, {
   return { ...session, state, records };
 }
 
-const multi = { aiCount: 1, participants: [{ playerId: 'h1', participantId: 'pt-1', name: 'Guest' }], hostName: 'Host' };
+// Multiplayer seats are shuffled by default; pin the host-first layout.
+const multi = {
+  aiCount: 1, participants: [{ playerId: 'h1', participantId: 'pt-1', name: 'Guest' }], hostName: 'Host', seatOrder: ['user', 'h1', 'p1'],
+};
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 const writeJson = (file, value) => fs.writeFileSync(file, JSON.stringify(value));
 const handPath = (dir, n) => path.join(dir, 'hands', `hand-${String(n).padStart(4, '0')}.json`);

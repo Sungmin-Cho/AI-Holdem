@@ -10,7 +10,11 @@ import { newDeck } from '../../engine/cards.js';
 /** Real engine records and catalog publication, never hand-written replay DTOs. */
 export function createReplayGame(storeDir, { aiCount = 1, hands = 2, ongoing = false, mode = 'cash-training', participants, hostAbsent = false, participantAbsent = false, foldFirst = false, showdownPolicy = 'open' } = {}) {
   const prepared = prepareSession(storeDir);
-  let state = createGame({ aiCount, mode, ...(participants ? {participants} : {}), ...(mode === 'cash-training' ? {levelEvery:null, handLimit:ongoing ? hands+2 : hands} : {}), replayReveal:'all', showdownPolicy, button:0 });
+  // Multiplayer seats are shuffled by default; these fixtures pin the host-first layout.
+  const seatOrder = participants?.length
+    ? ['user', ...participants.map((row) => row.playerId), ...Array.from({ length: aiCount }, (_, i) => `p${i + 1}`)]
+    : undefined;
+  let state = createGame({ aiCount, mode, ...(participants ? {participants, seatOrder} : {}), ...(mode === 'cash-training' ? {levelEvery:null, handLimit:ongoing ? hands+2 : hands} : {}), replayReveal:'all', showdownPolicy, button:0 });
   if (hostAbsent || participantAbsent) {
     // Real tournament settlement busts the host while h1 remains. The following
     // hand is therefore dealt without user, without manufacturing an out flag.

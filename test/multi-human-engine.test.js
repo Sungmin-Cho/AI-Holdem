@@ -58,8 +58,14 @@ function dealDeck(orderHoles, board = DRY_BOARD) {
 
 function game(opts = {}) {
   const participants = opts.participants === undefined ? people(1) : opts.participants;
+  const aiCount = opts.aiCount ?? 1;
+  // Seats are shuffled when participants exist; pin the host-first layout these tests assume.
+  const seatOrder = opts.seatOrder ?? (Array.isArray(participants) && participants.length > 0
+    ? ['user', ...participants.map((row) => row?.playerId), ...Array.from({ length: Number.isInteger(aiCount) && aiCount > 0 ? aiCount : 0 }, (_, i) => `p${i + 1}`)]
+    : undefined);
   return createGame({
-    aiCount: opts.aiCount ?? 1,
+    aiCount,
+    seatOrder,
     startStack: opts.startStack ?? 5000,
     participants,
     hostName: opts.hostName ?? '호스트',
@@ -298,6 +304,8 @@ test('cli step envelope views·legal·stateVersion·toProcessReview', () => {
   assert.equal(init.status, 0, init.stderr);
   const statePath = path.join(dir, 'state.json');
   const seeded = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  // init shuffles multiplayer seats; pin the host-first ring this scripted hand assumes.
+  seeded.seats = ['user', 'h1', 'p1'].map((id) => seeded.seats.find((seat) => seat.playerId === id));
   seeded.button = seeded.seats.length - 1;
   fs.writeFileSync(statePath, JSON.stringify(seeded));
   const started = cli(dir, ['step', '--new-hand', '--deck', dealDeck([['7h', '2c'], ['3c', '3d'], ['As', 'Ah']]).join(',')]);
@@ -382,6 +390,82 @@ test('cli init --ai 0 --participants-file와 잘못된 파일은 USAGE', () => {
   const hugeResult = cli(hugeDir, ['init', '--ai', '1', '--participants-file', huge]);
   assert.equal(hugeResult.status, 2);
   assert.equal(hugeResult.json.code, 'USAGE');
+});
+
+test('참가자가 있는 게임의 좌석 순서는 무작위 순열이고 solo는 고정이다', () => {
+  const defaults = ['user', 'h1', 'h2', 'p1', 'p2'];
+  const st = createGame({ aiCount: 2, participants: people(2), hostName: '호스트' });
+  assert.deepEqual([...st.seats.map((s) => s.playerId)].sort(), [...defaults].sort());
+  assert.equal(Object.keys(st.stats).length, defaults.length);
+  assert.ok(Number.isInteger(st.button) && st.button >= 0 && st.button < st.seats.length);
+
+  const seen = Array.from({ length: 3 }, () => new Map());
+  for (let i = 0; i < 600; i += 1) {
+    const trial = createGame({ aiCount: 1, participants: people(1), hostName: '호스트' });
+    const ids = trial.seats.map((s) => s.playerId);
+    assert.deepEqual([...ids].sort(), ['h1', 'p1', 'user']);
+    ids.forEach((id, index) => seen[index].set(id, true));
+  }
+  for (const atSeat of seen) {
+    assert.deepEqual([...atSeat.keys()].sort(), ['h1', 'p1', 'user']);
+  }
+
+  for (let i = 0; i < 20; i += 1) {
+    const solo = createGame({ aiCount: 3 });
+    assert.deepEqual(solo.seats.map((s) => s.playerId), ['user', 'p1', 'p2', 'p3']);
+  }
+});
+
+test('seatOrder는 좌석 순서를 그대로 쓰고 정확한 순열이 아니면 BAD_CONFIG다', () => {
+  const order = ['p1', 'h2', 'user', 'p2', 'h1'];
+  const st = createGame({
+    aiCount: 2, participants: people(2), hostName: '호스트', seatOrder: order, button: 3,
+  });
+  assert.deepEqual(st.seats.map((s) => s.playerId), order);
+  assert.equal(st.button, 3);
+  assert.equal(st.seats.find((s) => s.playerId === 'h2').name, '서연');
+  assert.equal(st.seats.find((s) => s.playerId === 'p1').kind, 'ai');
+  assert.deepEqual(Object.keys(st.stats).sort(), [...order].sort());
+
+  const soloOrder = createGame({ aiCount: 2, seatOrder: ['p2', 'user', 'p1'] });
+  assert.deepEqual(soloOrder.seats.map((s) => s.playerId), ['p2', 'user', 'p1']);
+
+  const bad = [
+    ['user', 'h1', 'h2', 'p1'],
+    ['user', 'h1', 'h2', 'p1', 'p2', 'p3'],
+    ['user', 'h1', 'h2', 'p1', 'p1'],
+    ['user', 'h1', 'h2', 'p1', 'p9'],
+    'user,h1,h2,p1,p2',
+    null,
+    {},
+  ];
+  for (const seatOrder of bad) {
+    assert.throws(
+      () => createGame({ aiCount: 2, participants: people(2), hostName: '호스트', seatOrder }),
+      { code: 'BAD_CONFIG' },
+      JSON.stringify(seatOrder),
+    );
+  }
+});
+
+test('initGameDir의 players.json seat는 state.json 좌석 인덱스이고 행 순서는 호스트·참가자·AI다', () => {
+  for (let trial = 0; trial < 8; trial += 1) {
+    const dir = tmpGame();
+    const file = writeParticipants(dir, {
+      schemaVersion: 1,
+      hostName: '호스트',
+      participants: people(2).map((row) => ({ ...row, participantId: `uuid-${row.playerId}` })),
+    });
+    const init = cli(dir, ['init', '--ai', '3', '--participants-file', file]);
+    assert.equal(init.status, 0, init.stderr);
+    const players = JSON.parse(fs.readFileSync(path.join(dir, 'players.json'), 'utf8'));
+    const state = JSON.parse(fs.readFileSync(path.join(dir, 'state.json'), 'utf8'));
+    assert.deepEqual(players.map((row) => row.playerId), ['user', 'h1', 'h2', 'p1', 'p2', 'p3']);
+    for (const row of players) {
+      assert.equal(row.seat, state.seats.findIndex((seat) => seat.playerId === row.playerId), row.playerId);
+    }
+    assert.deepEqual(players.map((row) => row.seat).sort(), [0, 1, 2, 3, 4, 5]);
+  }
 });
 
 test('players.json 형식과 페르소나 이름 충돌 회피', () => {

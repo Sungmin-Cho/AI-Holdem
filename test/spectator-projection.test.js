@@ -16,7 +16,7 @@ import {createOwnedTempDir,registerOwnedServer} from './helpers/owned-fixtures.m
 
 const TOKEN='spectator-relay-token';
 function game() {
-  const state=createGame({aiCount:1,participants:[{playerId:'h1',name:'Guest',participantId:'guest'}],hostName:'Host',names:['AI']});
+  const state=createGame({aiCount:1,participants:[{playerId:'h1',name:'Guest',participantId:'guest'}],hostName:'Host',names:['AI'],seatOrder:['user','h1','p1']});
   state.sessionToken=TOKEN;state.button=2;
   return startHand(state,{deck:newDeck()}).state;
 }

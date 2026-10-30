@@ -23,7 +23,11 @@ export const shove = (legal) => (legal.canRaise ? ['raise', legal.maxRaiseTo] : 
 
 /** Plays one engine hand. `pick(legal, turn, state)` returns [action, amount]. */
 export function playHand({ aiCount = 2, startStack = 1000, seed = 11, button = 0, stacks, participants, hostOut = false, pick = passive } = {}) {
-  const game = createGame({ aiCount, startStack, levelEvery: 10, button, ...(participants ? { participants } : {}) });
+  // Multiplayer seats are shuffled by default; these fixtures pin the host-first layout.
+  const seatOrder = participants?.length
+    ? ['user', ...participants.map((row) => row.playerId), ...Array.from({ length: aiCount }, (_, i) => `p${i + 1}`)]
+    : undefined;
+  const game = createGame({ aiCount, startStack, levelEvery: 10, button, ...(participants ? { participants, seatOrder } : {}) });
   if (stacks) game.seats.forEach((seat, at) => { if (stacks[at] != null) seat.stack = stacks[at]; });
   if (hostOut) { game.seats[0].out = true; game.seats[0].stack = 0; }
   let state = startHand(game, { rng: seeded(seed) }).state;

@@ -92,7 +92,7 @@ Each request contains only the acting AI's own cards and public table state, usi
 
 Open an online session from the lobby and share its **participant join link**. The public listener uses port **8899** by default. Players on the same reachable LAN can join; internet access requires your own networking and HTTPS setup. Share join links, not the private host URL.
 
-Spectators do not occupy engine seats and can see **all hole cards live**. Use spectator access when that visibility is appropriate for your group. Multiplayer games are started and resumed through the app.
+Spectators do not occupy engine seats and can see **all hole cards live**. Use spectator access when that visibility is appropriate for your group. Seats are assigned randomly for each new game. Multiplayer games are started and resumed through the app.
 
 The default connection is HTTP. Public-host, port, and TLS configuration are covered in the [operations guide](docs/operations.ko.md#시작하기).
 

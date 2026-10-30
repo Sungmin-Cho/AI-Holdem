@@ -88,6 +88,8 @@ async function multiRelay(t, serverOptions = {}) {
     participants: people(),
     hostName: '호스트',
     names: ['AI'],
+    // Multiplayer seats are shuffled by default; pin the host-first layout the fixtures below describe.
+    seatOrder: ['user', 'h1', 'p1'],
   });
   state.button = state.seats.length - 1;
   const started = startHand(state, { deck: [...newDeck()] }).state;
