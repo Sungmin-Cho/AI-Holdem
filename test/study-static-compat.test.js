@@ -82,28 +82,31 @@ await import(${JSON.stringify(realFileUrl(entryFile))});`;
   return fs.readFileSync(out, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
 }
 
-/** Every module the page loads, as browser URLs, from the loader's own requests: each request is resolved against the
- * browser URL of the module that made it. Returns url -> the file the loader used for it. A request that leaves the
- * page's origin is reported as such. */
-function pageGraph(workDir) {
-  const entry = path.join(ROOT, OLD_FILE.get('/drill.js'));
+/** Every module a page loads, as browser URLs, from the loader's own requests: each request is resolved against the
+ * browser URL of the module that made it. Returns url -> the file URL the loader used for it. A request that leaves
+ * the page's origin (another host, `node:` or any other scheme a browser page cannot load) is kept as `EXTERNAL …`,
+ * so it fails the served-path check. Requests of the recording harness itself have no page parent and are skipped. */
+function pageGraph(workDir, entry = path.join(ROOT, OLD_FILE.get('/drill.js')), entryUrl = '/drill.js') {
   const requests = loaderRequests(entry, workDir);
-  const browserUrlOf = new Map([[realFileUrl(entry), '/drill.js']]);
-  const graph = new Map([['/drill.js', realFileUrl(entry)]]);
+  const browserUrlOf = new Map([[realFileUrl(entry), entryUrl]]);
+  const graph = new Map([[entryUrl, realFileUrl(entry)]]);
   let grew = true;
   while (grew) {
     grew = false;
     for (const { parent, specifier, url } of requests) {
       const from = browserUrlOf.get(parent);
-      if (!from || specifier.startsWith('node:')) continue;
+      if (!from) continue;
       const target = new URL(specifier, `http://page.invalid${from}`);
-      const key = target.origin === 'http://page.invalid' ? target.pathname : `EXTERNAL ${target.href}`;
+      const local = target.origin === 'http://page.invalid';
+      const key = local ? target.pathname : `EXTERNAL ${target.href}`;
       if (!graph.has(key)) { graph.set(key, url); grew = true; }
-      if (!browserUrlOf.has(url) && target.origin === 'http://page.invalid') { browserUrlOf.set(url, target.pathname); grew = true; }
+      if (local && !browserUrlOf.has(url)) { browserUrlOf.set(url, target.pathname); grew = true; }
     }
   }
   return graph;
 }
+// The same file on disk: a query or fragment the loader keeps on its URL does not change which file is served.
+const sameFile = (fileUrl, file) => fs.realpathSync(fileURLToPath(fileUrl)) === fs.realpathSync(file);
 
 test('the graph comes from the loader, so syntax that fools a text scan cannot hide an import', () => {
   const dir = createOwnedTempDir('static-compat-loader');
@@ -137,7 +140,22 @@ test('the page imports only paths that a service from before issue 335 serves, f
   const graph = pageGraph(createOwnedTempDir('static-compat-graph'));
   assert.ok(graph.has('/study-format.js') && graph.has('/spot-chart.js') && graph.has('/shared/reference.js'), 'the walk really follows the imports');
   assert.deepEqual([...graph.keys()].filter((url) => !OLD_FILE.has(url)), [], 'paths the old allow-list does not serve');
-  for (const [url, fileUrl] of graph) assert.equal(fileUrl, realFileUrl(path.join(ROOT, OLD_FILE.get(url))), url);
+  for (const [url, fileUrl] of graph) assert.ok(sameFile(fileUrl, path.join(ROOT, OLD_FILE.get(url))), url);
+});
+
+test('a query or fragment keeps the served file; node: and remote imports cannot pass', () => {
+  const dir = createOwnedTempDir('static-compat-forms');
+  for (const name of ['a.js', 'b.js']) fs.writeFileSync(path.join(dir, name), 'export const x = 1;\n');
+  fs.writeFileSync(path.join(dir, 'page.js'), "import './a.js?label=a b';\nimport './b.js#v2';\n");
+  const graph = pageGraph(dir, path.join(dir, 'page.js'), '/page.js');
+  assert.deepEqual([...graph.keys()].sort(), ['/a.js', '/b.js', '/page.js']);
+  assert.ok(sameFile(graph.get('/a.js'), path.join(dir, 'a.js')) && sameFile(graph.get('/b.js'), path.join(dir, 'b.js')));
+  // node: loads in Node but not in a page: it stays in the graph as an external request.
+  fs.writeFileSync(path.join(dir, 'builtin.js'), "import './a.js';\nimport 'node:fs';\n");
+  assert.deepEqual([...pageGraph(dir, path.join(dir, 'builtin.js'), '/builtin.js').keys()].filter((key) => key.startsWith('EXTERNAL')), ['EXTERNAL node:fs']);
+  // A protocol-relative (remote) path does not load at all.
+  fs.writeFileSync(path.join(dir, 'remote.js'), "import '//remote.invalid/x.js';\n");
+  assert.throws(() => pageGraph(dir, path.join(dir, 'remote.js'), '/remote.js'), /could not import/);
 });
 
 async function statusesOf(urls, staticAssets) {
