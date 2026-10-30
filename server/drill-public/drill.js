@@ -327,7 +327,9 @@ async function mountStudy() {
   let formattedSummary = null;
   // When the current summary arrived and the timer toward the next enrollment
   // boundary (the post window opening or closing changes what the cards say).
-  let summaryReceivedAt = 0;
+  // `summaryAsOf` is when the request for the shown summary was SENT: a boundary that passed while it was in flight
+  // may not be in it.
+  let summaryAsOf = 0;
   let boundaryTimer = null;
   // The last question shown for answering and the choice made on it. The answer
   // DTO carries neither, so feedback visuals use them only for the same questionId.
@@ -547,7 +549,7 @@ async function mountStudy() {
     }, boundaryDelay(at, Date.now()));
   }
   // True when a schedule boundary passed since the shown summary arrived.
-  const enrollmentStale = () => summaryState === 'ready' && enrollmentBoundaryCrossed(summary?.enrollment, summaryReceivedAt, Date.now());
+  const enrollmentStale = () => summaryState === 'ready' && enrollmentBoundaryCrossed(summary?.enrollment, summaryAsOf, Date.now());
   async function refreshForSchedule() {
     await refreshSummary();
     $('status').textContent = ENROLLMENT_CHANGED_NOTICE;
@@ -561,11 +563,12 @@ async function mountStudy() {
   }
   async function refreshSummary() {
     try {
+      const requestedAt = Date.now();
       const settled = await latestSummary(() => api('/api/summary'));
       if (!settled.current) return;
       const response = settled.value;
       if (!response.ok) { $('summary-status').textContent = formatStudyError(response); summary = null; summaryState = 'failed'; dropEnrollmentGuidance(); paintNextStep(); return; }
-      summary = response.summary; summaryState = 'ready'; summaryReceivedAt = Date.now();
+      summary = response.summary; summaryState = 'ready'; summaryAsOf = requestedAt;
       const formatted = formatSummary(summary);
       formattedSummary = formatted;
       paintModeHelp();
@@ -583,6 +586,9 @@ async function mountStudy() {
       paintTrends(formatTrends(summary.trends));
       armBoundaryTimer();
       paintNextStep();
+      // A boundary passed while this request was in flight: the answer may predate it. Ask again; the new request
+      // is sent after the boundary, so this cannot repeat.
+      if (enrollmentStale()) void refreshSummary();
     } catch { $('summary-status').textContent = '학습 요약을 불러오지 못했습니다. 상태 확인을 눌러 주세요.'; summary = null; summaryState = 'failed'; dropEnrollmentGuidance(); paintNextStep(); }
   }
   function paintTrends(trends) {
