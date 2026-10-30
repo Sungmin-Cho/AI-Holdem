@@ -57,11 +57,17 @@ export function createRunCards(document, box, { onRetest, getGate = () => null, 
     show(parts.note, card.note);
   }
 
-  /** The gate line and every button's `disabled`; nothing else changes. */
+  /** The gate line and every button's `disabled`; nothing else changes. The
+   * line explains a held-back retest, so it is empty when no card could retest. */
   function refreshGate() {
     const gate = getGate();
-    for (const entry of entries.values()) if (entry.parts.button) entry.parts.button.disabled = !entry.card.canRetest || gate !== null;
-    if (gateBox) setText(gateBox, gate?.text ?? '');
+    let retestable = false;
+    for (const entry of entries.values()) {
+      if (!entry.parts.button) continue;
+      retestable ||= entry.card.canRetest === true;
+      entry.parts.button.disabled = !entry.card.canRetest || gate !== null;
+    }
+    if (gateBox) setText(gateBox, retestable ? gate?.text ?? '' : '');
   }
 
   function sync(cards) {

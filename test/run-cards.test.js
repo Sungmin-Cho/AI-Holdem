@@ -101,6 +101,18 @@ test('a summary rendered while a gate is up leaves the new button disabled', () 
   assert.equal(f.gateBox.textContent, 'x');
 });
 
+test('the gate line stays empty when no card could retest', () => {
+  const f = fixture();
+  f.gate.current = { code: 'LOADING', text: '학습 상태를 확인하고 있습니다…' };
+  f.view.sync([]);
+  assert.equal(f.gateBox.textContent, '');
+  f.view.sync([{ ...card('a'), canRetest: false }, retest('r')]);
+  assert.equal(f.view.buttonOf('a').disabled, true);
+  assert.equal(f.gateBox.textContent, '');
+  f.view.sync([card('a'), retest('r')]);
+  assert.equal(f.gateBox.textContent, '학습 상태를 확인하고 있습니다…');
+});
+
 test('the click handler asks for the gate and the card again at click time', () => {
   const f = fixture();
   f.view.sync([card('a')]);
