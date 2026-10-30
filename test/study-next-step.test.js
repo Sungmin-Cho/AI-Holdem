@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import {
-  planNextStep, nextStepGate, nextStepView, unfinishedRun, coverageGuidance, completionGuidance, drillRequest, formatStudyError,
+  planNextStep, nextStepGate, nextStepView, unfinishedRun, coverageGuidance, completionGuidance, drillRequest, formatStudyError, formatWhen,
 } from '../server/drill-public/study-format.js';
 import { createStudyController } from '../server/drill-public/drill.js';
 import { startDrillServer } from '../tools/drill-server.js';
@@ -708,4 +708,72 @@ test('the browser journey self-test enforces every required check without launch
   for (const name of ['next-step-busy-gate', 'next-step-unfinished-rerender-gate', 'next-step-retest-dispatch-exact', 'next-step-source-mismatch-disabled', 'next-step-recovery-gate', 'next-step-stale-tab-guard']) {
     assert.ok(requiredJourneyChecks.includes(name), name);
   }
+});
+
+// ── issue 335: the plan follows the learning-effect enrollment ────────────────
+
+const slotRows = (...entries) => entries.map(([runId, status], i) => ({ slot: i + 1, runId, status }));
+const enrolled = (overrides = {}) => ({ status: 'active', postOpen: false, consentedAt: iso(-100), postOpensAt: iso(100), postClosesAt: iso(300), baselineRuns: 2,
+  baselines: slotRows(['b1', 'complete'], ['b2', 'complete']), post: [],
+  retention: [{ slot: 1, assessmentId: 'b1', runId: null, status: 'NOT_STARTED', current: false },
+    { slot: 2, assessmentId: 'b2', runId: null, status: 'NOT_STARTED', current: false }], ...overrides });
+const withBaselines = (enrollment, overrides = {}) => base({ assessments: [assessment('b1', { completedAt: iso(-60) }), assessment('b2', { completedAt: iso(-55) })],
+  enrollment, ...overrides });
+
+test('enrollment: before the post window the enrolled baselines are withheld from the retest plan, with one note', () => {
+  const plan = planNextStep(withBaselines(enrolled()));
+  assert.notEqual(plan.kind, 'retest');
+  assert.deepEqual(plan.notes, [`등록 기준 평가의 지연 재평가는 사후 기간(${formatWhen(iso(100))}부터)에 제안합니다.`]);
+  // An assessment that is not an enrolled baseline is still offered, with no enrollment note.
+  const other = planNextStep(withBaselines(enrolled(), { assessments: [assessment('b1', { completedAt: iso(-60) }), assessment('x', { completedAt: iso(-10) })] }));
+  assert.equal(other.kind, 'retest'); assert.deepEqual(other.selectors, { mode: 'retest', assessmentId: 'x' });
+  assert.deepEqual(other.notes, [`등록 기준 평가의 지연 재평가는 사후 기간(${formatWhen(iso(100))}부터)에 제안합니다.`]);
+  // No enrollment, null, unavailable or an older service: unchanged behaviour.
+  for (const enrollment of [undefined, null, { status: 'unavailable', reasons: ['X'] }]) {
+    const plain = planNextStep(withBaselines(enrollment));
+    assert.equal(plain.kind, 'retest'); assert.deepEqual(plain.selectors, { mode: 'retest', assessmentId: 'b2' }); assert.deepEqual(plain.notes, []);
+  }
+});
+
+test('enrollment: in the post window an open measuring slot comes before today\'s review and the latest such baseline is chosen', () => {
+  const summary = withBaselines(enrolled({ postOpen: true }), { bank: { totalCount: 5, dueCount: 3, graduatedCount: 0 } });
+  const plan = planNextStep(summary);
+  assert.equal(plan.kind, 'retest'); assert.equal(plan.measured, true);
+  assert.deepEqual(plan.selectors, { mode: 'retest', assessmentId: 'b2' });
+  assert.equal(plan.detail, `이번 등록의 지연 재평가 슬롯은 사후 기간에 이 평가를 처음 재평가한 실행으로 정해집니다. 시작하면 ${formatWhen(iso(300))} 전에 끝까지 풀어 주세요.`);
+  // Without an enrollment the review is first, as before.
+  assert.equal(planNextStep({ ...summary, enrollment: undefined }).kind, 'daily');
+  // Once b2's slot is taken, b1 is next; once both are taken (or a baseline is incomplete) the old order returns.
+  const takenB2 = enrolled({ postOpen: true, retention: [{ slot: 1, assessmentId: 'b1', runId: null, status: 'NOT_STARTED', current: false },
+    { slot: 2, assessmentId: 'b2', runId: 'r2', status: 'UNANSWERED', current: true }] });
+  assert.deepEqual(planNextStep({ ...summary, enrollment: takenB2 }).selectors, { mode: 'retest', assessmentId: 'b1' });
+  const bothTaken = enrolled({ postOpen: true, retention: [{ slot: 1, assessmentId: 'b1', runId: 'r1', status: 'complete', current: false }, takenB2.retention[1]] });
+  const fallback = planNextStep({ ...summary, enrollment: bothTaken });
+  assert.equal(fallback.kind, 'daily');
+  const noDue = planNextStep({ ...summary, bank: { totalCount: 0, dueCount: 0 }, enrollment: bothTaken });
+  assert.equal(noDue.kind, 'retest'); assert.equal(noDue.notes.at(-1), '이 재평가는 이번 등록의 지연 재평가 슬롯으로 선택되지 않습니다.');
+  // A baseline that did not complete before the window cannot anchor a measured retest.
+  const incomplete = enrolled({ postOpen: true, baselines: slotRows(['b1', 'INCOMPLETE_RUN'], ['b2', 'INCOMPLETE_RUN']) });
+  assert.equal(planNextStep({ ...summary, enrollment: incomplete }).kind, 'daily');
+  // The 24-hour rule still applies.
+  const early = withBaselines(enrolled({ postOpen: true }), { assessments: [assessment('b1', { retest: { eligible: false, nextAvailableAt: iso(5) } }), assessment('b2', { retest: { eligible: false, nextAvailableAt: iso(5) } })],
+    bank: { totalCount: 5, dueCount: 3, graduatedCount: 0 } });
+  assert.equal(planNextStep(early).kind, 'daily');
+});
+
+test('enrollment: completion guidance and the plan read the same enrollment only for an enrolled baseline before the window', () => {
+  const summary = base({ assessments: [assessment('run-1', { retest: { eligible: false, nextAvailableAt: iso(23) } })], enrollment: enrolled({ baselines: slotRows(['run-1', 'complete']), retention: [] }) });
+  const done = completionGuidance(idle({ session: finishedSession('assessment') }), summary);
+  assert.equal(done.retest, `지연 재평가: 이 평가는 학습 효과 평가의 등록 기준입니다. 지연 재평가는 사후 기간(${formatWhen(iso(100))} ~ ${formatWhen(iso(300))})에 하세요.`);
+  const during = completionGuidance(idle({ session: finishedSession('assessment') }), { ...summary, enrollment: enrolled({ postOpen: true, baselines: slotRows(['run-1', 'complete']), retention: [] }) });
+  assert.match(during.retest, /24시간 뒤부터/);
+  const notBaseline = completionGuidance(idle({ session: finishedSession('assessment') }), { ...summary, enrollment: enrolled({ baselines: slotRows(['other', 'complete']), retention: [] }) });
+  assert.match(notBaseline.retest, /24시간 뒤부터/);
+  const noKey = completionGuidance(idle({ session: finishedSession('assessment') }), { ...summary, enrollment: undefined });
+  assert.match(noKey.retest, /24시간 뒤부터/);
+});
+
+test('the refused-start wording keeps "진행 중인 연습이 있거나" and tells what Start does', () => {
+  const text = formatStudyError({ code: 'UNFINISHED_RUN' });
+  assert.equal(text, '진행 중인 연습이 있거나 상태를 확인할 수 없어 새 연습을 시작하지 않았습니다. 다른 창에서 시작한 연습일 수 있습니다. 표시된 연습을 끝낸 뒤 다시 시도하세요. 연습 시작을 누르면 진행 중인 연습을 버리고 새로 시작합니다.');
 });

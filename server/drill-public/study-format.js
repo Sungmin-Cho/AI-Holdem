@@ -29,6 +29,9 @@ export function modeAvailability(mode, formatted) {
   if (!formatted) return '';
   if (mode === 'daily' || mode === 'mistake-review') return formatted.due;
   if (mode !== 'retest') return '';
+  return [retestAvailability(formatted), enrollmentRetestHint(formatted.enrollment)].filter(Boolean).join(' ');
+}
+function retestAvailability(formatted) {
   // "연습 시작" retests the most recent completed assessment (drill-cli.js);
   // an older one is retested from its own card below.
   const runs = formatted.assessments ?? [];
@@ -39,6 +42,12 @@ export function modeAvailability(mode, formatted) {
   if (latest.canRetest) return '가장 최근 평가를 지금 재평가할 수 있습니다.';
   if (latest.availableAt) return `가장 최근 평가의 재평가 가능 시각: ${latest.availableAt} · 다른 평가는 아래 카드에서 재평가합니다.`;
   return '가장 최근 평가는 재평가할 수 없습니다. 다른 평가는 아래 카드에서 재평가합니다.';
+}
+function enrollmentRetestHint(enrollment) {
+  if (enrollment?.status !== 'active') return '';
+  return enrollment.postOpen
+    ? "학습 효과 평가의 지연 재평가는 아래 '등록 기준' 카드에서 시작하세요. 연습 시작은 가장 최근 평가를 재평가합니다."
+    : `학습 효과 평가 진행 중: 등록 기준 평가의 지연 재평가는 사후 기간(${whenOf(enrollment.postOpensAt)}부터)에 합니다.`;
 }
 
 export function formatSource(source) {
@@ -60,7 +69,7 @@ export function formatStudyError(error = {}) {
     SOURCE_UNVERIFIED: '이전 문항의 출처를 확인할 수 없습니다. 지원되는 새 연습을 시작하세요.',
     RETEST_NOT_DUE: '재평가는 마지막 완료로부터 24시간 뒤에 열립니다. 표시된 가능 시각을 확인하세요.',
     INCOMPLETE_ASSESSMENT: '새 문제 평가의 모든 문항을 완료한 뒤 재평가할 수 있습니다.',
-    UNFINISHED_RUN: '진행 중인 연습이 있거나 상태를 확인할 수 없어 다음 단계를 시작하지 않았습니다. 다른 창에서 시작한 연습일 수 있으니 표시된 연습을 이어가거나, 연습 시작으로 직접 새 연습을 시작하세요.',
+    UNFINISHED_RUN: '진행 중인 연습이 있거나 상태를 확인할 수 없어 새 연습을 시작하지 않았습니다. 다른 창에서 시작한 연습일 수 있습니다. 표시된 연습을 끝낸 뒤 다시 시도하세요. 연습 시작을 누르면 진행 중인 연습을 버리고 새로 시작합니다.',
     FUTURE_EVIDENCE: '기록 시각의 근거가 유효하지 않아 점수를 표시하지 않습니다.',
     FUTURE_OR_INCONSISTENT_EVIDENCE: '기록 시각 또는 순서의 근거가 유효하지 않아 평가를 사용할 수 없습니다.',
     INCONSISTENT_RUN: '평가 기록이 일치하지 않아 점수를 표시하지 않습니다.',
@@ -231,14 +240,127 @@ export function formatSummary(summary = {}) {
   const allowed = verified(source);
   const goal = summary.goal;
   const goalAllowed = goal && (verified(goal.sourceIdentity) || goal.origin === 'default');
+  const enrollment = enrollmentView(summary.enrollment);
+  const assessments = (summary.assessments ?? []).map((run) => runSummary(run, allowed));
+  const retests = (summary.retests ?? []).map((run) => runSummary(run, allowed && (summary.assessments ?? []).some((base) => base.id === run.assessmentId && base.complete && !base.reason && verified(base.sourceIdentity) && JSON.stringify(base.sourceIdentity) === JSON.stringify(run.sourceIdentity))));
   return {
     source: formatSource(source), sourceShort: formatSourceShort(source), game: originSummary(summary.game, allowed), practice: originSummary(summary.practice, allowed),
     due: `${count(summary.bank?.dueCount)}개 오늘 복습 · 전체 ${count(summary.bank?.totalCount)}개${count(summary.bank?.graduatedCount) ? ` · 졸업 ${count(summary.bank.graduatedCount)}개` : ''}`,
     goal: goalAllowed ? `${goal.origin === 'game' ? '게임 기록' : goal.origin === 'practice' ? '연습 기록' : '기본 지원 상황'}에서 정한 목표: ${position(goal.spotKey?.split('-')[2])} · ${hand(goal.handClass)}의 기준 빈도 확인` : '확인된 근거가 없어 목표를 준비하지 못했습니다.',
-    assessments: (summary.assessments ?? []).map((run) => runSummary(run, allowed)),
-    retests: (summary.retests ?? []).map((run) => runSummary(run, allowed && (summary.assessments ?? []).some((base) => base.id === run.assessmentId && base.complete && !base.reason && verified(base.sourceIdentity) && JSON.stringify(base.sourceIdentity) === JSON.stringify(run.sourceIdentity)))),
+    assessments, retests,
+    cards: formatCards(summary, assessments, retests, enrollment),
+    enrollment, enrollmentLine: enrollmentLine(enrollment),
   };
 }
+// ---- Learning-effect enrollment on the cards (issue 335) ---------------------
+const CIRCLED = ['①', '②', '③', '④', '⑤'];
+/** One formatter for every time shown on the cards; null when it is not an instant. */
+export function formatWhen(iso) {
+  if (typeof iso !== 'string' || !Number.isFinite(Date.parse(iso))) return null;
+  return new Date(iso).toLocaleString('ko-KR', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function whenOf(iso) { return formatWhen(iso) ?? '시각 확인 불가'; }
+const circled = (slot) => CIRCLED[slot - 1] ?? String(slot);
+const SLOT_STATUS = { complete: '완료', UNANSWERED: '아직 확인된 응답 없음', INCOMPLETE_RUN: '미완료', BASELINE_INCOMPLETE: '기준 평가 미완료' };
+const slotStatusText = (status) => SLOT_STATUS[status] ?? '확인 불가';
+
+/** The server's enrollment slots as the page may use them: null (hidden), an
+ * unavailable marker, or a shape-checked active view. A key that is absent
+ * (an older service) claims nothing. */
+export function enrollmentView(raw) {
+  if (raw === undefined || raw === null) return null;
+  if (!plain(raw) || raw.status !== 'active') return { status: 'unavailable' };
+  const slots = (rows, keys) => Array.isArray(rows) && rows.every((row) => plain(row) && Number.isSafeInteger(row.slot) && row.slot > 0
+    && keys.every((key) => row[key] === null || typeof row[key] === 'string') && typeof row.status === 'string');
+  if (isoTime(raw.postOpensAt) === null || isoTime(raw.postClosesAt) === null || !slots(raw.baselines, ['runId']) || !slots(raw.post, ['runId'])
+    || !slots(raw.retention, ['runId', 'assessmentId']) || raw.retention.some((row) => typeof row.current !== 'boolean')) return { status: 'unavailable' };
+  return { status: 'active', postOpen: raw.postOpen === true, postOpensAt: raw.postOpensAt, postClosesAt: raw.postClosesAt,
+    baselines: raw.baselines.map((row) => ({ slot: row.slot, runId: row.runId, status: row.status })),
+    post: raw.post.map((row) => ({ slot: row.slot, runId: row.runId, status: row.status })),
+    retention: raw.retention.map((row) => ({ slot: row.slot, assessmentId: row.assessmentId, runId: row.runId, status: row.status, current: row.current })) };
+}
+/** The line above the cards, or null when nothing is to be said. */
+function enrollmentLine(enrollment) {
+  if (!enrollment) return null;
+  if (enrollment.status !== 'active') return '학습 효과 평가 등록 정보를 확인하지 못해 등록 기준 평가를 표시하지 않습니다.';
+  return `학습 효과 평가 진행 중 · 사후 기간 ${whenOf(enrollment.postOpensAt)} ~ ${whenOf(enrollment.postClosesAt)} · 기준 평가마다 지연 재평가 1회`;
+}
+/** Badge and advance note of one card (first matching row of the design table).
+ * Units are kept apart: slot choice, item exclusion and exposure are not mixed. */
+export function cardEnrollment(card, enrollment) {
+  const none = { badge: null, note: null };
+  if (enrollment?.status !== 'active' || !card) return none;
+  if (card.kind === 'retest') {
+    const kept = enrollment.retention.find((row) => row.runId !== null && row.runId === card.id);
+    return kept ? { badge: `등록 기준 ${circled(kept.slot)} 지연 재평가`, note: '이번 등록의 지연 재평가 슬롯으로 선택된 실행입니다.' } : none;
+  }
+  const open = whenOf(enrollment.postOpensAt);
+  const close = whenOf(enrollment.postClosesAt);
+  const base = enrollment.baselines.find((row) => row.runId !== null && row.runId === card.id);
+  if (base) {
+    const badge = `등록 기준 ${circled(base.slot)}`;
+    const kept = enrollment.retention.find((row) => row.slot === base.slot);
+    if (!enrollment.postOpen) {
+      return { badge, note: `학습 효과 평가의 기준 평가입니다. 지연 재평가는 사후 기간(${open} ~ ${close})에 하세요. 그 전에 재평가해 답한 문항은 지연 유지 측정에서 제외됩니다.` };
+    }
+    if (base.status !== 'complete') {
+      return { badge, note: '이 기준 평가는 사후 기간이 시작되기 전에 완료되지 않아 지연 유지 측정에 쓰이지 않습니다. 재평가는 연습으로만 기록됩니다.' };
+    }
+    if (kept?.status === 'NOT_STARTED') {
+      return { badge, note: `이번 등록의 지연 재평가 슬롯은 사후 기간에 이 평가를 처음 재평가한 실행으로 정해집니다. 시작하면 ${close} 전에 끝까지 풀어 주세요.` };
+    }
+    if (kept?.current === true) return { badge, note: '이 기준의 지연 재평가가 진행 중입니다. 이어서 끝까지 풀어 주세요.' };
+    return { badge, note: `이 기준의 지연 재평가 슬롯은 이미 정해졌습니다(${slotStatusText(kept?.status)}). 다시 재평가해도 이번 등록의 슬롯으로 선택되지 않습니다.` };
+  }
+  const post = enrollment.post.find((row) => row.runId !== null && row.runId === card.id);
+  if (post) return { badge: `사후 평가 ${circled(post.slot)}`, note: '학습 효과 평가의 사후 평가입니다. 이 평가의 재평가는 이번 등록의 지연 재평가 슬롯으로 선택되지 않습니다.' };
+  return { badge: null, note: '이번 등록의 기준 평가가 아닙니다. 재평가해도 지연 재평가 슬롯으로 선택되지 않습니다.' };
+}
+/** New-problem cards newest first (by start), then the delayed retests newest
+ * first; an invalid start time sorts last, ties keep the summary order. */
+function formatCards(summary, assessments, retests, enrollment) {
+  const raws = summary.assessments ?? [];
+  const startedAtOf = new Map(raws.map((run) => [run.id, run.startedAt]));
+  const newest = (entries) => entries.map((entry, index) => ({ entry, index, time: isoTime(entry.raw.startedAt) }))
+    .sort((a, b) => (a.time === null) - (b.time === null) || (b.time ?? 0) - (a.time ?? 0) || a.index - b.index).map(({ entry }) => entry);
+  const list = [
+    ...newest(raws.map((raw, index) => ({ raw, view: assessments[index], kind: 'assessment' }))),
+    ...newest((summary.retests ?? []).map((raw, index) => ({ raw, view: retests[index], kind: 'retest' }))),
+  ];
+  const seen = new Set();
+  const cards = [];
+  for (const { raw, view, kind } of list) {
+    if (seen.has(view.id)) continue;
+    seen.add(view.id);
+    const startedWhen = formatWhen(raw.startedAt);
+    const targetWhen = kind === 'retest' ? formatWhen(startedAtOf.get(raw.assessmentId)) : null;
+    const card = { key: view.id, kind, id: view.id, assessmentId: view.assessmentId, title: view.title, rate: view.rate, samples: view.samples,
+      status: view.status, baseline: view.baseline, availableAt: view.availableAt, canRetest: kind === 'assessment' && view.canRetest,
+      meta: [startedWhen ? `${startedWhen} 시작` : null, verified(raw.sourceIdentity) ? `기준표 v${raw.sourceIdentity.version}` : '출처 확인 불가'].filter(Boolean).join(' · '),
+      relation: kind === 'retest' ? (targetWhen ? `${targetWhen} 평가의 재평가` : '이전 평가의 재평가') : null };
+    cards.push({ ...card, ...cardEnrollment(card, enrollment) });
+  }
+  return cards;
+}
+
+/** The first enrollment boundary strictly after `nowMs`, or null. */
+export function nextEnrollmentBoundary(enrollment, nowMs) {
+  const view = enrollmentView(enrollment);
+  if (view?.status !== 'active') return null;
+  const later = [view.postOpensAt, view.postClosesAt].map(isoTime).filter((time) => time > nowMs);
+  return later.length ? Math.min(...later) : null;
+}
+/** Did a boundary pass between `sinceMs` (when the summary was received) and `nowMs`? */
+export function enrollmentBoundaryCrossed(enrollment, sinceMs, nowMs) {
+  const view = enrollmentView(enrollment);
+  if (view?.status !== 'active') return false;
+  return [view.postOpensAt, view.postClosesAt].map(isoTime).some((time) => time > sinceMs && time <= nowMs);
+}
+const MAX_TIMER_MS = 2 ** 31 - 1;
+/** A setTimeout delay toward a boundary; beyond the timer's limit it re-arms in pieces. */
+export const boundaryDelay = (boundaryMs, nowMs) => Math.min(Math.max(0, boundaryMs - nowMs), MAX_TIMER_MS);
+export const ENROLLMENT_CHANGED_NOTICE = '학습 효과 평가 일정이 바뀌어 안내를 새로 고쳤습니다. 다시 확인하고 시작하세요.';
+
 // ---- Next step (coaching-quality design decision 4) -------------------------
 // Everything below reads the raw /api/summary counts and identities, never the
 // formatted strings, and only describes an action: starting one stays an
@@ -296,21 +418,29 @@ export function planNextStep(summary) {
   const coverage = coverageGuidance(summary);
   const notes = [];
   const done = (plan) => ({ measured: false, mode: null, selectors: null, notes, coverage, ...plan });
+  const view = enrollmentView(summary?.enrollment);
+  const enrolled = view?.status === 'active' ? view : null;
 
-  const due = rawCount(summary?.bank?.dueCount);
-  if (source && due > 0) {
-    return done({ kind: 'daily', mode: 'daily', selectors: { mode: 'daily', source },
-      label: '오늘 복습 시작 (연습)', title: `복습 시각이 된 항목이 ${due}개 있습니다`,
-      detail: `복습할 항목이 있어 가장 먼저 제안합니다. ${NEXT_PRACTICE_NOTE} ${NEXT_RECHECK_NOTE}` });
-  }
-
+  // The learning-effect enrollment (issue 335): before the post window the
+  // enrolled baselines are not offered for retest; inside it, a baseline whose
+  // retention slot is still open comes before everything else.
+  const isBaseline = (run) => Boolean(enrolled) && enrolled.baselines.some((row) => row.runId === run.id);
+  const measuredSlot = (run) => {
+    if (!enrolled?.postOpen) return false;
+    const base = enrolled.baselines.find((row) => row.runId === run.id);
+    return base?.status === 'complete' && enrolled.retention.some((row) => row.slot === base.slot && row.status === 'NOT_STARTED');
+  };
   let candidate = null;
+  let measured = null;
+  let withheld = false;
+  const loopNotes = [];
   for (const run of Array.isArray(summary?.assessments) ? summary.assessments : []) {
     if (!plain(run) || typeof run.id !== 'string' || !run.id || run.mode !== 'assessment' || run.assessmentId !== undefined
       || run.complete !== true || run.reason || !knownSource(run.sourceIdentity)) continue;
+    if (isBaseline(run) && !enrolled.postOpen) { withheld = true; continue; }
     if (run.retest?.eligible === false) {
       const when = availableAt(run.retest);
-      if (when) notes.push(`재평가 가능 시각: ${when}`);
+      if (when) loopNotes.push(`재평가 가능 시각: ${when}`);
       continue;
     }
     if (run.retest?.eligible !== true) continue;
@@ -319,12 +449,31 @@ export function planNextStep(summary) {
     const completed = isoTime(run.completedAt);
     if (completed === null) continue;
     if (!candidate || completed >= candidate.completed) candidate = { run, completed };
+    if (measuredSlot(run) && (!measured || completed >= measured.completed)) measured = { run, completed };
   }
-  if (candidate) {
-    const version = knownSource(candidate.run.sourceIdentity).version;
-    return done({ kind: 'retest', mode: 'retest', measured: true, selectors: { mode: 'retest', assessmentId: candidate.run.id },
+  const retestPlan = (pick, detail) => {
+    const version = knownSource(pick.run.sourceIdentity).version;
+    return done({ kind: 'retest', mode: 'retest', measured: true, selectors: { mode: 'retest', assessmentId: pick.run.id },
       label: '지연 재평가 시작 (측정)', title: '완료한 평가를 같은 문항으로 다시 확인할 수 있습니다',
-      detail: `기준표 v${version}으로 푼 그 평가의 같은 문항을 다시 풉니다. 측정 실행으로 기록되며, 결과는 같은 평가끼리만 비교합니다. ${STUDY_MODE_HELP.retest}` });
+      detail: detail ?? `기준표 v${version}으로 푼 그 평가의 같은 문항을 다시 풉니다. 측정 실행으로 기록되며, 결과는 같은 평가끼리만 비교합니다. ${STUDY_MODE_HELP.retest}` });
+  };
+  if (measured) {
+    notes.push(...loopNotes);
+    return retestPlan(measured, `이번 등록의 지연 재평가 슬롯은 사후 기간에 이 평가를 처음 재평가한 실행으로 정해집니다. 시작하면 ${whenOf(enrolled.postClosesAt)} 전에 끝까지 풀어 주세요.`);
+  }
+
+  const due = rawCount(summary?.bank?.dueCount);
+  if (source && due > 0) {
+    return done({ kind: 'daily', mode: 'daily', selectors: { mode: 'daily', source },
+      label: '오늘 복습 시작 (연습)', title: `복습 시각이 된 항목이 ${due}개 있습니다`,
+      detail: `복습할 항목이 있어 가장 먼저 제안합니다. ${NEXT_PRACTICE_NOTE} ${NEXT_RECHECK_NOTE}` });
+  }
+
+  notes.push(...loopNotes);
+  if (withheld) notes.push(`등록 기준 평가의 지연 재평가는 사후 기간(${whenOf(enrolled.postOpensAt)}부터)에 제안합니다.`);
+  if (candidate) {
+    if (enrolled?.postOpen) notes.push('이 재평가는 이번 등록의 지연 재평가 슬롯으로 선택되지 않습니다.');
+    return retestPlan(candidate);
   }
 
   if (!source) return done({ kind: 'none', title: '다음 단계를 제안할 수 없습니다',
@@ -361,6 +510,11 @@ export function nextStepGate(state, { authenticated = true } = {}) {
   if (unfinishedRun(state)) return { code: 'UNFINISHED', text: '진행 중인 연습이 있습니다. 끝낸 뒤 다음 단계를 시작할 수 있습니다.' };
   return null;
 }
+/** The same gate for a card's retest button, with the card's own wording for an unfinished run. */
+export function cardGate(state, options = {}) {
+  const gate = nextStepGate(state, options);
+  return gate?.code === 'UNFINISHED' ? { ...gate, text: '진행 중인 연습이 있습니다. 끝낸 뒤 재평가할 수 있습니다.' } : gate;
+}
 /** The plan plus whether its action may be started right now. */
 export function nextStepView(summary, state, options = {}) {
   const plan = planNextStep(summary);
@@ -377,7 +531,12 @@ export function completionGuidance(state, summary) {
   const mode = STUDY_MODES[session.mode] ?? '연습';
   const own = (summary?.assessments ?? []).find((run) => run?.id === session.studyRun?.id);
   const when = availableAt(own?.retest);
-  const retest = session.mode === 'assessment'
+  const view = enrollmentView(summary?.enrollment);
+  const baseline = view?.status === 'active' && !view.postOpen && session.mode === 'assessment'
+    && view.baselines.some((row) => row.runId !== null && row.runId === session.studyRun?.id);
+  const retest = baseline
+    ? `지연 재평가: 이 평가는 학습 효과 평가의 등록 기준입니다. 지연 재평가는 사후 기간(${whenOf(view.postOpensAt)} ~ ${whenOf(view.postClosesAt)})에 하세요.`
+    : session.mode === 'assessment'
     ? `지연 재평가: 이 평가는 완료 24시간 뒤부터 같은 문항으로 다시 풀 수 있습니다${when ? ` (가능 시각 ${when})` : ''}.`
     : session.mode === 'retest'
       ? '지연 재평가: 같은 평가를 다시 재평가하려면 마지막 완료로부터 24시간이 지나야 합니다.'
