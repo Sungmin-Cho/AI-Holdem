@@ -424,18 +424,20 @@ export function initGameDir(gameDir, flags, deps = {}) {
     if (opponentRuntime === 'policy') {
       state.policySeed = randomBytes(32).toString('hex');
     }
+    // Row order stays host, participants, AIs; `seat` is the real index in state.seats.
+    const seatOf = (playerId) => state.seats.findIndex((seat) => seat.playerId === playerId);
     const players = [
-      { playerId: 'user', seat: 0, name: resolvedHostName, kind: 'human' },
-      ...participantList.map((row, index) => ({
+      { playerId: 'user', seat: seatOf('user'), name: resolvedHostName, kind: 'human' },
+      ...participantList.map((row) => ({
         playerId: row.playerId,
-        seat: index + 1,
+        seat: seatOf(row.playerId),
         name: row.name.trim(),
         kind: 'human',
         participantId: row.participantId,
       })),
-      ...personas.map((persona, index) => ({
+      ...personas.map((persona) => ({
         ...persona,
-        seat: 1 + participantList.length + index,
+        seat: seatOf(persona.playerId),
         kind: 'ai',
       })),
     ];

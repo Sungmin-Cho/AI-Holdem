@@ -916,6 +916,10 @@ export async function runUiJourney(outDir,{ci=false}={}) {
     await browser(['open',`${origin}/?token=${token}`]);await browser(['wait','#board .card[role=img]']);
     const reloaded=await evaluate(HELD);
     assert.ok(reloaded.overlay&&/^최종 결과 \d+초$/.test(reloaded.countdown)&&reloaded.skip===false,JSON.stringify(reloaded));
+    // agent-browser waits at most 25 s (its default action timeout) and the hold runs 30 s from
+    // endingAt, so a fast runner reaches this line with more than 25 s left. Sleep until 5 s
+    // before the end; an overlay opened early still fails the assertion below.
+    await new Promise((resolve)=>setTimeout(resolve,Math.max(0,endingAt+25000-Date.now())));
     await browser(['wait','--fn',"document.querySelector('#review-overlay')?.hidden===false"]);
     assert.ok(Date.now()>=endingAt+29000,'the final result waited for the hold');
     assert.equal(await evaluate("document.querySelector('.hand-result-countdown').textContent===''&&document.querySelector('.hand-result-skip').hidden"),true);

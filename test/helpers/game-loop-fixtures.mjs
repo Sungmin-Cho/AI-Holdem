@@ -473,9 +473,29 @@ export async function terminateIfAlive(child) {
   try { await Promise.race([exit, bound]); } finally { clearTimeout(timer); }
 }
 
+// Multiplayer init shuffles the seats. Scripted tests pin the host, participants (h1…),
+// AIs (p1…) ring and keep players.json's seat indexes in step with it. A solo ring is
+// already in that order, and its players.json is left untouched.
+function pinHostFirstSeats(gameDir, state) {
+  const rank = (seat) => (seat.playerId === 'user' ? 0 : seat.kind === 'ai' ? 2 : 1);
+  const ordinal = (seat) => Number(String(seat.playerId).replace(/\D+/g, '')) || 0;
+  state.seats = state.seats
+    .map((seat, at) => ({ seat, at }))
+    .sort((a, b) => rank(a.seat) - rank(b.seat) || ordinal(a.seat) - ordinal(b.seat) || a.at - b.at)
+    .map(({ seat }) => seat);
+  const playersPath = path.join(gameDir, 'players.json');
+  const players = fs.existsSync(playersPath) ? readJson(playersPath) : null;
+  if (!Array.isArray(players)) return;
+  const seatOf = (playerId) => state.seats.findIndex((seat) => seat.playerId === playerId);
+  if (players.every((row) => row.seat === seatOf(row.playerId))) return;
+  for (const row of players) row.seat = seatOf(row.playerId);
+  fs.writeFileSync(playersPath, JSON.stringify(players));
+}
+
 export function putAiFirst(gameDir) {
   const statePath = path.join(gameDir, 'state.json');
   const state = readJson(statePath);
+  pinHostFirstSeats(gameDir, state);
   state.button = 0;
   fs.writeFileSync(statePath, JSON.stringify(state));
 }
@@ -659,6 +679,8 @@ export async function seedHostBustMultiGame(gameDir) {
   fs.rmSync(participantsFile, { force: true });
   const statePath = path.join(gameDir, 'state.json');
   const seeded = readJson(statePath);
+  // The scripted hands below assume the user, h1, h2 ring.
+  pinHostFirstSeats(gameDir, seeded);
   // startHand advances the button first: from h2 it lands on the host (SB h1, BB h2).
   seeded.button = seeded.seats.findIndex((seat) => seat.playerId === 'h2');
   fs.writeFileSync(statePath, JSON.stringify(seeded));

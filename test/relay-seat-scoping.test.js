@@ -81,21 +81,25 @@ test('DECISION_CLOSED는 같은 결정만 거부한다', () => {
   assert.equal(withActionGate(dir, epoch, () => 'ok', { decisionId: 'd-1-preflop-1' }), 'ok');
 });
 
-async function multiRelay(t, serverOptions = {}) {
+// Multiplayer seats are shuffled by default; the fixture pins `seatOrder` (host first
+// unless a test asks for another ring) and records the matching players.json seats.
+async function multiRelay(t, serverOptions = {}, { seatOrder = ['user', 'h1', 'p1'] } = {}) {
   const dir = createOwnedTempDir('holdem-relay-multi');
   const state = createGame({
     aiCount: 1,
     participants: people(),
     hostName: '호스트',
     names: ['AI'],
+    seatOrder,
   });
   state.button = state.seats.length - 1;
   const started = startHand(state, { deck: [...newDeck()] }).state;
   fs.mkdirSync(dir, { recursive: true });
+  const seatOf = (playerId) => started.seats.findIndex((seat) => seat.playerId === playerId);
   writeJsonAtomic(path.join(dir, 'players.json'), [
-    { playerId: 'user', seat: 0, name: '호스트', kind: 'human' },
-    { playerId: 'h1', seat: 1, name: '민준', kind: 'human', participantId: 'part-1' },
-    { playerId: 'p1', seat: 2, name: 'AI', kind: 'ai' },
+    { playerId: 'user', seat: seatOf('user'), name: '호스트', kind: 'human' },
+    { playerId: 'h1', seat: seatOf('h1'), name: '민준', kind: 'human', participantId: 'part-1' },
+    { playerId: 'p1', seat: seatOf('p1'), name: 'AI', kind: 'ai' },
   ]);
   saveState(dir, started);
   const relay = await startServer({ gameDir: dir, port: 0, token: TOKEN, controlProtocolVersion: 1, ...serverOptions });
@@ -173,8 +177,7 @@ test('ui-snapshot history에는 views가 없고 구 형식은 user view로 복�
   assert.equal('studyUrl' in projected, false);
 });
 
-test('게시 후 디스크 ui-snapshot에는 views 키와 참가자 홀이 없다', async (t) => {
-  const f = await multiRelay(t);
+async function assertPublishedSnapshotKeepsSeatViews(f) {
   const engine = JSON.parse(fs.readFileSync(path.join(f.dir, 'state.json'), 'utf8'));
   engine.sessionToken = TOKEN;
   saveState(f.dir, engine);
@@ -199,7 +202,28 @@ test('게시 후 디스크 ui-snapshot에는 views 키와 참가자 홀이 없�
     // Card values must be absent; the card-free epoch digest may contain "2c".
     assert.equal(blob.includes(JSON.stringify(card)), false, card);
   }
+  // The participant channel carries its own seat's holes and never the host's.
+  const guest = await f.http('/api/snapshot', { seat: 'h1' });
+  assert.equal(guest.status, 200, JSON.stringify(guest.json));
+  assert.deepEqual(guest.json.view.myCards, engine.hand.holes.h1);
+  const guestBlob = JSON.stringify(guest.json);
+  for (const card of engine.hand.holes.user) {
+    assert.equal(guestBlob.includes(JSON.stringify(card)), false, card);
+  }
+}
+
+test('게시 후 디스크 ui-snapshot에는 views 키와 참가자 홀이 없다', async (t) => {
+  await assertPublishedSnapshotKeepsSeatViews(await multiRelay(t));
 });
+
+// Random seating can put the host last, an AI between the humans, or the ring in the
+// other direction (user → p1 → h1). The publication checks and the on-disk snapshot
+// must not lean on the host-first ring.
+for (const seatOrder of [['p1', 'user', 'h1'], ['h1', 'p1', 'user'], ['user', 'p1', 'h1'], ['p1', 'h1', 'user']]) {
+  test(`좌석 순서 ${seatOrder.join(',')}에서도 게시가 통과하고 디스크에 참가자 홀이 없다`, async (t) => {
+    await assertPublishedSnapshotKeepsSeatViews(await multiRelay(t, {}, { seatOrder }));
+  });
+}
 
 // CONTROL_BUSY retries yield to the event loop; a publication in between can hand
 // the turn to another seat. The seat check must be repeated inside the locked

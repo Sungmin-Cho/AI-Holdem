@@ -75,6 +75,7 @@ export function createGame({
   participants,
   hostName,
   button,
+  seatOrder,
 } = {}) {
   const resolvedMode = mode ?? 'tournament';
   const timed = levelMinutes != null;
@@ -151,9 +152,29 @@ export function createGame({
       kind: 'ai',
     });
   }
+  if (seatOrder !== undefined) {
+    const byId = new Map(seats.map((seat) => [seat.playerId, seat]));
+    const exact = Array.isArray(seatOrder)
+      && seatOrder.length === seats.length
+      && new Set(seatOrder).size === seats.length
+      // Array.from visits the holes of a sparse array, which every() skips.
+      && Array.from(seatOrder).every((id) => byId.has(id));
+    if (!exact) {
+      throwBadConfig('seatOrder는 모든 좌석 playerId를 정확히 한 번씩 담은 배열이어야 합니다.');
+    }
+    const ordered = seatOrder.map((id) => byId.get(id));
+    seats.splice(0, seats.length, ...ordered);
+  } else if (K >= 1) {
+    // Fisher-Yates with a CSPRNG: multiplayer seats are drawn uniformly at random.
+    for (let i = seats.length - 1; i > 0; i -= 1) {
+      const j = randomInt(i + 1);
+      [seats[i], seats[j]] = [seats[j], seats[i]];
+    }
+  }
   const stats = {};
   for (const seat of seats) stats[seat.playerId] = emptyStats();
   // 시뮬레이션처럼 결정적이어야 하는 호출자만 첫 버튼 좌석을 넘긴다. 없으면 무작위다.
+  // 참가자가 있는 게임은 좌석 순서도 무작위로 섞으며, 결정적이어야 하는 호출자는 seatOrder를 넘긴다.
   if (button != null && (!Number.isInteger(button) || button < 0 || button >= seats.length)) {
     throwBadConfig('button은 좌석 번호여야 합니다.');
   }

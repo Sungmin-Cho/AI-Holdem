@@ -18,6 +18,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === engine) {
     if (max === undefined) { max = min; min = 0; }
     // init also shuffles unused persona pools before choosing the button.
     // Pin that command separately so those unrelated draws cannot move the button.
+    // max - 1 also keeps the multiplayer seat shuffle (Fisher-Yates) at the identity,
+    // so the journey's seats stay host, participants, AIs.
     if (process.argv[2] === 'init') return max - 1;
     return min + Math.floor(rng() * (max - min));
   };
