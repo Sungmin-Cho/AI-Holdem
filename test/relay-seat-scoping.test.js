@@ -216,10 +216,11 @@ test('게시 후 디스크 ui-snapshot에는 views 키와 참가자 홀이 없�
   await assertPublishedSnapshotKeepsSeatViews(await multiRelay(t));
 });
 
-// Random seating can put the host last or an AI between the humans. The publication
-// checks and the on-disk snapshot must not lean on the host-first ring.
-for (const seatOrder of [['p1', 'user', 'h1'], ['h1', 'p1', 'user']]) {
-  test(`호스트가 맨 앞이 아닌 좌석(${seatOrder.join(',')})에서도 게시가 통과하고 디스크에 참가자 홀이 없다`, async (t) => {
+// Random seating can put the host last, an AI between the humans, or the ring in the
+// other direction (user → p1 → h1). The publication checks and the on-disk snapshot
+// must not lean on the host-first ring.
+for (const seatOrder of [['p1', 'user', 'h1'], ['h1', 'p1', 'user'], ['user', 'p1', 'h1'], ['p1', 'h1', 'user']]) {
+  test(`좌석 순서 ${seatOrder.join(',')}에서도 게시가 통과하고 디스크에 참가자 홀이 없다`, async (t) => {
     await assertPublishedSnapshotKeepsSeatViews(await multiRelay(t, {}, { seatOrder }));
   });
 }

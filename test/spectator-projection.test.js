@@ -122,9 +122,9 @@ test('full cards only reach observer snapshot/SSE and do not persist in host his
   await assertFullCardsOnlyReachObserver(t,await fixture(t));
 });
 
-// Random seating can put the host last or an AI between the humans.
-for(const seatOrder of [['p1','user','h1'],['h1','p1','user']]) {
-  test(`full cards only reach the observer when the host is not seated first (${seatOrder.join(',')})`,async t=>{
+// Random seating can put the host last, an AI between the humans, or the ring in the other direction.
+for(const seatOrder of [['p1','user','h1'],['h1','p1','user'],['user','p1','h1'],['p1','h1','user']]) {
+  test(`full cards only reach the observer in seat order ${seatOrder.join(',')}`,async t=>{
     await assertFullCardsOnlyReachObserver(t,await fixture(t,{seatOrder}));
   });
 }
