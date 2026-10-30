@@ -728,6 +728,10 @@ test('enrollment: before the post window the enrolled baselines are withheld fro
   const other = planNextStep(withBaselines(enrolled(), { assessments: [assessment('b1', { completedAt: iso(-60) }), assessment('x', { completedAt: iso(-10) })] }));
   assert.equal(other.kind, 'retest'); assert.deepEqual(other.selectors, { mode: 'retest', assessmentId: 'x' });
   assert.deepEqual(other.notes, [`등록 기준 평가의 지연 재평가는 사후 기간(${formatWhen(iso(100))}부터)에 제안합니다.`]);
+  // Today's review still comes first before the post window, and the note is said there too, once.
+  const daily = planNextStep(withBaselines(enrolled(), { bank: { totalCount: 2, dueCount: 1, graduatedCount: 0 } }));
+  assert.equal(daily.kind, 'daily');
+  assert.deepEqual(daily.notes, [`등록 기준 평가의 지연 재평가는 사후 기간(${formatWhen(iso(100))}부터)에 제안합니다.`]);
   // No enrollment, null, unavailable or an older service: unchanged behaviour.
   for (const enrollment of [undefined, null, { status: 'unavailable', reasons: ['X'] }]) {
     const plain = planNextStep(withBaselines(enrollment));

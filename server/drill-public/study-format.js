@@ -470,6 +470,8 @@ export function planNextStep(summary) {
     return retestPlan(measured, `이번 등록의 지연 재평가 슬롯은 사후 기간에 이 평가를 처음 재평가한 실행으로 정해집니다. 시작하면 ${whenOf(enrolled.postClosesAt)} 전에 끝까지 풀어 주세요.`);
   }
 
+  // Said whichever plan follows, today's review included.
+  if (withheld) notes.push(`등록 기준 평가의 지연 재평가는 사후 기간(${whenOf(enrolled.postOpensAt)}부터)에 제안합니다.`);
   const due = rawCount(summary?.bank?.dueCount);
   if (source && due > 0) {
     return done({ kind: 'daily', mode: 'daily', selectors: { mode: 'daily', source },
@@ -477,8 +479,7 @@ export function planNextStep(summary) {
       detail: `복습할 항목이 있어 가장 먼저 제안합니다. ${NEXT_PRACTICE_NOTE} ${NEXT_RECHECK_NOTE}` });
   }
 
-  notes.push(...loopNotes);
-  if (withheld) notes.push(`등록 기준 평가의 지연 재평가는 사후 기간(${whenOf(enrolled.postOpensAt)}부터)에 제안합니다.`);
+  notes.unshift(...loopNotes);
   if (candidate) {
     if (enrolled?.postOpen) notes.push('이 재평가는 이번 등록의 지연 재평가 슬롯으로 선택되지 않습니다.');
     return retestPlan(candidate);
