@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMiniDocument } from './helpers/mini-dom.js';
-import { createRunCards } from '../server/drill-public/run-cards.js';
+import { createRunCards } from '../server/drill-public/drill.js';
 
 const card = (key, overrides = {}) => ({ key, kind: 'assessment', id: key, assessmentId: undefined, title: '새 문제 평가', rate: '60%', samples: '10 / 10문항',
   status: '완료', baseline: null, availableAt: null, canRetest: true, meta: '2026. 10. 9. 시작 · 기준표 v3.0.0', relation: null, badge: null, note: null, ...overrides });
