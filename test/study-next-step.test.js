@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import {
-  planNextStep, nextStepGate, nextStepView, unfinishedRun, coverageGuidance, completionGuidance, drillRequest, formatStudyError, formatWhen,
+  planNextStep, nextStepGate, nextStepView, unfinishedRun, coverageGuidance, completionGuidance, drillRequest, formatStudyError, formatWhen, cardGate,
 } from '../server/drill-public/study-format.js';
 import { createStudyController } from '../server/drill-public/drill.js';
 import { startDrillServer } from '../tools/drill-server.js';
@@ -776,4 +776,76 @@ test('enrollment: completion guidance and the plan read the same enrollment only
 test('the refused-start wording keeps "진행 중인 연습이 있거나" and tells what Start does', () => {
   const text = formatStudyError({ code: 'UNFINISHED_RUN' });
   assert.equal(text, '진행 중인 연습이 있거나 상태를 확인할 수 없어 새 연습을 시작하지 않았습니다. 다른 창에서 시작한 연습일 수 있습니다. 표시된 연습을 끝낸 뒤 다시 시도하세요. 연습 시작을 누르면 진행 중인 연습을 버리고 새로 시작합니다.');
+});
+
+// ── issue 335: the card path over a real backend, in the two-tab structure ────
+
+const runLogOf = (storeDir) => JSON.parse(fs.readFileSync(path.join(storeDir, '.training', 'study-run-log.json'), 'utf8')).rows;
+const CARD_SHAPE = (assessmentId) => ({ mode: 'retest', assessmentId, protectUnfinished: true });
+
+test('a card retest start is protected on the server: a second request, another tab and a replay leave one start row and no replace row', async () => {
+  const backend = await realBackend();
+  try {
+    const a = tab(backend, 'a');
+    const b = tab(backend, 'b');
+    await a.controller.restore();
+    const first = await a.controller.start({ mode: 'assessment', source: SOURCE });
+    assert.equal(a.controller.state.error, null, JSON.stringify(backend.failures));
+    const assessmentId = readSessionFile(backend.storeDir).studyRun.id;
+    await answerAll(backend.storeDir);
+    // Another run becomes the current session (an unprotected Start), so the finished assessment's events can be aged
+    // without disturbing a live session: shift them back two days (events carry no time-bound hash).
+    await startDrill(backend.storeDir, { mode: 'free', seed: 'between', idempotencyKey: 'between' });
+    await answerAll(backend.storeDir);
+    const eventsFile = path.join(backend.storeDir, '.training', 'profile-events.jsonl');
+    const shifted = fs.readFileSync(eventsFile, 'utf8').trim().split('\n').map((line) => {
+      const row = JSON.parse(line);
+      if (row.studyRun?.id !== assessmentId) return line;
+      row.appliedAt = new Date(Date.parse(row.appliedAt) - 2 * 86_400_000).toISOString();
+      row.studyRun.startedAt = new Date(Date.parse(row.studyRun.startedAt) - 2 * 86_400_000).toISOString();
+      return JSON.stringify(row);
+    });
+    fs.rmSync(path.join(backend.storeDir, '.training', 'profile.json'), { force: true });
+    fs.writeFileSync(eventsFile, `${shifted.join('\n')}\n`);
+    await a.controller.restore(); await a.controller.next();
+    await b.controller.restore(); await b.controller.next();
+    assert.equal(unfinishedRun(a.controller.state), false);
+    assert.equal(unfinishedRun(b.controller.state), false);
+    const startsBefore = runLogOf(backend.storeDir).filter((row) => row.type === 'start' && row.mode === 'assessment').length;
+    assert.equal(startsBefore, 1);
+    assert.ok(first);
+
+    // The card sends exactly this shape through the controller (plus seed and idempotencyKey).
+    await a.controller.start({ mode: 'retest', assessmentId }, { protectUnfinished: true });
+    assert.equal(a.controller.state.error, null, JSON.stringify(backend.failures));
+    const sent = backend.requests.filter((request) => request.pathname === '/api/start').at(-1);
+    assert.deepEqual(Object.keys(sent.body).sort(), ['assessmentId', 'idempotencyKey', 'mode', 'protectUnfinished', 'seed']);
+    assert.deepEqual({ mode: sent.body.mode, assessmentId: sent.body.assessmentId, protectUnfinished: sent.body.protectUnfinished }, CARD_SHAPE(assessmentId));
+    const original = readSessionFile(backend.storeDir);
+    assert.equal(original.mode, 'retest');
+    assert.equal(original.studyRun.assessmentId, assessmentId);
+    const originalBytes = readSessionBytes(backend.storeDir);
+    // The same tab now refuses locally; the card gate says why.
+    assert.equal(cardGate(a.controller.state).code, 'UNFINISHED');
+
+    // A second request of the same shape (a double click that got through) and another tab's request are refused by the server.
+    const second = await backend.call('/api/start', { method: 'POST', body: { ...CARD_SHAPE(assessmentId), seed: 'again', idempotencyKey: 'second-click' } });
+    assert.deepEqual([second.httpStatus, second.code, second.ok], [409, 'UNFINISHED_RUN', false]);
+    await b.controller.start({ mode: 'retest', assessmentId }, { protectUnfinished: true });
+    assert.equal(b.controller.state.error.code, 'UNFINISHED_RUN');
+    assert.ok(readSessionBytes(backend.storeDir).equals(originalBytes), 'the session file is byte-identical');
+    assert.equal(readSessionFile(backend.storeDir).sessionId, original.sessionId);
+    assert.equal(readSessionFile(backend.storeDir).studyRun.id, original.studyRun.id, 'the run id is kept');
+
+    // A retry with the same idempotency key returns the same run.
+    const replay = await backend.call('/api/start', { method: 'POST', body: sent.body });
+    assert.equal(replay.ok, true, JSON.stringify(replay));
+    assert.equal(readSessionFile(backend.storeDir).studyRun.id, original.studyRun.id);
+
+    // The ledger, read from the file: exactly one retest start for this run and no replacement at all.
+    const rows = runLogOf(backend.storeDir);
+    assert.equal(rows.filter((row) => row.type === 'start' && row.mode === 'retest').length, 1);
+    assert.equal(rows.find((row) => row.type === 'start' && row.mode === 'retest').runId, original.studyRun.id);
+    assert.equal(rows.filter((row) => row.type === 'replace').length, 0);
+  } finally { await backend.close(); }
 });

@@ -179,6 +179,7 @@ test('the shipped drill client sends its token in the header, never in the URL',
     .replace("from '../public/help-panel.js'", `from ${JSON.stringify(new URL('../server/public/help-panel.js', import.meta.url).href)}`)
     .replace("from '../public/display-settings.js'", `from ${JSON.stringify(new URL('../server/public/display-settings.js', import.meta.url).href)}`)
     .replace("from './spot-chart.js'", `from ${JSON.stringify(new URL('../server/drill-public/spot-chart.js', import.meta.url).href)}`)
+    .replace("from './run-cards.js'", `from ${JSON.stringify(new URL('../server/drill-public/run-cards.js', import.meta.url).href)}`)
     .replace("from './pot-odds-drill.js'", `from ${JSON.stringify(new URL('../server/drill-public/pot-odds-drill.js', import.meta.url).href)}`)
     .replace(boundary, `  globalThis.__api = api; return;\n${boundary}`);
   const script = `
