@@ -5,8 +5,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import { startDrill } from '../tools/drill-cli.js';
-import { ENROLLMENT_FILE, buildReport, enroll, main, readEnrollments, readSnapshot, withdraw } from '../tools/learning-eval.js';
-import { readLedger } from '../tools/learning-ledgers.js';
+import { ENROLLMENT_FILE, buildReport, enroll, main, readEnrollmentView, readEnrollments, readSnapshot, withdraw } from '../tools/learning-eval.js';
+import { appendLedgerRows, readLedger } from '../tools/learning-ledgers.js';
+import { openContained } from '../tools/training-store.js';
+import { randomUUID } from 'node:crypto';
 import { PROTOCOL_SHA256 } from '../training/learning-effect.js';
 import { V3_REFERENCE_SOURCE } from '../shared/reference.js';
 
@@ -220,4 +222,107 @@ test('a recent-view file that is not an array or has any malformed row gives no 
   const chartLedger = readLedger(training(viewed), 'exposure').ledger;
   assert.equal(chartLedger.seed, 'unavailable');
   assert.equal(chartLedger.coverageFrom, chartLedger.createdAt);
+});
+
+// ── readEnrollmentView: 학습 화면의 등록 슬롯 뷰 ───────────────────────────────
+
+const T0 = '2026-10-01T00:00:00.000Z';
+// 동의 10-01, 개입 7일 → 사후 10-08 ~ 10-15, K=2.
+async function enrolledStore(name) {
+  const storeDir = createOwnedTempDir(name);
+  await enroll(storeDir, { consent: true, plan: { baselineRuns: 2 }, now: clock(T0) });
+  return storeDir;
+}
+const realReader = (root, name, maxBytes) => { try { return openContained(root, [name], { maxBytes }); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } };
+const runStart = (runId, iso, extra = {}) => ({ type: 'start', startId: randomUUID(), runId, mode: 'assessment', total: 10, startedAt: iso, sourceIdentity: V3_REFERENCE_SOURCE, ...extra });
+const replaceRow = (runId, iso) => ({ type: 'replace', startId: randomUUID(), at: iso, mode: 'free', replacedRunId: runId });
+
+test('readEnrollmentView: no open enrollment is null and reads only the enrollment file', async () => {
+  const none = createOwnedTempDir('view-none');
+  const names = [];
+  const counting = (root, name, max) => { names.push(name); return realReader(root, name, max); };
+  assert.equal(readEnrollmentView(none, { now: T0, reader: counting }), null);
+  assert.deepEqual(names, [ENROLLMENT_FILE]);
+
+  const open = await enrolledStore('view-closed');
+  names.length = 0;
+  assert.equal(readEnrollmentView(open, { now: '2026-10-15T00:00:00.000Z', reader: counting }), null, 'closed at the close instant');
+  assert.deepEqual(names, [ENROLLMENT_FILE]);
+  assert.notEqual(readEnrollmentView(open, { now: '2026-10-14T23:59:59.999Z' }), null);
+
+  await withdraw(open, { now: clock('2026-10-02T00:00:00.000Z') });
+  names.length = 0;
+  assert.equal(readEnrollmentView(open, { now: '2026-10-03T00:00:00.000Z', reader: counting }), null, 'withdrawn');
+  assert.deepEqual(names, [ENROLLMENT_FILE]);
+});
+
+test('readEnrollmentView: slots before and after the post window, with the current retest run', async () => {
+  const storeDir = await enrolledStore('view-slots');
+  const root = training(storeDir);
+  const [a, b, post1, retest] = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+  appendLedgerRows(root, 'run', [
+    runStart(a, '2026-10-01T01:00:00.000Z'), runStart(b, '2026-10-01T02:00:00.000Z'),
+    replaceRow(a, '2026-10-01T03:00:00.000Z'), replaceRow(b, '2026-10-01T03:00:00.000Z'),
+    runStart(post1, '2026-10-08T01:00:00.000Z'), replaceRow(post1, '2026-10-08T02:00:00.000Z'),
+    runStart(retest, '2026-10-09T01:00:00.000Z', { mode: 'retest', assessmentId: a }),
+  ], { at: '2026-10-09T01:00:00.000Z' });
+
+  const early = readEnrollmentView(storeDir, { now: '2026-10-03T00:00:00.000Z' });
+  assert.deepEqual(early, {
+    status: 'active', postOpen: false, consentedAt: T0, postOpensAt: '2026-10-08T00:00:00.000Z', postClosesAt: '2026-10-15T00:00:00.000Z',
+    baselineRuns: 2,
+    baselines: [{ slot: 1, runId: a, status: 'UNANSWERED' }, { slot: 2, runId: b, status: 'UNANSWERED' }],
+    post: [],
+    retention: [{ slot: 1, assessmentId: a, runId: null, status: 'NOT_STARTED', current: false },
+      { slot: 2, assessmentId: b, runId: null, status: 'NOT_STARTED', current: false }],
+  });
+
+  fs.writeFileSync(path.join(root, 'drill-session.json'), JSON.stringify({ studyRun: { id: retest } }));
+  const late = readEnrollmentView(storeDir, { now: '2026-10-10T00:00:00.000Z' });
+  assert.equal(late.postOpen, true);
+  assert.deepEqual(late.post, [{ slot: 1, runId: post1, status: 'UNANSWERED' }]);
+  assert.deepEqual(late.retention, [
+    { slot: 1, assessmentId: a, runId: retest, status: 'UNANSWERED', current: true },
+    { slot: 2, assessmentId: b, runId: null, status: 'NOT_STARTED', current: false }]);
+  // 공개 투영: 중첩 키까지 허용 목록이고 경로·오류 message가 없다.
+  assert.deepEqual(Object.keys(late).sort(), ['baselineRuns', 'baselines', 'consentedAt', 'post', 'postClosesAt', 'postOpen', 'postOpensAt', 'retention', 'status']);
+  assert.deepEqual(Object.keys(late.baselines[0]).sort(), ['runId', 'slot', 'status']);
+  assert.deepEqual(Object.keys(late.post[0]).sort(), ['runId', 'slot', 'status']);
+  assert.deepEqual(Object.keys(late.retention[0]).sort(), ['assessmentId', 'current', 'runId', 'slot', 'status']);
+  assert.equal(JSON.stringify(late).includes(storeDir), false);
+});
+
+test('readEnrollmentView: failures stay inside the view as codes only', async () => {
+  const corrupt = createOwnedTempDir('view-corrupt');
+  fs.mkdirSync(training(corrupt), { recursive: true });
+  fs.writeFileSync(path.join(training(corrupt), ENROLLMENT_FILE), '{ nope');
+  assert.deepEqual(readEnrollmentView(corrupt, { now: T0 }), { status: 'unavailable', reasons: ['ENROLLMENT_INVALID'] });
+
+  const lateLedger = await enrolledStore('view-late-ledger');
+  const ledgerFile = path.join(training(lateLedger), 'study-run-log.json');
+  const ledger = JSON.parse(fs.readFileSync(ledgerFile, 'utf8'));
+  ledger.coverageFrom = '2026-10-02T00:00:00.000Z';
+  fs.writeFileSync(ledgerFile, JSON.stringify(ledger));
+  assert.deepEqual(readEnrollmentView(lateLedger, { now: '2026-10-03T00:00:00.000Z' }), { status: 'unavailable', reasons: ['RUN_LOG_INCOMPLETE'] });
+
+  const unstable = await enrolledStore('view-unstable');
+  const unsafe = (root, name, max) => { if (name !== ENROLLMENT_FILE) throw Object.assign(new Error(`${unstable} replaced`), { code: 'UNSAFE_PATH' }); return realReader(root, name, max); };
+  const view = readEnrollmentView(unstable, { now: '2026-10-03T00:00:00.000Z', reader: unsafe });
+  assert.deepEqual(view, { status: 'unavailable', reasons: ['SNAPSHOT_UNSTABLE'] });
+  assert.equal(JSON.stringify(view).includes(unstable), false);
+
+  const odd = readEnrollmentView(unstable, { now: '2026-10-03T00:00:00.000Z', reader: () => { throw new Error('secret path /x/y'); } });
+  assert.deepEqual(odd, { status: 'unavailable', reasons: ['ENROLLMENT_VIEW_FAILED'] });
+});
+
+test('readEnrollmentView: a withdrawal between the first read and the snapshot gives null', async () => {
+  const storeDir = await enrolledStore('view-race');
+  const withdrawn = Buffer.from(fs.readFileSync(path.join(training(storeDir), ENROLLMENT_FILE), 'utf8').replace('"withdrawnAt":null', '"withdrawnAt":"2026-10-02T00:00:00.000Z"'));
+  let enrollmentReads = 0;
+  const reader = (root, name, max) => {
+    if (name === ENROLLMENT_FILE && (enrollmentReads += 1) > 1) return withdrawn;
+    return realReader(root, name, max);
+  };
+  assert.equal(readEnrollmentView(storeDir, { now: '2026-10-03T00:00:00.000Z', reader }), null);
+  assert.equal(enrollmentReads, 2);
 });

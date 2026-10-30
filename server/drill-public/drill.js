@@ -1,9 +1,112 @@
 import {KNOWN_REFERENCE_SOURCES} from '../../shared/reference.js';
-import { STUDY_MODES, STUDY_MODE_HELP, formatQuestion, formatFeedback, formatFeedbackStep, formatSummary, formatStudyError, unfinishedRun, nextStepView, completionGuidance, formatSource, formatSourceShort, formatTrends, readStudyEntry, drillRequest, spotDiagram, handCards, feedbackBars, runProgress, modeAvailability } from './study-format.js';
+import { STUDY_MODES, STUDY_MODE_HELP, formatQuestion, formatFeedback, formatFeedbackStep, formatSummary, formatStudyError, unfinishedRun, nextStepView, cardGate, completionGuidance, formatSource, formatSourceShort, formatTrends, readStudyEntry, drillRequest, spotDiagram, handCards, feedbackBars, runProgress, modeAvailability, nextEnrollmentBoundary, enrollmentBoundaryCrossed, boundaryDelay, ENROLLMENT_CHANGED_NOTICE } from './study-format.js';
 import { createChartPanel, renderSpotChart } from './spot-chart.js';
 import { mountPotOddsDrill } from './pot-odds-drill.js';
 import { helpButton, openHelp } from '../public/help-panel.js';
 import { openDisplaySettings } from '../public/display-settings.js';
+
+/** The "평가와 재평가" card list. Cards are keyed by run id and updated in place:
+ * a button that is being pressed must stay the same element (a rebuilt button
+ * loses the click between mousedown and mouseup, issue 329). The list is
+ * rebuilt only when the order of run ids changes; a state change touches
+ * `disabled` and the gate line only; a new summary changes text only.
+ *
+ * `cards` are the display cards of study-format.js formatSummary. `getGate`
+ * returns the current gate ({ text }) or null and is asked again at click time,
+ * so a stale render cannot start a run. `onRetest(card)` does the start. */
+export function createRunCards(document, box, { onRetest, getGate = () => null, gateBox = null } = {}) {
+  const entries = new Map();
+  let order = [];
+  let empty = null;
+
+  const node = (tag, className) => { const element = document.createElement(tag); if (className) element.className = className; return element; };
+  const setText = (element, text) => { if (element.textContent !== text) element.textContent = text; };
+  const show = (element, text) => { element.hidden = !text; setText(element, text || ''); };
+
+  function build(card) {
+    const root = node('article', 'assessment');
+    const title = node('h3');
+    const badge = node('span', 'assessment-badge');
+    const heading = node('span', 'assessment-title');
+    title.append(heading, badge);
+    const parts = { root, heading, badge, meta: node('p', 'assessment-meta'), relation: node('p', 'assessment-relation'),
+      rate: node('p', 'assessment-rate'), status: node('p'), baseline: node('p', 'assessment-baseline'), available: node('p'),
+      note: node('p', 'assessment-note'), button: null };
+    root.append(title, parts.meta, parts.relation, parts.rate, parts.status, parts.baseline, parts.available, parts.note);
+    const entry = { card, parts };
+    if (card.kind === 'assessment') {
+      const button = node('button', 'ui-btn ui-btn--ghost');
+      button.type = 'button';
+      button.textContent = '이 평가 재평가하기';
+      // The handler reads the entry at click time: the card data and the gate
+      // are whatever is current, not what was rendered when the button was made.
+      button.addEventListener('click', () => {
+        if (!entry.card.canRetest || getGate()) return;
+        onRetest(entry.card);
+      });
+      parts.button = button;
+      root.append(button);
+    }
+    return entry;
+  }
+
+  function fill(entry, card) {
+    entry.card = card;
+    const { parts } = entry;
+    setText(parts.heading, card.title);
+    show(parts.badge, card.badge);
+    show(parts.meta, card.meta);
+    show(parts.relation, card.relation);
+    setText(parts.rate, `${card.rate} · ${card.samples}`);
+    setText(parts.status, card.status);
+    show(parts.baseline, card.baseline);
+    show(parts.available, card.availableAt ? `재평가 가능 시각: ${card.availableAt}` : '');
+    show(parts.note, card.note);
+  }
+
+  /** The gate line and every button's `disabled`; nothing else changes. The
+   * line explains a held-back retest, so it is empty when no card could retest. */
+  function refreshGate() {
+    const gate = getGate();
+    let retestable = false;
+    for (const entry of entries.values()) {
+      if (!entry.parts.button) continue;
+      retestable ||= entry.card.canRetest === true;
+      entry.parts.button.disabled = !entry.card.canRetest || gate !== null;
+    }
+    if (gateBox) setText(gateBox, retestable ? gate?.text ?? '' : '');
+  }
+
+  function sync(cards) {
+    const list = [];
+    const seen = new Set();
+    for (const card of cards) {
+      if (typeof card?.key !== 'string' || seen.has(card.key)) continue;
+      seen.add(card.key);
+      list.push(card);
+    }
+    const keys = list.map((card) => card.key);
+    for (const key of [...entries.keys()]) if (!seen.has(key)) entries.delete(key);
+    for (const card of list) {
+      const entry = entries.get(card.key) ?? build(card);
+      entries.set(card.key, entry);
+      fill(entry, card);
+    }
+    const changed = keys.length !== order.length || keys.some((key, index) => key !== order[index]);
+    if (changed || (!keys.length && !empty)) {
+      order = keys;
+      if (keys.length) { empty = null; box.replaceChildren(...keys.map((key) => entries.get(key).parts.root)); }
+      else {
+        empty = node('p');
+        empty.textContent = '완료한 새 문제 평가가 없습니다. 평가를 완료하면 24시간 뒤 같은 문항으로 재평가할 수 있습니다.';
+        box.replaceChildren(empty);
+      }
+    }
+    refreshGate();
+  }
+
+  return { sync, refreshGate, get keys() { return [...order]; }, buttonOf: (key) => entries.get(key)?.parts.button ?? null, elementOf: (key) => entries.get(key)?.parts.root ?? null };
+}
 
 // Exact pre-start rejections from createDrillHandler/startDrill. An unknown
 // response or a pending journal is not a failed start proof.
@@ -222,11 +325,20 @@ async function mountStudy() {
   let summaryState = 'loading';
   let lastState = null;
   let formattedSummary = null;
+  // When the current summary arrived and the timer toward the next enrollment
+  // boundary (the post window opening or closing changes what the cards say).
+  // `summaryAsOf` is when the request for the shown summary was SENT: a boundary that passed while it was in flight
+  // may not be in it.
+  let summaryAsOf = 0;
+  let boundaryTimer = null;
   // The last question shown for answering and the choice made on it. The answer
   // DTO carries neither, so feedback visuals use them only for the same questionId.
   let shown = null;
   let chosen = null;
   const latestSummary = createLatestRequest();
+  // The run cards update in place; the gate is asked again at click time.
+  const cardsView = createRunCards(document, $('assessments'), { gateBox: $('assessments-gate'),
+    getGate: () => cardGate(controller?.state ?? lastState, { authenticated }), onRetest: (card) => void startCardRetest(card) });
   function paintModeHelp() {
     const mode = $('mode').value;
     $('mode-description').textContent = STUDY_MODE_HELP[mode] ?? '';
@@ -360,6 +472,7 @@ async function mountStudy() {
     const current = state.session;
     lastState = state;
     paintNextStep();
+    cardsView.refreshGate();
     chartPanel.sync(current?.sessionId ?? null, ['assessment', 'retest', 'transfer'].includes(current?.mode) && current?.index < current?.count);
     if (!state.target && (entry.spotKey || entry.handClass)) {
       entry.spotKey = null; entry.handClass = null;
@@ -414,13 +527,48 @@ async function mountStudy() {
     $('next').hidden = !state.awaitNext; $('next').disabled = state.busy || state.recovery;
     paintFeedback(state, current);
   }
+  // A summary that cannot be read removes the enrollment guidance: a stale
+  // confident sentence about the schedule is worse than none.
+  function dropEnrollmentGuidance() {
+    clearTimeout(boundaryTimer); boundaryTimer = null;
+    $('assessments-enrollment').hidden = true; $('assessments-enrollment').textContent = '';
+    if (formattedSummary) {
+      formattedSummary = { ...formattedSummary, enrollment: null, enrollmentLine: null,
+        cards: formattedSummary.cards.map((card) => ({ ...card, badge: null, note: null })) };
+      cardsView.sync(formattedSummary.cards);
+    }
+    paintModeHelp();
+  }
+  function armBoundaryTimer() {
+    clearTimeout(boundaryTimer); boundaryTimer = null;
+    const at = summaryState === 'ready' ? nextEnrollmentBoundary(summary?.enrollment, Date.now()) : null;
+    if (at === null) return;
+    boundaryTimer = setTimeout(() => {
+      boundaryTimer = null;
+      if (Date.now() >= at) void refreshSummary(); else armBoundaryTimer();
+    }, boundaryDelay(at, Date.now()));
+  }
+  // True when a schedule boundary passed since the shown summary arrived.
+  const enrollmentStale = () => summaryState === 'ready' && enrollmentBoundaryCrossed(summary?.enrollment, summaryAsOf, Date.now());
+  async function refreshForSchedule() {
+    await refreshSummary();
+    $('status').textContent = ENROLLMENT_CHANGED_NOTICE;
+  }
+  // A card's retest is a protected start: it never replaces a run in progress,
+  // here (gate) or on the server (drill lock), and a second click is refused.
+  async function startCardRetest(card) {
+    if (enrollmentStale()) { await refreshForSchedule(); return; }
+    await controller.start({ mode: 'retest', assessmentId: card.id }, { protectUnfinished: true });
+    await refreshSummary();
+  }
   async function refreshSummary() {
     try {
+      const requestedAt = Date.now();
       const settled = await latestSummary(() => api('/api/summary'));
       if (!settled.current) return;
       const response = settled.value;
-      if (!response.ok) { $('summary-status').textContent = formatStudyError(response); summary = null; summaryState = 'failed'; paintNextStep(); return; }
-      summary = response.summary; summaryState = 'ready';
+      if (!response.ok) { $('summary-status').textContent = formatStudyError(response); summary = null; summaryState = 'failed'; dropEnrollmentGuidance(); paintNextStep(); return; }
+      summary = response.summary; summaryState = 'ready'; summaryAsOf = requestedAt;
       const formatted = formatSummary(summary);
       formattedSummary = formatted;
       paintModeHelp();
@@ -432,22 +580,16 @@ async function mountStudy() {
         $(`${origin}-rate`).classList.toggle('is-empty', !/^\d+%$/.test(metrics.rate));
         $(`${origin}-coverage`).textContent = metrics.coverage; $(`${origin}-calibration`).textContent = metrics.calibration;
       }
-      const runs = $('assessments'); runs.replaceChildren();
-      for (const run of [...formatted.assessments, ...formatted.retests]) {
-        const card = node('article', '', 'assessment');
-        card.append(node('h3', run.title), node('p', `${run.rate} · ${run.samples}`, 'assessment-rate'), node('p', run.status));
-        if (run.baseline) card.append(node('p', run.baseline, 'assessment-baseline'));
-        if (run.availableAt) card.append(node('p', `재평가 가능 시각: ${run.availableAt}`));
-        if (!run.assessmentId) {
-          const button = node('button', '이 평가 재평가하기', 'ui-btn ui-btn--ghost'); button.type = 'button'; button.disabled = !run.canRetest;
-          button.addEventListener('click', () => void controller.start({ mode: 'retest', assessmentId: run.id })); card.append(button);
-        }
-        runs.append(card);
-      }
-      if (!runs.children.length) runs.append(node('p', '완료한 새 문제 평가가 없습니다. 평가를 완료하면 24시간 뒤 같은 문항으로 재평가할 수 있습니다.'));
+      $('assessments-enrollment').hidden = !formatted.enrollmentLine;
+      $('assessments-enrollment').textContent = formatted.enrollmentLine ?? '';
+      cardsView.sync(formatted.cards);
       paintTrends(formatTrends(summary.trends));
+      armBoundaryTimer();
       paintNextStep();
-    } catch { $('summary-status').textContent = '학습 요약을 불러오지 못했습니다. 상태 확인을 눌러 주세요.'; summary = null; summaryState = 'failed'; paintNextStep(); }
+      // A boundary passed while this request was in flight: the answer may predate it. Ask again; the new request
+      // is sent after the boundary, so this cannot repeat.
+      if (enrollmentStale()) void refreshSummary();
+    } catch { $('summary-status').textContent = '학습 요약을 불러오지 못했습니다. 상태 확인을 눌러 주세요.'; summary = null; summaryState = 'failed'; dropEnrollmentGuidance(); paintNextStep(); }
   }
   function paintTrends(trends) {
     const box = $('trends'); box.replaceChildren();
@@ -510,6 +652,7 @@ async function mountStudy() {
     $('next-step-start').addEventListener('click', async () => {
       // Re-derived from the current summary and state at click time; the gate and
       // the controller both refuse while anything is busy, recovering or unfinished.
+      if (enrollmentStale()) { await refreshForSchedule(); return; }
       const view = summary && summaryState === 'ready' ? nextStepView(summary, controller.state, { authenticated }) : null;
       if (!view || view.disabled) return;
       await controller.start(view.plan.selectors, { protectUnfinished: true });
@@ -525,6 +668,10 @@ async function mountStudy() {
       catch { $('status').textContent = '학습실 연결을 확인하고 있습니다. 저장된 답안은 상태 확인으로 복원할 수 있습니다.'; }
     }, 30000);
     window.addEventListener('pagehide', () => clearInterval(heartbeat));
+    // A tab that was hidden may have slept through a schedule boundary.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && (summaryState === 'failed' || summary?.enrollment != null)) void refreshSummary();
+    });
   } catch { $('status').textContent = '안전한 복구 저장소를 준비하지 못했습니다. 브라우저 저장 공간과 접속 링크를 확인하세요.'; $('start').disabled = true; }
 }
 

@@ -5,6 +5,7 @@ import { studyHistory, retestEligibility } from '../training/study-history.js';
 import { CANONICAL_REFERENCE_SOURCE, KNOWN_REFERENCE_SOURCES, referenceQuality } from '../shared/reference.js';
 import { hasSpotHand } from '../training/providers/preflop-json.js';
 import { reenteredAfterGraduation } from '../training/drill-generator.js';
+import { readEnrollmentView } from './learning-eval.js';
 
 const sameSource = (a, b) => a?.id === b?.id && a?.version === b?.version && a?.contentSha256 === b?.contentSha256;
 const safeSource = (value) => value && typeof value.id === 'string' && value.id.length <= 128
@@ -105,5 +106,7 @@ export async function readStudySummary(storeDir) {
     retests: history.retests.slice(-100).map((run) => runSummary(run, now,
       history.assessments.find((baseline) => baseline.id === run.assessmentId))),
     trends: { practice: history.trends.practice.slice(-60), game: history.trends.game.slice(-60) },
+    // Open learning-effect enrollment slots; null when none. Errors stay inside the view (code only).
+    enrollment: readEnrollmentView(storeDir, { now }),
   };
 }

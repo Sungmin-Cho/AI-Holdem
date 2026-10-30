@@ -26,6 +26,17 @@ export const requiredJourneyChecks = Object.freeze([
   'next-step-source-mismatch-disabled',
   'next-step-recovery-gate',
   'next-step-stale-tab-guard',
+  'card-enrollment-badges',
+  'card-dom-stable-across-summary',
+  'card-retest-dispatch-exact',
+  'card-second-click-no-op',
+  'card-disabled-after-start',
+  'card-forced-click-no-start',
+  'card-boundary-click-refreshes-without-start',
+  'next-step-boundary-click-refreshes-without-start',
+  'enrollment-boundary-timer-refresh',
+  'enrollment-boundary-during-request-refetch',
+  'enrollment-guidance-dropped-on-summary-failure',
   'no-uncaught-errors',
   'owned-cleanup',
 ]);
@@ -36,7 +47,7 @@ const coverage = (evaluated, exact) => ({ evaluatedDecisions: evaluated, support
   referenceAvailableDecisions: evaluated, exactComparableDecisions: exact, assistedDecisions: 0, projectedReferenceDecisions: 0, comparisonUnavailableDecisions: 0 });
 
 /** A raw /api/summary payload in the server's shape (tools/study-summary.js). */
-export function fixtureSummary({ due = 0, retestable = false, goal = false, sparse = false, source = FIXTURE_SOURCE } = {}) {
+export function fixtureSummary({ due = 0, retestable = false, goal = false, sparse = false, source = FIXTURE_SOURCE, runs = null, enrollment } = {}) {
   const overall = { evaluatedDecisions: 0, supportedDecisions: 0, allowedActionRate: null, sampleWeight: 0 };
   const calibration = { distributionAgreement: null, eligibleObservations: 0, totalObservations: 0, reason: 'insufficient-observations' };
   const origin = (name, evaluated, exact) => ({ origin: name, overall: { ...overall, evaluatedDecisions: evaluated, supportedDecisions: evaluated },
@@ -48,11 +59,23 @@ export function fixtureSummary({ due = 0, retestable = false, goal = false, spar
     goal: goal
       ? { origin: 'game', sourceIdentity: { ...FIXTURE_SOURCE }, spotKey: '6max-100bb-bb-vs-single-raise-btn-v3', handClass: 'KJo', reason: 'reference-deviation' }
       : { origin: 'default', sourceIdentity: null, spotKey: '6max-100bb-btn-rfi-v3', handClass: 'AJo', reason: 'default-supported-spot' },
-    assessments: retestable ? [{ id: 'a1', mode: 'assessment', total: 10, startedAt: iso(-50), complete: true, completedAt: iso(-49), reason: undefined,
+    ...(enrollment === undefined ? {} : { enrollment }),
+    assessments: runs ? runs.map(({ id, startedHoursAgo }) => ({ id, mode: 'assessment', total: 10, startedAt: iso(-startedHoursAgo), complete: true,
+      completedAt: iso(-startedHoursAgo + 1), reason: undefined, sourceIdentity: { ...FIXTURE_SOURCE },
+      result: { allowed: 7, total: 10, allowedActionRate: 0.7, foldBaselineRate: 0.4 }, retest: { eligible: true, nextAvailableAt: iso(-startedHoursAgo + 25) } }))
+      : retestable ? [{ id: 'a1', mode: 'assessment', total: 10, startedAt: iso(-50), complete: true, completedAt: iso(-49), reason: undefined,
       sourceIdentity: { ...FIXTURE_SOURCE }, result: { allowed: 7, total: 10, allowedActionRate: 0.7, foldBaselineRate: 0.4 },
       retest: { eligible: true, nextAvailableAt: iso(-25) } }] : [],
     retests: [], trends: { practice: [], game: [] },
   };
+}
+
+/** The enrollment slots of /api/summary (tools/learning-eval.js readEnrollmentView) for baselines a1 and a2. */
+export function fixtureEnrollment({ postOpen = false, postOpensAt = iso(100), postClosesAt = iso(300), retention } = {}) {
+  return { status: 'active', postOpen, consentedAt: iso(-100), postOpensAt, postClosesAt, baselineRuns: 2,
+    baselines: [{ slot: 1, runId: 'a1', status: 'complete' }, { slot: 2, runId: 'a2', status: 'complete' }], post: [],
+    retention: retention ?? [{ slot: 1, assessmentId: 'a1', runId: null, status: 'NOT_STARTED', current: false },
+      { slot: 2, assessmentId: 'a2', runId: null, status: 'NOT_STARTED', current: false }] };
 }
 
 const EMPTY_SESSION = Object.freeze({ done: true, question: null, count: 0, index: 0, mode: null, lastFeedback: null, sessionId: null, attemptNo: null });
@@ -70,10 +93,13 @@ export async function startNextStepFixture() {
   const staticHandler = createDrillHandler({ storeDir: workspace.root, token });
   const fixture = {
     token, summary: fixtureSummary(), session: null, starts: [], refusedStarts: [], answers: [], posts: [], currentFails: false,
-    holding: null, pendingStarts: 0, sequence: 0,
-    reset(overrides = {}) { Object.assign(fixture, { summary: fixtureSummary(), session: null, starts: [], refusedStarts: [], answers: [], posts: [], currentFails: false, holding: null, pendingStarts: 0 }, overrides); },
+    holding: null, pendingStarts: 0, sequence: 0, summaryRequests: 0, summaryHolding: null, summaryFails: false,
+    reset(overrides = {}) { Object.assign(fixture, { summary: fixtureSummary(), session: null, starts: [], refusedStarts: [], answers: [], posts: [], currentFails: false, holding: null, pendingStarts: 0, summaryRequests: 0, summaryHolding: null, summaryFails: false }, overrides); },
     hold() { let release; fixture.holding = { promise: new Promise((resolve) => { release = resolve; }), release }; },
     release() { fixture.holding?.release(); fixture.holding = null; },
+    // Holds the next /api/summary response (its content is fixed when the request arrives).
+    holdSummary() { let release; fixture.summaryHolding = { promise: new Promise((resolve) => { release = resolve; }), release, taken: false }; },
+    releaseSummary() { fixture.summaryHolding?.release(); fixture.summaryHolding = null; },
   };
   const json = (res, status, body) => {
     const text = JSON.stringify(body);
@@ -86,7 +112,14 @@ export async function startNextStepFixture() {
     if (!url.pathname.startsWith('/api/')) { await staticHandler(req, res); return; }
     if (req.headers['x-drill-token'] !== token) { json(res, 401, { ok: false, code: 'UNAUTHORIZED' }); return; }
     if (req.method === 'POST') fixture.posts.push(url.pathname);
-    if (url.pathname === '/api/summary') { json(res, 200, { ok: true, summary: fixture.summary }); return; }
+    if (url.pathname === '/api/summary') {
+      fixture.summaryRequests += 1;
+      if (fixture.summaryFails) { json(res, 500, { ok: false, code: 'ERROR' }); return; }
+      const body = { ok: true, summary: fixture.summary };
+      const held = fixture.summaryHolding && !fixture.summaryHolding.taken ? fixture.summaryHolding : null;
+      if (held) { held.taken = true; await held.promise; }
+      json(res, 200, body); return;
+    }
     if (url.pathname === '/api/current' || url.pathname === '/api/next') {
       if (fixture.currentFails) { json(res, 500, { ok: false, code: 'ERROR' }); return; }
       json(res, 200, { ok: true, ...(fixture.session ?? EMPTY_SESSION) }); return;
@@ -119,7 +152,7 @@ export async function startNextStepFixture() {
   const port = server.address().port;
   fixture.url = `http://127.0.0.1:${port}/#token=${token}`;
   fixture.close = async () => {
-    fixture.release();
+    fixture.release(); fixture.releaseSummary();
     await new Promise((resolve) => { server.close(() => resolve()); server.closeAllConnections?.(); });
     workspace.close();
   };
@@ -139,6 +172,19 @@ const UI_EXPRESSION = `JSON.stringify((() => {
     choices: [...document.querySelectorAll('#next-step-choices button')].map((node) => node.textContent),
     mode: q('#mode').value, nextHidden: q('#next').hidden, answers: document.querySelectorAll('#actions .answer').length,
     overflow: document.documentElement.scrollWidth - innerWidth, buttonRight: rect.right, innerWidth };
+})())`;
+
+// The run cards, the enrollment line and the card gate as the page shows them.
+const CARDS_EXPRESSION = `JSON.stringify((() => {
+  const q = (selector) => document.querySelector(selector);
+  const shown = (node) => (node && !node.hidden ? node.textContent : '');
+  return { line: shown(q('#assessments-enrollment')), gate: q('#assessments-gate').textContent, status: q('#status').textContent,
+    cards: [...document.querySelectorAll('#assessments .assessment')].map((card) => {
+      const button = card.querySelector('button');
+      return { title: card.querySelector('.assessment-title').textContent, badge: shown(card.querySelector('.assessment-badge')),
+        meta: shown(card.querySelector('.assessment-meta')), note: shown(card.querySelector('.assessment-note')),
+        button: button ? { disabled: button.disabled, text: button.textContent } : null };
+    }) };
 })())`;
 
 export async function runCoachingStudyJourney(outDir) {
@@ -170,6 +216,8 @@ export async function runCoachingStudyJourney(outDir) {
     }
     throw new Error(`${label} timed out: ${JSON.stringify(value)?.slice(0, 600)}`);
   }
+  const cardsUi = async () => { const value = await evaluate(CARDS_EXPRESSION); return typeof value === 'string' ? JSON.parse(value) : value; };
+  const waitCards = (accept, label, timeoutMs) => waitFor(cardsUi, (value) => value && accept(value), label, timeoutMs);
   const waitUi = (accept, label) => waitFor(ui, (value) => value && accept(value), label);
   const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const click = (selector) => evaluate(`(() => { const node = document.querySelector(${JSON.stringify(selector)}); if (!node) return false; node.click(); return true; })()`);
@@ -290,6 +338,155 @@ export async function runCoachingStudyJourney(outDir) {
     check('next-step-stale-tab-guard', fixture.refusedStarts.length === 1 && fixture.refusedStarts[0].body.protectUnfinished === true
       && fixture.starts.length === 0 && fixture.session.sessionId === 'other-tab' && state.disabled === true && state.answers > 0,
     { refused: fixture.refusedStarts.length, status: state.status.slice(0, 80) });
+
+
+    // 10. The learning-effect cards: badges and advance notes before the post window, newest card first.
+    const runs = [{ id: 'a1', startedHoursAgo: 50 }, { id: 'a2', startedHoursAgo: 40 }];
+    await freshPage({ summary: fixtureSummary({ runs, enrollment: fixtureEnrollment() }) });
+    let cards = await waitCards((value) => value.cards.length === 2, 'two cards');
+    check('card-enrollment-badges', JSON.stringify(cards.cards.map((card) => card.badge)) === JSON.stringify(['등록 기준 ②', '등록 기준 ①'])
+      && cards.cards.every((card) => /사후 기간/.test(card.note) && /기준표 v3\.0\.0/.test(card.meta) && card.button && card.button.disabled === false)
+      && /학습 효과 평가 진행 중/.test(cards.line) && cards.gate === '', { badges: cards.cards.map((card) => card.badge), line: cards.line.slice(0, 60) });
+    await browser(['screenshot', path.join(output, 'cards-before-post.png')]);
+
+    // 11. In the post window: the same button object survives a summary reload (in-place update).
+    await freshPage({ summary: fixtureSummary({ runs, enrollment: fixtureEnrollment({ postOpen: true, postOpensAt: iso(-1) }) }) });
+    cards = await waitCards((value) => value.cards.length === 2 && /처음 재평가한 실행/.test(value.cards[0].note), 'post-window cards');
+    await evaluate("(() => { const button = document.querySelector('#assessments .assessment button'); button.__kept = 'same'; window.__button = button; return true; })()");
+    // The reloaded summary changes the first card's note (its slot was taken), so the comparison runs only after
+    // the page has really applied the new summary.
+    fixture.summary = fixtureSummary({ runs, enrollment: fixtureEnrollment({ postOpen: true, postOpensAt: iso(-1),
+      retention: [{ slot: 1, assessmentId: 'a1', runId: null, status: 'NOT_STARTED', current: false },
+        { slot: 2, assessmentId: 'a2', runId: 'r-taken', status: 'UNANSWERED', current: false }] }) });
+    const before = fixture.summaryRequests;
+    await click('#recover');
+    await waitFor(() => fixture.summaryRequests, (value) => value > before, 'summary requested again');
+    await waitCards((value) => /이미 정해졌습니다\(아직 확인된 응답 없음\)/.test(value.cards[0].note), 'the reloaded summary applied in place');
+    const kept = await evaluate("(() => { const button = document.querySelector('#assessments .assessment button'); return button === window.__button && button.__kept === 'same'; })()");
+    check('card-dom-stable-across-summary', kept === true, { requests: fixture.summaryRequests - before });
+    // Back to an open slot for the dispatch checks below.
+    fixture.summary = fixtureSummary({ runs, enrollment: fixtureEnrollment({ postOpen: true, postOpensAt: iso(-1) }) });
+    await click('#recover');
+    await waitCards((value) => /처음 재평가한 실행/.test(value.cards[0].note), 'open slot again');
+
+    // 12. Clicking a card starts a protected retest of exactly that assessment; a second click while the
+    //     request is in flight does nothing (a disabled button, and a forced click refused by the handler).
+    fixture.hold();
+    await click('#assessments .assessment button');
+    await waitFor(() => fixture.pendingStarts, (value) => value === 1, 'card retest reached the server');
+    cards = await waitCards((value) => value.cards[0].button.disabled && /확인하고 있습니다/.test(value.gate), 'busy card gate');
+    await click('#assessments .assessment button');
+    await evaluate("(() => { for (const button of document.querySelectorAll('#assessments .assessment button')) { button.disabled = false; button.click(); } return true; })()");
+    await pause(400);
+    check('card-second-click-no-op', fixture.starts.length === 1 && fixture.refusedStarts.length === 0 && cards.cards.every((card) => card.button.disabled),
+      { starts: fixture.starts.length, refused: fixture.refusedStarts.length });
+    fixture.release();
+    const cardStart = fixture.starts[0].body;
+    check('card-retest-dispatch-exact', sortedKeys(cardStart).join() === 'assessmentId,idempotencyKey,mode,protectUnfinished,seed' && cardStart.mode === 'retest'
+      && cardStart.protectUnfinished === true && cardStart.assessmentId === 'a2', { keys: sortedKeys(cardStart) });
+    cards = await waitCards((value) => /진행 중인 연습이 있습니다\. 끝낸 뒤 재평가할 수 있습니다\./.test(value.gate) && value.cards.every((card) => card.button.disabled), 'cards disabled after the start');
+    check('card-disabled-after-start', cards.cards.every((card) => card.button.disabled === true) && cards.gate.length > 0, { gate: cards.gate });
+
+    // 13. A click forced past the disabled button reaches the handler, which re-checks the gate and sends nothing.
+    await evaluate("(() => { for (const button of document.querySelectorAll('#assessments .assessment button')) { button.disabled = false; button.click(); } return true; })()");
+    await pause(600);
+    check('card-forced-click-no-start', fixture.starts.length === 1 && fixture.refusedStarts.length === 0, { starts: fixture.starts.length });
+
+    // 14-16 set the schedule boundary AFTER the page is ready (a slow browser command cannot move it), and re-try with a
+    // wider margin when the precondition (the request reached the server well before the boundary) did not hold.
+    const preSummary = (opens) => fixtureSummary({ runs, enrollment: fixtureEnrollment({ postOpensAt: new Date(opens).toISOString() }) });
+    const postSummary = (opens) => fixtureSummary({ runs, enrollment: fixtureEnrollment({ postOpen: true, postOpensAt: new Date(opens).toISOString() }) });
+    const readyPage = async () => {
+      await freshPage({ summary: fixtureSummary({ runs }) });
+      await waitCards((value) => value.cards.length === 2, 'cards before the boundary');
+      await waitUi((value) => value.kind !== 'loading', 'page ready');
+    };
+    // Only long delays (the boundary timer) are dropped; the API's 8 s abort timer keeps working.
+    const dropLongTimers = () => evaluate('(() => { const real = window.setTimeout; window.setTimeout = (fn, ms, ...rest) => (ms > 9000 ? 0 : real(fn, ms, ...rest)); return true; })()');
+    const MARGINS = [12_000, 20_000, 32_000];
+    const retrying = async (label, attempt, margins = MARGINS) => {
+      for (const margin of margins) {
+        const result = await attempt(margin);
+        if (result !== 'RETRY') return result;
+        console.log(`journey: ${label} precondition missed with a ${margin} ms margin; retrying wider`);
+      }
+      throw new Error(`${label}: precondition not met after ${margins.length} attempts`);
+    };
+
+    // 14. A boundary passes after the summary was received (long timers dropped so only the click can notice):
+    //     the click refreshes the summary, shows why, and starts nothing.
+    const boundaryCycle = (selector) => retrying(`click ${selector}`, async (margin) => {
+      await readyPage();
+      await dropLongTimers();
+      const opens = Date.now() + margin;
+      fixture.summary = preSummary(opens);
+      const requests = fixture.summaryRequests;
+      await click('#recover');
+      await waitFor(() => fixture.summaryRequests, (value) => value > requests, 'pre-boundary summary requested');
+      await waitCards((value) => /그 전에 재평가해/.test(value.cards[0].note), 'pre-boundary notes shown');
+      if (Date.now() > opens - 9500) return 'RETRY';
+      await waitFor(() => Date.now(), (value) => value > opens + 200, 'boundary passed', margin + 5000);
+      fixture.summary = postSummary(opens);
+      const before = fixture.summaryRequests;
+      await click(selector);
+      await waitFor(() => fixture.summaryRequests, (value) => value > before, 'summary refreshed by the click');
+      const refreshed = await waitCards((value) => /일정이 바뀌어/.test(value.status) && /처음 재평가한 실행/.test(value.cards[0].note), 'notice and refreshed notes');
+      await pause(300);
+      return refreshed;
+    });
+    let refreshed = await boundaryCycle('#assessments .assessment button');
+    check('card-boundary-click-refreshes-without-start', fixture.starts.length === 0 && fixture.refusedStarts.length === 0, { status: refreshed.status.slice(0, 60) });
+    refreshed = await boundaryCycle('#next-step-start');
+    check('next-step-boundary-click-refreshes-without-start', fixture.starts.length === 0 && fixture.refusedStarts.length === 0, { status: refreshed.status.slice(0, 60) });
+
+    // 15. With the page's own timer, the boundary refreshes the summary and the notes without any click.
+    cards = await retrying('timer', async (margin) => {
+      await readyPage();
+      const opens = Date.now() + margin;
+      fixture.summary = preSummary(opens);
+      const requests = fixture.summaryRequests;
+      await click('#recover');
+      await waitFor(() => fixture.summaryRequests, (value) => value > requests, 'pre-boundary summary requested');
+      const shown = await waitCards((value) => /그 전에 재평가해/.test(value.cards[0].note), 'notes before the boundary');
+      if (Date.now() > opens - 2000) return 'RETRY';
+      fixture.summary = postSummary(opens);
+      return waitCards((value) => /처음 재평가한 실행/.test(value.cards[0].note), `notes after the boundary timer (${shown.cards.length} cards)`, margin + 30_000);
+    });
+    check('enrollment-boundary-timer-refresh', cards.cards[0].badge === '등록 기준 ②' && fixture.starts.length === 0, { note: cards.cards[0].note.slice(0, 40) });
+
+    // 16. The boundary passes while the summary request is in flight: the old answer is shown, then the page asks
+    //     again by itself (no click) and the post-window notes appear. Nothing starts. The page aborts a request after
+    //     8 s (a failed summary drops the guidance), so the hold — request arrival to boundary + 300 ms — stays under it.
+    cards = await retrying('in-flight', async (margin) => {
+      await readyPage();
+      const opens = Date.now() + margin;
+      fixture.summary = preSummary(opens);
+      fixture.holdSummary();
+      const requests = fixture.summaryRequests;
+      await click('#recover');
+      await waitFor(() => fixture.summaryRequests, (value) => value > requests, 'held summary request reached the server');
+      if (Date.now() > opens - 1500) { fixture.releaseSummary(); return 'RETRY'; }
+      await waitFor(() => Date.now(), (value) => value > opens + 300, 'boundary passed while held', 10_000);
+      fixture.summary = postSummary(opens);
+      fixture.releaseSummary();
+      return waitCards((value) => /처음 재평가한 실행/.test(value.cards[0].note), 'refetch without a click after the stale answer', 20_000);
+    }, [3_000, 4_500, 6_000]);
+    check('enrollment-boundary-during-request-refetch', cards.cards[0].badge === '등록 기준 ②' && fixture.starts.length === 0 && fixture.summaryRequests >= 2,
+      { requests: fixture.summaryRequests });
+
+    // 17. A summary that cannot be read removes the enrollment guidance everywhere, including the mode help.
+    await freshPage({ summary: fixtureSummary({ runs, enrollment: fixtureEnrollment() }) });
+    await waitCards((value) => value.cards.length === 2 && value.cards[0].badge !== '', 'guidance shown');
+    await evaluate("(() => { const mode = document.querySelector('#mode'); mode.value = 'retest'; mode.dispatchEvent(new Event('change')); return true; })()");
+    const modeHelp = () => evaluate("document.querySelector('#mode-availability').textContent");
+    const helpBefore = await waitFor(modeHelp, (value) => /학습 효과 평가 진행 중/.test(value), 'enrollment sentence in the mode help');
+    fixture.summaryFails = true;
+    await click('#recover');
+    const dropped = await waitCards((value) => value.line === '' && value.cards.every((card) => card.badge === '' && card.note === ''), 'guidance removed');
+    const helpAfter = await waitFor(modeHelp, (value) => !/학습 효과/.test(value), 'mode help without the enrollment sentence');
+    fixture.summaryFails = false;
+    check('enrollment-guidance-dropped-on-summary-failure', /학습 효과 평가 진행 중/.test(helpBefore) && dropped.cards.length === 2 && !/학습 효과/.test(helpAfter),
+      { before: helpBefore.slice(0, 40), after: helpAfter.slice(0, 40) });
 
     const errors = await browser(['errors']);
     check('no-uncaught-errors', Array.isArray(errors?.errors) && errors.errors.length === 0, { count: errors?.errors?.length });
