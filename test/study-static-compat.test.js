@@ -43,11 +43,59 @@ const OLD_SERVICE_ASSETS = [
 ];
 const OLD_FILE = new Map(OLD_SERVICE_ASSETS.map(([url, file]) => [url, file]));
 
+// Words after which a `/` starts a regular expression literal rather than a division.
+const BEFORE_REGEX_WORDS = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
+/** The source with its comments blanked (line breaks kept). String, template and regular expression literals are
+ * copied as they are, so a `//` or `/*` inside one does not start a comment and hide the code after it. */
+function stripComments(text) {
+  let out = '';
+  let word = '';
+  let regexAllowed = true;
+  for (let i = 0; i < text.length;) {
+    const c = text[i];
+    const next = text[i + 1];
+    if (c === '/' && (next === '/' || next === '*')) {
+      const end = next === '/' ? text.indexOf('\n', i) : text.indexOf('*/', i + 2);
+      const stop = end < 0 ? text.length : next === '/' ? end : end + 2;
+      out += text.slice(i, stop).replace(/[^\n]/g, ' ');
+      i = stop;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`' || (c === '/' && regexAllowed)) {
+      let j = i + 1;
+      let inClass = false;
+      for (; j < text.length; j += 1) {
+        const d = text[j];
+        if (d === '\\') { j += 1; continue; }
+        if (c === '/') {
+          if (d === '\n') break;
+          if (d === '[') inClass = true;
+          else if (d === ']') inClass = false;
+          else if (d === '/' && !inClass) break;
+          continue;
+        }
+        if (d === c || (c !== '`' && d === '\n')) break;
+      }
+      out += text.slice(i, j + 1);
+      i = j + 1;
+      word = '';
+      regexAllowed = false;
+      continue;
+    }
+    out += c;
+    i += 1;
+    if (/[\w$]/.test(c)) { word += c; regexAllowed = BEFORE_REGEX_WORDS.has(word); }
+    else if (!/\s/.test(c)) { word = ''; regexAllowed = !')]}'.includes(c); }
+    else word = '';
+  }
+  return out;
+}
+
 /** Module specifiers a browser would request for this source: static imports and re-exports (with or without
- * whitespace, over several lines) and dynamic import() of a string literal. Comments are removed first so a
- * commented-out import is not a dependency. A specifier spelled inside a string literal is out of scope. */
+ * whitespace, over several lines) and dynamic import() of a string literal. Comments do not count; a specifier
+ * spelled inside a string literal is reported too (a false alarm fails the check, it cannot hide a dependency). */
 function importSpecifiers(text) {
-  const code = text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:\\])\/\/.*$/gm, '$1');
+  const code = stripComments(text);
   const lead = '(?:^|[^.\\w$])';
   const patterns = [
     new RegExp(`${lead}import\\s*(?:[\\w$*{}\\s,]+?\\s*from\\s*)?(['"])([^'"\\n]+)\\1`, 'g'),
@@ -93,6 +141,23 @@ test('the import scanner finds every form a browser loads and skips comments', (
     "const url = 'http://example.invalid/x.js'; obj.import('./method.js');",
   ].join('\n');
   assert.deepEqual(importSpecifiers(source).sort(), ['../shared/ns.js', './a.js', './b.js', './lazy.js', './re.js', './side.js', './star.js'].sort());
+});
+
+test('a // or /* inside a string, template or regular expression does not hide the imports after it', () => {
+  const source = [
+    "const marker = '//'; import './after-string.js';",
+    "const begin = '/*';",
+    "import './between-strings.js';",
+    "const end = '*/';",
+    'const t = `//${marker}/*`; import "./after-template.js";',
+    "const re = /\\/\\//; import './after-regex.js';",
+    "const cls = /[/*]/g; import './after-class.js';",
+    'const half = width / 2; import "./after-division.js"; const third = height / 3;',
+    "if (ok) void /\\/\\*/.test(x); import './after-keyword-regex.js';",
+    "/* a real comment */ import './after-comment.js'; // import './commented.js';",
+  ].join('\n');
+  assert.deepEqual(importSpecifiers(source).sort(), ['./after-class.js', './after-comment.js', './after-division.js', './after-keyword-regex.js',
+    './after-regex.js', './after-string.js', './after-template.js', './between-strings.js'].sort());
 });
 
 test('the page imports only paths that a service from before issue 335 serves', async () => {
