@@ -43,12 +43,13 @@ const OLD_SERVICE_ASSETS = [
 ];
 const OLD_FILE = new Map(OLD_SERVICE_ASSETS.map(([url, file]) => [url, file]));
 
-/** Module paths this source may request: every quoted relative or root path ending in .js or .mjs, wherever it
+/** Module paths this source may request: every quoted relative or root path ending in .js or .mjs (a query or
+ * fragment may follow), wherever it
  * stands. A static import or re-export, an import() of a literal and a mention in a comment or string all count.
  * This is a superset on purpose: no parsing (comments, templates, regular expressions, line continuations) can hide
  * a dependency; a mention that is not an import can only fail the check, never let a missing path pass. */
 function moduleMentions(text) {
-  return [...new Set([...text.matchAll(/(['"])((?:\.{1,2}\/|\/)[^'"\s]*\.m?js)\1/g)].map((match) => match[2]))];
+  return [...new Set([...text.matchAll(/(['"])((?:\.{1,2}\/|\/)[^'"\s]*?\.m?js(?:[?#][^'"\s]*)?)\1/g)].map((match) => match[2]))];
 }
 
 /** Every module reachable from /drill.js, resolved as a browser does, reading each module through `read(url)`
@@ -89,12 +90,13 @@ test('every import form is found, and nothing a comment, string, template or reg
     "const u = `${import(/* why */ './in-template.js')}`;",
     "if (ok) {} /[/*]/g.test(text); import './after-block-regex.js';",
     "const half = width / 2; import './after-division.js';",
+    "import { v } from './versioned.js?v=2';",
     'const s = "a\\',
     '/*"; import "./after-continuation.js";',
   ];
   const expected = ['../shared/ns.js', './a.js', './b.js', './lazy.js', './re.js', './side.js', './star.js', './after-string.js',
     './between-strings.js', './after-nested-template.js', './in-template.js', './after-block-regex.js', './after-division.js',
-    './after-continuation.js'].sort();
+    './after-continuation.js', './versioned.js?v=2'].sort();
   for (const newline of ['\n', '\r\n']) assert.deepEqual(moduleMentions(lines.join(newline)).sort(), expected, JSON.stringify(newline));
   // A mention that is not an import counts too: it can only fail the check. Other strings do not.
   assert.deepEqual(moduleMentions("// see './commented.js'\nconst api = '/api/summary'; const site = 'http://example.invalid/x.js';"), ['./commented.js']);
