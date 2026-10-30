@@ -43,66 +43,12 @@ const OLD_SERVICE_ASSETS = [
 ];
 const OLD_FILE = new Map(OLD_SERVICE_ASSETS.map(([url, file]) => [url, file]));
 
-// Words after which a `/` starts a regular expression literal rather than a division.
-const BEFORE_REGEX_WORDS = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
-/** The source with its comments blanked (line breaks kept). String, template and regular expression literals are
- * copied as they are, so a `//` or `/*` inside one does not start a comment and hide the code after it. */
-function stripComments(text) {
-  let out = '';
-  let word = '';
-  let regexAllowed = true;
-  for (let i = 0; i < text.length;) {
-    const c = text[i];
-    const next = text[i + 1];
-    if (c === '/' && (next === '/' || next === '*')) {
-      const end = next === '/' ? text.indexOf('\n', i) : text.indexOf('*/', i + 2);
-      const stop = end < 0 ? text.length : next === '/' ? end : end + 2;
-      out += text.slice(i, stop).replace(/[^\n]/g, ' ');
-      i = stop;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === '`' || (c === '/' && regexAllowed)) {
-      let j = i + 1;
-      let inClass = false;
-      for (; j < text.length; j += 1) {
-        const d = text[j];
-        if (d === '\\') { j += 1; continue; }
-        if (c === '/') {
-          if (d === '\n') break;
-          if (d === '[') inClass = true;
-          else if (d === ']') inClass = false;
-          else if (d === '/' && !inClass) break;
-          continue;
-        }
-        if (d === c || (c !== '`' && d === '\n')) break;
-      }
-      out += text.slice(i, j + 1);
-      i = j + 1;
-      word = '';
-      regexAllowed = false;
-      continue;
-    }
-    out += c;
-    i += 1;
-    if (/[\w$]/.test(c)) { word += c; regexAllowed = BEFORE_REGEX_WORDS.has(word); }
-    else if (!/\s/.test(c)) { word = ''; regexAllowed = !')]}'.includes(c); }
-    else word = '';
-  }
-  return out;
-}
-
-/** Module specifiers a browser would request for this source: static imports and re-exports (with or without
- * whitespace, over several lines) and dynamic import() of a string literal. Comments do not count; a specifier
- * spelled inside a string literal is reported too (a false alarm fails the check, it cannot hide a dependency). */
-function importSpecifiers(text) {
-  const code = stripComments(text);
-  const lead = '(?:^|[^.\\w$])';
-  const patterns = [
-    new RegExp(`${lead}import\\s*(?:[\\w$*{}\\s,]+?\\s*from\\s*)?(['"])([^'"\\n]+)\\1`, 'g'),
-    new RegExp(`${lead}export\\s*[\\w$*{}\\s,]+?\\s*from\\s*(['"])([^'"\\n]+)\\1`, 'g'),
-    new RegExp(`${lead}import\\s*\\(\\s*(['"])([^'"\\n]+)\\1\\s*\\)`, 'g'),
-  ];
-  return [...new Set(patterns.flatMap((pattern) => [...code.matchAll(pattern)].map((match) => match[2])))];
+/** Module paths this source may request: every quoted relative or root path ending in .js or .mjs, wherever it
+ * stands. A static import or re-export, an import() of a literal and a mention in a comment or string all count.
+ * This is a superset on purpose: no parsing (comments, templates, regular expressions, line continuations) can hide
+ * a dependency; a mention that is not an import can only fail the check, never let a missing path pass. */
+function moduleMentions(text) {
+  return [...new Set([...text.matchAll(/(['"])((?:\.{1,2}\/|\/)[^'"\s]*\.m?js)\1/g)].map((match) => match[2]))];
 }
 
 /** Every module reachable from /drill.js, resolved as a browser does, reading each module through `read(url)`
@@ -116,8 +62,7 @@ async function importGraph(read, entry = '/drill.js') {
     const text = await read(url);
     seen.set(url, text !== null);
     if (text === null) continue;
-    for (const specifier of importSpecifiers(text)) {
-      if (!specifier.startsWith('.') && !specifier.startsWith('/')) continue;
+    for (const specifier of moduleMentions(text)) {
       pending.push(new URL(specifier, `http://page.invalid${url}`).pathname);
     }
   }
@@ -125,8 +70,8 @@ async function importGraph(read, entry = '/drill.js') {
 }
 const readOldFile = async (url) => (OLD_FILE.has(url) ? fs.readFileSync(`${ROOT}${OLD_FILE.get(url)}`, 'utf8') : null);
 
-test('the import scanner finds every form a browser loads and skips comments', () => {
-  const source = [
+test('every import form is found, and nothing a comment, string, template or regular expression holds can hide one', () => {
+  const lines = [
     "import{a}from'./a.js';",
     'import {',
     '  b,',
@@ -136,28 +81,23 @@ test('the import scanner finds every form a browser loads and skips comments', (
     "export * from './star.js';",
     "export { e } from './re.js';",
     "const lazy = () => import('./lazy.js');",
-    "// import gone from './commented.js';",
-    "/* import './blocked.js'; */",
-    "const url = 'http://example.invalid/x.js'; obj.import('./method.js');",
-  ].join('\n');
-  assert.deepEqual(importSpecifiers(source).sort(), ['../shared/ns.js', './a.js', './b.js', './lazy.js', './re.js', './side.js', './star.js'].sort());
-});
-
-test('a // or /* inside a string, template or regular expression does not hide the imports after it', () => {
-  const source = [
     "const marker = '//'; import './after-string.js';",
     "const begin = '/*';",
     "import './between-strings.js';",
     "const end = '*/';",
-    'const t = `//${marker}/*`; import "./after-template.js";',
-    "const re = /\\/\\//; import './after-regex.js';",
-    "const cls = /[/*]/g; import './after-class.js';",
-    'const half = width / 2; import "./after-division.js"; const third = height / 3;',
-    "if (ok) void /\\/\\*/.test(x); import './after-keyword-regex.js';",
-    "/* a real comment */ import './after-comment.js'; // import './commented.js';",
-  ].join('\n');
-  assert.deepEqual(importSpecifiers(source).sort(), ['./after-class.js', './after-comment.js', './after-division.js', './after-keyword-regex.js',
-    './after-regex.js', './after-string.js', './after-template.js', './between-strings.js'].sort());
+    'const t = `${`/*`}`; import "./after-nested-template.js";',
+    "const u = `${import(/* why */ './in-template.js')}`;",
+    "if (ok) {} /[/*]/g.test(text); import './after-block-regex.js';",
+    "const half = width / 2; import './after-division.js';",
+    'const s = "a\\',
+    '/*"; import "./after-continuation.js";',
+  ];
+  const expected = ['../shared/ns.js', './a.js', './b.js', './lazy.js', './re.js', './side.js', './star.js', './after-string.js',
+    './between-strings.js', './after-nested-template.js', './in-template.js', './after-block-regex.js', './after-division.js',
+    './after-continuation.js'].sort();
+  for (const newline of ['\n', '\r\n']) assert.deepEqual(moduleMentions(lines.join(newline)).sort(), expected, JSON.stringify(newline));
+  // A mention that is not an import counts too: it can only fail the check. Other strings do not.
+  assert.deepEqual(moduleMentions("// see './commented.js'\nconst api = '/api/summary'; const site = 'http://example.invalid/x.js';"), ['./commented.js']);
 });
 
 test('the page imports only paths that a service from before issue 335 serves', async () => {
