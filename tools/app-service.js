@@ -46,8 +46,10 @@ async function requestApp(budgetMs, url, init, readBody = null) {
   const call = boundedNetworkCall(budgetMs);
   try {
     const response = await call.settle(fetch(url, { ...init, signal: call.signal }));
-    const body = readBody ? await call.settle(readBody(response)) : undefined;
-    return { response, body };
+    // Read the answer the caller needs, or cancel the one it does not, inside the budget: a body
+    // left unread is a socket left open once the budget is released, holding the process.
+    const body = await call.settle(readBody ? readBody(response) : response.body?.cancel());
+    return { response, body: readBody ? body : undefined };
   } finally {
     call.release();
   }
