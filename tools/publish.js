@@ -420,28 +420,62 @@ function assertCoachQueue(auth, coachAuthority, epoch) {
   }
 }
 
+// #339: one network call of this one-shot process, ended at its budget whatever fetch does.
+// AbortSignal.timeout's timer does not keep the process alive, and when a relay drops the
+// connection before it reads the request, fetch on Node 20 (and on Node 22 on Windows) never
+// settles: the event loop then empties and the process used to exit 13 with no reply, so its
+// caller never learned which recorded body the failed POST carried. This one ref'd timer, of the
+// same budget, aborts the request and rejects whatever the caller is awaiting (`settle`) at the
+// budget and never later; `release` clears it as soon as the call is over. The budget is checked
+// as AbortSignal.timeout checked it, so a value it refused still fails before anything is sent.
+function boundedNetworkCall(budgetMs) {
+  if (!Number.isInteger(budgetMs) || budgetMs < 0 || budgetMs > 0xFFFF_FFFF) {
+    throw new RangeError('network budget must be a whole number of milliseconds');
+  }
+  const controller = new AbortController();
+  let expire;
+  const expired = new Promise((_, reject) => { expire = reject; });
+  expired.catch(() => {});
+  const timer = setTimeout(() => {
+    const reason = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    controller.abort(reason);
+    expire(reason);
+  }, budgetMs);
+  return {
+    signal: controller.signal,
+    settle: (pending) => Promise.race([pending, expired]),
+    release: () => clearTimeout(timer),
+  };
+}
+
 // Never interpolate a fetch failure's message: it quotes the URL, and the URL carries
 // the session token.
 async function postPublish(lock, body, timeoutMs = PUBLISH_TIMEOUT_MS) {
   const url = `http://127.0.0.1:${lock.port}/api/publish?token=${encodeURIComponent(lock.sessionToken)}`;
   const budget = Math.max(1, timeoutMs);
-  let res;
+  let call = null;
   try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(budget),
-    });
-  } catch {
-    bail('PUBLISH_FAILED', '서버에 게시하지 못했습니다. 서버가 살아 있는지 확인하세요.');
+    let res;
+    try {
+      call = boundedNetworkCall(budget);
+      res = await call.settle(fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: call.signal,
+      }));
+    } catch {
+      bail('PUBLISH_FAILED', '서버에 게시하지 못했습니다. 서버가 살아 있는지 확인하세요.');
+    }
+    const json = await call.settle(res.json()).catch(() => null);
+    if (res.status !== 200 || !json?.ok) {
+      const rejection = sanitizePublishRejection(res.status, json);
+      bail('PUBLISH_REJECTED', `서버가 게시를 거부했습니다 (${rejection.httpStatus}).`, rejection);
+    }
+    return json;
+  } finally {
+    call?.release();
   }
-  const json = await res.json().catch(() => null);
-  if (res.status !== 200 || !json?.ok) {
-    const rejection = sanitizePublishRejection(res.status, json);
-    bail('PUBLISH_REJECTED', `서버가 게시를 거부했습니다 (${rejection.httpStatus}).`, rejection);
-  }
-  return json;
 }
 
 // The publishId is read-then-incremented, so it must be decided and spent under the
@@ -959,25 +993,32 @@ async function waitForUser(lock, envelope, opts, out) {
     timeoutMs: String(opts.waitMs),
     expectDecisionId: envelope.next.decisionId ?? '',
   });
-  let res;
+  // #339: bounded like the POST, so a wait that never settles still returns the durable publish.
+  let call = null;
   try {
-    res = await fetch(`http://127.0.0.1:${lock.port}/api/wait-action?${query}`, {
-      signal: AbortSignal.timeout(opts.waitMs + 10_000),
-    });
-  } catch {
-    out.waitError = '액션 대기에 실패했습니다. 게시는 이미 끝났으니 --wait-only로 다시 기다리세요.';
-    return;
+    let res;
+    try {
+      call = boundedNetworkCall(opts.waitMs + 10_000);
+      res = await call.settle(fetch(`http://127.0.0.1:${lock.port}/api/wait-action?${query}`, {
+        signal: call.signal,
+      }));
+    } catch {
+      out.waitError = '액션 대기에 실패했습니다. 게시는 이미 끝났으니 --wait-only로 다시 기다리세요.';
+      return;
+    }
+    if (res.status !== 200) {
+      out.waitError = `액션 대기가 거부됐습니다 (${res.status}).`;
+      return;
+    }
+    const action = await call.settle(res.json()).catch(() => null);
+    if (!action || typeof action !== 'object' || (!action.timeout && typeof action.decisionId !== 'string')) {
+      out.waitError = '액션 대기 응답을 해석하지 못했습니다.';
+      return;
+    }
+    out.userAction = action;
+  } finally {
+    call?.release();
   }
-  if (res.status !== 200) {
-    out.waitError = `액션 대기가 거부됐습니다 (${res.status}).`;
-    return;
-  }
-  const action = await res.json().catch(() => null);
-  if (!action || typeof action !== 'object' || (!action.timeout && typeof action.decisionId !== 'string')) {
-    out.waitError = '액션 대기 응답을 해석하지 못했습니다.';
-    return;
-  }
-  out.userAction = action;
 }
 
 async function main() {
