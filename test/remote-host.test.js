@@ -333,6 +333,47 @@ test("a renewed certificate is served to new connections without a restart", asy
   assert.equal((await request(port, { method: "POST", path: "/api/host/login", body: { password: PASSWORD }, ca: CERT_B.cert })).status, 200);
 });
 
+test("a certificate renewed between the server's first read and its reloader is still picked up", async (t) => {
+  const dir = createOwnedTempDir("remote-host-renew-race");
+  const cert = path.join(dir, "host.crt"), key = path.join(dir, "host.key");
+  fs.copyFileSync(CERT_A.cert, cert);
+  fs.copyFileSync(CERT_A.key, key);
+  // The renewal lands right after startup reads the key: the server holds pair A, the disk holds B.
+  const read = fs.readFileSync;
+  let renewed = false;
+  fs.readFileSync = function (file, ...rest) {
+    const value = read.call(this, file, ...rest);
+    if (!renewed && file === key) {
+      renewed = true;
+      fs.copyFileSync(CERT_B.cert, cert);
+      fs.copyFileSync(CERT_B.key, key);
+    }
+    return value;
+  };
+  let booted;
+  try {
+    booted = await boot(t, { remote: { tlsCert: cert, tlsKey: key, tlsReloadMs: 50 } });
+  } finally {
+    fs.readFileSync = read;
+  }
+  assert.equal(renewed, true);
+  const fingerprint = () => new Promise((resolve, reject) => {
+    const socket = tls.connect({ host: "127.0.0.1", port: booted.port, servername: "localhost", rejectUnauthorized: false }, () => {
+      resolve(socket.getPeerX509Certificate().fingerprint256);
+      socket.end();
+    });
+    socket.on("error", reject);
+  });
+  const b = new X509Certificate(fs.readFileSync(CERT_B.cert)).fingerprint256;
+  const deadline = Date.now() + 5000;
+  let seen = await fingerprint();
+  while (seen !== b && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    seen = await fingerprint();
+  }
+  assert.equal(seen, b, "the reloader started from what the server read, so the newer files are applied");
+});
+
 test("a remote host plays through the shared relay proxy, without the study link, and a logout ends its stream", { timeout: 60000 }, async (t) => {
   const credentials = createOwnedTempDir("remote-host-relay");
   await setHostPassword(credentials, PASSWORD);
@@ -412,9 +453,12 @@ test("an idle session's open stream ends on the sweep, with no further request",
   const relay = await fakeRelay();
   t.after(() => relay.close());
   const session = makeSession(createOwnedTempDir("remote-host-idle-session"), relay.port);
+  // The session clock is held still until the stream is open, then moved past the idle limit: the
+  // verdict does not depend on how long the proxy took to deliver the first event.
+  let clock = Date.now();
   const h = await startProxyApp(t, { loop: makeLoop(session), relay, session, remoteHost: remoteOptions({
     appDir: path.join(credentials, ".app"), sweepMs: 100,
-    authOptions: { failureDelayMs: 0, sessions: createHostSessions({ idleMs: 600 }) },
+    authOptions: { failureDelayMs: 0, sessions: createHostSessions({ now: () => clock, idleMs: 600 }) },
   }) });
   const port = h.app.remoteHostPort;
   const { token } = (await login(port)).json;
@@ -427,11 +471,14 @@ test("an idle session's open stream ends on the sweep, with no further request",
     req.on("error", reject);
     req.end();
   });
-  const started = Date.now();
+  assert.equal(stream.res.statusCode, 200);
+  // Several sweeps pass while the session is still within its idle limit: the stream stays open.
+  const early = await Promise.race([stream.ended.then(() => true), new Promise((resolve) => setTimeout(resolve, 400, false))]);
+  assert.equal(early, false, "not before the idle limit");
+  clock += 700;
   const ended = await Promise.race([stream.ended.then(() => true), new Promise((resolve) => setTimeout(resolve, 10_000, false))]);
   if (!ended) stream.res.destroy();
   assert.equal(ended, true, "the idle sweep closed the stream");
-  assert.ok(Date.now() - started >= 400, "not before the idle limit");
   const deadline = Date.now() + 5000;
   while (relay.openStreams() !== 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(relay.openStreams(), 0);
