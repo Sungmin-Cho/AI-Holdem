@@ -294,39 +294,54 @@ export function parseServeArgs(rest) {
   };
   return { playerRuntime, publicPort, publicHost, tlsCert, tlsKey, remoteHost };
 }
-async function readHiddenLine(question) {
-  const { stdin, stderr } = process;
-  stderr.write(question);
-  stdin.setEncoding("utf8");
-  stdin.setRawMode(true);
-  stdin.resume();
+/**
+ * Read one line per prompt from a TTY without echo. Raw mode is on before the first prompt is
+ * written and stays on across all of them, so nothing typed (or pasted ahead) is ever echoed, and
+ * a chunk holding several lines fills several answers.
+ */
+export function readHiddenLines(prompts, { stdin = process.stdin, stderr = process.stderr } = {}) {
   return new Promise((resolve, reject) => {
+    const lines = [];
     let value = "";
-    const finish = (error) => {
+    let lastWasCR = false;
+    stdin.setEncoding("utf8");
+    stdin.setRawMode(true);
+    const done = (error) => {
       stdin.off("data", onData);
       stdin.setRawMode(false);
       stdin.pause();
-      stderr.write("\n");
       if (error) reject(error);
-      else resolve(value);
+      else resolve(lines);
     };
     const onData = (chunk) => {
       for (const ch of chunk) {
-        if (ch === "\r" || ch === "\n") return finish();
-        if (ch === "\u0003" || ch === "\u0004")
-          return finish(Object.assign(new Error("취소했습니다."), { code: "CANCELLED" }));
-        if (ch === "\u007f" || ch === "\b") value = [...value].slice(0, -1).join("");
+        if (ch === "\n" && lastWasCR) {
+          lastWasCR = false;
+          continue;
+        }
+        lastWasCR = ch === "\r";
+        if (ch === "\r" || ch === "\n") {
+          stderr.write("\n");
+          lines.push(value);
+          value = "";
+          if (lines.length === prompts.length) return done();
+          stderr.write(prompts[lines.length]);
+        } else if (ch === "\u0003" || ch === "\u0004") {
+          stderr.write("\n");
+          return done(Object.assign(new Error("취소했습니다."), { code: "CANCELLED" }));
+        } else if (ch === "\u007f" || ch === "\b") value = [...value].slice(0, -1).join("");
         else if (ch >= " ") value += ch;
       }
     };
+    stderr.write(prompts[0]);
     stdin.on("data", onData);
+    stdin.resume();
   });
 }
 /** A TTY asks twice without echo; anything else reads the first line of stdin. */
 export async function readNewHostPassword({ stdin = process.stdin } = {}) {
   if (stdin.isTTY) {
-    const first = await readHiddenLine("새 원격 호스트 비밀번호(12자 이상): ");
-    const second = await readHiddenLine("한 번 더 입력: ");
+    const [first, second] = await readHiddenLines(["새 원격 호스트 비밀번호(12자 이상): ", "한 번 더 입력: "], { stdin });
     if (first !== second)
       throw Object.assign(new Error("두 입력이 다릅니다."), { code: "PASSWORD_MISMATCH" });
     return first;
@@ -381,7 +396,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === SELF) {
       console.log(service.url);
     }
   } catch (e) {
-    console.error(e.code ?? e.message);
+    // The code for scripts and the reason for whoever runs it (e.g. "PASSWORD_TOO_SHORT: …").
+    console.error(e.code && e.message && e.message !== e.code ? `${e.code}: ${e.message}` : (e.code ?? e.message));
     process.exitCode = 1;
   }
 }

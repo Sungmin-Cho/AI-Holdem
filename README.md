@@ -98,7 +98,7 @@ The default connection is HTTP. Public-host, port, and TLS configuration are cov
 
 ### Host remotely from an always-on server
 
-Run the app on an always-on machine such as a Mac mini and host games from any device's browser with a **password login**. The remote host listener is opt-in and HTTPS-only; pairing it with a private network such as Tailscale is recommended. Setup and a launchd example are in the [operations guide](docs/operations.ko.md#상시-서버와-원격-호스트) (Korean).
+Run the app on an always-on machine such as a Mac mini and host games from any device's browser with a **password login**. The remote host listener is opt-in and HTTPS-only; pairing it with a private network such as Tailscale is recommended. A step-by-step deployment guide is in [docs/deploy-mac-mini.ko.md](docs/deploy-mac-mini.ko.md), and an options summary in the [operations guide](docs/operations.ko.md#상시-서버와-원격-호스트) (both Korean).
 
 ## Play → review → practice
 

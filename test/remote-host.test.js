@@ -13,7 +13,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createOwnedTempDir } from "./helpers/owned-fixtures.mjs";
 import { fakeRelay, makeLoop, makeSession, startProxyApp } from "./helpers/relay-proxy-fixture.js";
-import { parseServeArgs, setHostPassword, startAppService } from "../tools/app-service.js";
+import { parseServeArgs, readHiddenLines, setHostPassword, startAppService } from "../tools/app-service.js";
+import { EventEmitter } from "node:events";
 import { canonicalRemoteName, remoteHostForms, remoteOrigin, remoteRouteOf } from "../tools/app-server.js";
 import { createHostSessions, readHostCredential, verifyPassword } from "../tools/host-auth.js";
 
@@ -548,4 +549,42 @@ test("the loopback listener is unchanged when the remote listener is on", async 
   assert.equal(host, 403);
   // Remote paths do not exist on loopback.
   assert.equal((await fetch(`${app.origin}/api/host/login`, { method: "POST", headers: bearer(app.token), body: "{}" })).status, 404);
+});
+
+test("the hidden password prompt never echoes: raw mode is on before the first prompt and across both", async () => {
+  const fakeTty = () => {
+    const events = [];
+    const stdin = Object.assign(new EventEmitter(), {
+      isRaw: false,
+      setEncoding() {},
+      setRawMode(on) { this.isRaw = on; events.push(`raw:${on}`); },
+      resume() { events.push("resume"); },
+      pause() { events.push("pause"); },
+    });
+    const stderr = { write(text) { events.push(stdin.isRaw ? `raw-write:${JSON.stringify(text)}` : `cooked-write:${JSON.stringify(text)}`); } };
+    return { stdin, stderr, events };
+  };
+  const prompts = ["first: ", "again: "];
+  // An answer that never comes (input after the first line dropped) fails instead of hanging.
+  const within = (promise) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error("no answer: typed input was lost")), 2000))]);
+  // Typed one key at a time, with a backspace.
+  let tty = fakeTty();
+  let pending = readHiddenLines(prompts, tty);
+  for (const ch of "secretX\u007f\rsecret\r") tty.stdin.emit("data", ch);
+  assert.deepEqual(await within(pending), ["secret", "secret"]);
+  assert.equal(tty.events[0], "raw:true", "raw mode before anything is written");
+  assert.ok(tty.events.every((event) => !event.startsWith("cooked-write")), "every prompt is written in raw mode");
+  assert.deepEqual(tty.events.slice(-2), ["raw:false", "pause"], "the terminal is restored at the end");
+  assert.equal(tty.events.filter((event) => event.startsWith("raw:")).length, 2, "raw mode is not toggled between the prompts");
+  // Pasted ahead in one chunk, with CRLF line ends: both answers are kept.
+  tty = fakeTty();
+  pending = readHiddenLines(prompts, tty);
+  tty.stdin.emit("data", "한글 비밀번호\r\n한글 비밀번호\r\n");
+  assert.deepEqual(await within(pending), ["한글 비밀번호", "한글 비밀번호"]);
+  // Ctrl-C cancels and still restores the terminal.
+  tty = fakeTty();
+  pending = readHiddenLines(prompts, tty);
+  tty.stdin.emit("data", "abc\u0003");
+  await assert.rejects(within(pending), { code: "CANCELLED" });
+  assert.deepEqual(tty.events.slice(-2), ["raw:false", "pause"]);
 });
