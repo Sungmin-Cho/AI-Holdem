@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import net from 'node:net';
+import http from 'node:http';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {isDeepStrictEqual} from 'node:util';
@@ -59,18 +59,21 @@ const RECOVERY_FIELDS = ['event', 'code', 'mode', 'httpStatus', 'serverCode', 'r
 const PUBLISH_CLI = fileURLToPath(new URL('../tools/publish.js', import.meta.url));
 
 // #319: one real transport failure. Armed, the next publish runs the real publisher against a
-// relay port that accepts the connection and drops it at once: it records its attempt, its POST
-// fails (PUBLISH_FAILED with the record's identity) and the live lock is restored before the
-// shim exits. Every other invocation is the real publisher. The shim, its plan and its report
-// live in their own owned directory, never inside the game directory.
+// relay port that reads the whole request and drops the connection without an answer: it
+// records its attempt, its POST fails (PUBLISH_FAILED with the record's identity) and the live
+// lock is restored before the shim exits. Every other invocation is the real publisher. The
+// shim, its plan and its report live in their own owned directory, never inside the game
+// directory. The drop waits for the whole request: a connection dropped before the request is
+// written leaves fetch unsettled on Node 20 (and on Node 22 on Windows), and publish.js then
+// exits 13 with no reply; one dropped mid-body fails as EPIPE or ECONNRESET instead.
 async function transportFailingPublisher(t) {
   const dir = createOwnedTempDir('holdem-timed-shim');
   const plan = path.join(dir, 'plan.json');
   const report = path.join(dir, 'report.json');
   const shim = path.join(dir, 'publish-shim.cjs');
-  const drop = net.createServer((socket) => socket.destroy());
+  const drop = http.createServer((req) => { req.resume(); req.on('end', () => req.socket.destroy()); });
   await new Promise((resolve) => drop.listen(0, '127.0.0.1', resolve));
-  t.after(() => new Promise((resolve) => drop.close(resolve)));
+  t.after(() => new Promise((resolve) => { drop.closeAllConnections(); drop.close(resolve); }));
   fs.writeFileSync(shim, [
     "const fs = require('node:fs');",
     "const path = require('node:path');",

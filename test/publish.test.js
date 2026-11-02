@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import { createServer as createRawHttpServer } from 'node:http';
-import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -555,8 +554,10 @@ test('publish --retry: 서버에 닿지 못했던 게시는 재시도로 이벤�
 test('publish --retry: 기록된 본문의 시계를 보내고 재시도 인자의 시계로 본문을 만들지 않는다', async () => {
   const dir = tmpDir();
   const file = turnFile(dir, sampleTurn());
-  // The first POST reaches a port that drops the connection, held open so nothing else takes it.
-  const drop = registerOwnedServer(net.createServer((socket) => socket.destroy()), 'publish-drop');
+  // The first POST reaches a port that reads the whole request and drops the connection without an
+  // answer, held open so nothing else takes it. (Dropped before the request is written, fetch
+  // never settles on Node 20 and publish.js exits 13 with no reply.)
+  const drop = createHttpServer((req) => { req.resume(); req.on('end', () => req.socket.destroy()); });
   await new Promise((resolve) => drop.listen(0, '127.0.0.1', resolve));
   let failed;
   try {
@@ -565,7 +566,7 @@ test('publish --retry: 기록된 본문의 시계를 보내고 재시도 인자�
     }));
     failed = await runFailing(dir, ['--from', file, '--level-clock', '60000|41000|2026-11-02T03:00:00.000Z|1|100/200']);
   } finally {
-    await new Promise((resolve) => drop.close(resolve));
+    await new Promise((resolve) => { drop.closeAllConnections(); drop.close(resolve); });
   }
   assert.equal(failed.json.code, 'PUBLISH_FAILED');
   const recorded = JSON.parse(fs.readFileSync(path.join(dir, '.publish-attempt.json'), 'utf8')).body.levelClock;
