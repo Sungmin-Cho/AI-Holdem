@@ -376,6 +376,21 @@ test("a failed read or apply keeps the current pair and retries the same renewal
   assert.equal(applied[0].cert.toString(), B[pair.cert].toString());
 });
 
+test("a combined certificate-and-key file is read once per check, so its pair comes from one version", () => {
+  const combined = { "/host.pem": Buffer.concat([fs.readFileSync(new URL("a.crt", FIXTURES)), fs.readFileSync(new URL("a.key", FIXTURES))]) };
+  let reads = 0;
+  const applied = [];
+  const reloader = createTlsReloader({ certPath: "/host.pem", keyPath: "/host.pem", log: () => {},
+    readFile: (file) => { reads += 1; return Buffer.from(combined[file]); }, apply: (options) => applied.push(options) });
+  reads = 0;
+  assert.equal(reloader.check(), false);
+  assert.equal(reads, 1);
+  combined["/host.pem"] = Buffer.concat([fs.readFileSync(new URL("b.crt", FIXTURES)), fs.readFileSync(new URL("b.key", FIXTURES))]);
+  assert.equal(reloader.check(), true);
+  assert.equal(reads, 2);
+  assert.equal(applied[0].cert, applied[0].key, "certificate and key are the same bytes");
+});
+
 test("a symlinked certificate path is followed: replacing its target is a change", { skip: process.platform === "win32" && "symlinks need privileges on Windows" }, () => {
   const dir = createOwnedTempDir("host-auth-tls-link");
   const target = fixturePair(dir, "a");
