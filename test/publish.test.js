@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { startServer as startRawServer } from '../server/server.js';
 import { createOwnedTempDir, registerOwnedServer, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
+import { writeStallingFetch } from './helpers/stalling-fetch.mjs';
 
 function createHttpServer(...args) {
   return registerOwnedServer(createRawHttpServer(...args), 'publish-http');
@@ -607,39 +608,6 @@ async function finBeforeRequestListener() {
       server.close(() => resolve());
     }),
   };
-}
-
-// #339: a call that never settles, whatever its signal does — the worst case on every version.
-// Only the named route stalls; every other request is real. Stage `request` (the default) is a
-// fetch that never settles; stage `body` answers 200 at once with a body that never ends. The
-// moment the caller's signal aborts, and the moment the process exits, are written down
-// synchronously by the process itself.
-function writeStallingFetch() {
-  const dir = createOwnedTempDir('holdem-stall');
-  const preload = path.join(dir, 'stall-fetch.cjs');
-  fs.writeFileSync(preload, [
-    "const fs = require('node:fs');",
-    'const route = process.env.HOLDEM_TEST_STALL_ROUTE;',
-    "const stage = process.env.HOLDEM_TEST_STALL_STAGE ?? 'request';",
-    'const report = process.env.HOLDEM_TEST_STALL_REPORT;',
-    'const exitReport = process.env.HOLDEM_TEST_STALL_EXIT_REPORT;',
-    "if (exitReport) process.on('exit', () => { fs.writeFileSync(exitReport, String(process.hrtime.bigint())); });",
-    'const realFetch = globalThis.fetch;',
-    'globalThis.fetch = (url, init = {}) => {',
-    '  if (new URL(String(url)).pathname !== route) return realFetch(url, init);',
-    '  const calledAt = String(process.hrtime.bigint());',
-    "  init.signal?.addEventListener('abort', () => {",
-    '    fs.writeFileSync(report, JSON.stringify({ calledAt, abortedAt: String(process.hrtime.bigint()) }));',
-    '  }, { once: true });',
-    "  if (stage === 'body') {",
-    '    const endless = new ReadableStream({ pull: () => new Promise(() => {}) });',
-    "    return Promise.resolve(new Response(endless, { status: 200, headers: { 'content-type': 'application/json' } }));",
-    '  }',
-    '  return new Promise(() => {});',
-    '};',
-    '',
-  ].join('\n'));
-  return { preload, report: path.join(dir, 'abort.json'), exitReport: path.join(dir, 'exit.txt') };
 }
 
 // A deadline that leaves the publisher time to start and take its lock on a slow runner.

@@ -8,7 +8,8 @@ import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtur
 import { newDeck } from '../engine/cards.js';
 import { ownedProcessStartTime } from '../engine/state.js';
 import { engineInitFlags, createGameLoop } from '../tools/game-loop.js';
-import { inspectStudyService, stopStudyService } from '../tools/study-service.js';
+import { inspectStudyService, stopStudyService, ensureStudyService, CLIENT_WAIT_MS, HTTP_WAIT_MS } from '../tools/study-service.js';
+import { writeStallingFetch, stallEnv, stalledCalls, stalledAborts, stalledExit, msBetween, nodeOptionsRequire } from './helpers/stalling-fetch.mjs';
 import { studyBudget } from './helpers/platform.js';
 import {
   scaled,
@@ -21,6 +22,7 @@ import {
   within,
   until,
   stopOwnedStudy,
+  ownedServiceOptions,
   command,
   waitValue,
   relayRequest,
@@ -414,6 +416,68 @@ test('S8 full: package study commands require an explicit store and own service 
   assert.equal(output.trim(), service.studyUrl);
   await command(npm, [...npmArgs, 'run', '--silent', 'study:stop', '--', storeDir], { cwd: ROOT });
   assert.throws(() => process.kill(service.pid, 0), (error) => error.code === 'ESRCH');
+});
+
+// #343: `npm run study:stop` is a one-shot process. When its health check, its shutdown request,
+// the shutdown's answer or the cancel of an oversized one never settles, nothing but that request's budget (HTTP_WAIT_MS, inside the
+// call's CLIENT_WAIT_MS) may keep it alive: it used to exit 13 with no message, the service still
+// running. Every moment is the stopping process's own; npm loads the preload too, and records
+// nothing. The service runs in its own process, so this one blocking in fixture work starves
+// nothing.
+test('S8 full: package study:stop ends with a message, never exit 13, when a study request never settles (#343)', { timeout: studyBudget({ coldStarts: 1, warmCalls: 3 }) }, async (t) => {
+  const storeDir = createOwnedTempDir('holdem-s8-study-stop-stall');
+  t.after(() => stopOwnedStudy(storeDir));
+  const service = await ensureStudyService(storeDir, ownedServiceOptions());
+  const npm = process.platform === 'win32' ? process.execPath : path.join(path.dirname(process.execPath), 'npm');
+  const npmArgs = process.platform === 'win32' ? [path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js')] : [];
+  const slackMs = process.platform === 'win32' ? 15000 : 3000;
+  const cases = [
+    { name: 'health request', route: '/api/health' },
+    { name: 'shutdown request', route: '/internal/shutdown' },
+    { name: 'shutdown answer', route: '/internal/shutdown', stage: 'body' },
+    // Oversized, so refused; its cancel never settles, and the budget ends it.
+    { name: 'shutdown oversized answer', route: '/internal/shutdown', stage: 'oversize-stuck-cancel' },
+  ].map((row) => ({ ...row, stall: writeStallingFetch() }));
+  const runStalled = async (row) => {
+    const env = { ...process.env, ...stallEnv(row.stall, row.route, row.stage),
+      NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} ${nodeOptionsRequire(row.stall.preload)}`.trim() };
+    try {
+      const stdout = await command(npm, [...npmArgs, 'run', '--silent', 'study:stop', '--', storeDir],
+        { cwd: ROOT, env, timeout: studyBudget({ warmCalls: 2 }) });
+      return { ...row, code: 0, signal: null, stdout, stderr: '' };
+    } catch (error) {
+      return { ...row, code: error.code, signal: error.signal ?? null, stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? '') };
+    }
+  };
+  // Independent: none reaches the service with anything that changes it.
+  const results = await Promise.all(cases.map(runStalled));
+  for (const result of results) {
+    const label = JSON.stringify({ case: result.name, code: result.code, signal: result.signal, stdout: result.stdout.slice(-200), stderr: result.stderr.slice(-400) });
+    assert.equal(result.code, 1, `study:stop ends with a message, not unsettled: ${label}`);
+    assert.match(result.stderr, /STUDY_DESCRIPTOR_CORRUPT/, label);
+    assert.doesNotMatch(result.stdout, /정지했습니다/, label);
+    const calls = stalledCalls(result.stall);
+    const aborts = stalledAborts(result.stall);
+    assert.ok(calls.length >= 1, `the route was called: ${label}`);
+    assert.equal(aborts.length, calls.length, `every stalled request was aborted: ${label}`);
+    for (const abort of aborts) {
+      const waitedMs = msBetween(abort.calledAt, abort.abortedAt);
+      assert.ok(waitedMs <= HTTP_WAIT_MS + slackMs, `${result.name} aborted ${waitedMs}ms after its call`);
+    }
+    const exitedAt = stalledExit(result.stall);
+    assert.ok(exitedAt !== null, `study:stop recorded its exit: ${label}`);
+    const heldMs = msBetween(aborts.at(-1).abortedAt, exitedAt);
+    assert.ok(heldMs <= slackMs, `${result.name}: study:stop exited ${heldMs}ms after its last abort`);
+    const totalMs = msBetween(calls[0], exitedAt);
+    assert.ok(totalMs <= CLIENT_WAIT_MS + slackMs, `${result.name}: study:stop exited ${totalMs}ms after its first stalled request`);
+  }
+  // The health check is retried while the same owner stays alive; the shutdown request is not.
+  assert.ok(stalledCalls(results[0].stall).length >= 2, 'a stalled health check is retried inside the client budget');
+  assert.equal(stalledCalls(results[1].stall).length, 1);
+  assert.equal(stalledCalls(results[2].stall).length, 1);
+  assert.equal(stalledCalls(results[3].stall).length, 1);
+  // A stop that never reached the service leaves it running.
+  assert.equal((await inspectStudyService(storeDir)).instanceId, service.instanceId);
 });
 
 test('S8 full: relay recovery restarts a stopped study service and publishes its rotated URL', { timeout: studyBudget({ coldStarts: 2, warmCalls: 2 }) }, async (t) => {

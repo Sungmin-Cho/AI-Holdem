@@ -7,6 +7,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { serverProcessStartTime, withNamedLock, writeJsonAtomic } from '../engine/state.js';
 import { createListenerOwnedBy } from './listener-ownership.js';
+// #339: every network call of this one-shot process ends at its budget. A POST that never settled
+// used to exit 13 with no reply, so its caller never learned which recorded body it carried.
+import { boundedNetworkCall } from './bounded-network-call.js';
 import {
   appendRejectionRecord, installAttemptDurably, readRetirementEvidence, removeDurably, removeRetirementEvidence,
   writeRetirementEvidence,
@@ -418,34 +421,6 @@ function assertCoachQueue(auth, coachAuthority, epoch) {
     || queued.payloadSha256 !== coachAuthority.payloadSha256) {
     bail('STALE_COACH_AUTHORITY');
   }
-}
-
-// #339: one network call of this one-shot process, ended at its budget whatever fetch does.
-// AbortSignal.timeout's timer does not keep the process alive, and when a relay drops the
-// connection before it reads the request, fetch on Node 20 (and on Node 22 on Windows) never
-// settles: the event loop then empties and the process used to exit 13 with no reply, so its
-// caller never learned which recorded body the failed POST carried. This one ref'd timer, of the
-// same budget, aborts the request and rejects whatever the caller is awaiting (`settle`) at the
-// budget and never later; `release` clears it as soon as the call is over. The budget is checked
-// as AbortSignal.timeout checked it, so a value it refused still fails before anything is sent.
-function boundedNetworkCall(budgetMs) {
-  if (!Number.isInteger(budgetMs) || budgetMs < 0 || budgetMs > 0xFFFF_FFFF) {
-    throw new RangeError('network budget must be a whole number of milliseconds');
-  }
-  const controller = new AbortController();
-  let expire;
-  const expired = new Promise((_, reject) => { expire = reject; });
-  expired.catch(() => {});
-  const timer = setTimeout(() => {
-    const reason = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
-    controller.abort(reason);
-    expire(reason);
-  }, budgetMs);
-  return {
-    signal: controller.signal,
-    settle: (pending) => Promise.race([pending, expired]),
-    release: () => clearTimeout(timer),
-  };
 }
 
 // Never interpolate a fetch failure's message: it quotes the URL, and the URL carries

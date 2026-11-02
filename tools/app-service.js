@@ -24,6 +24,7 @@ import { normalizeSetup } from "../shared/game-setup.js";
 import { createSessionManager } from "./session-manager.js";
 import { startAppServer } from "./app-server.js";
 import { hashPassword, writeHostCredential } from "./host-auth.js";
+import { boundedNetworkCall } from "./bounded-network-call.js";
 const SELF = fileURLToPath(import.meta.url),
   LOCK = "app.lock.d";
 const listenerOwnedBy = createListenerOwnedBy({
@@ -33,6 +34,37 @@ const listenerOwnedBy = createListenerOwnedBy({
   timeoutMs: process.platform === "win32" ? 15000 : 5000,
 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// #343: the CLI is a one-shot process, so each request to the app — and the read of its answer —
+// ends at its budget whatever fetch does (tools/bounded-network-call.js). A fetch that never
+// settled used to empty the event loop: exit 13, no message, and a stop that left the app running.
+// Inspect keeps the 10s each of its two requests always had. Prefill and stop had none; the app
+// answers both at once (prefill as soon as it has read the body, stop with 202 before it stops),
+// so the same 10s is a ceiling on waiting, never a delay that is spent.
+const INSPECT_REQUEST_MS = 10_000;
+const CONTROL_REQUEST_MS = 10_000;
+async function requestApp(budgetMs, url, init, readBody = null) {
+  const call = boundedNetworkCall(budgetMs);
+  try {
+    const response = await call.settle(fetch(url, { ...init, signal: call.signal }));
+    if (readBody) return { response, body: await call.settle(readBody(response)) };
+    // An answer read for its status alone still has a body, and a body left unread is a socket
+    // left open once the budget is released, holding the process. Cancel it inside the budget.
+    // That cleanup never changes the answer: a body that already failed rejects the cancel, and a
+    // cancel that never settles is ended by the budget's own abort.
+    await call.settle(response.body?.cancel()).catch(() => {});
+    return { response };
+  } finally {
+    call.release();
+  }
+}
+// A transport failure or an expired budget of a control request is that request's closed code.
+async function controlRequest(code, url, init) {
+  try {
+    return (await requestApp(CONTROL_REQUEST_MS, url, init)).response;
+  } catch (error) {
+    throw new Error(code, { cause: error });
+  }
+}
 function appDir(store) {
   const root = path.resolve(store);
   if (!path.isAbsolute(store)) throw new Error("absolute store path required");
@@ -71,16 +103,17 @@ export async function inspectAppService(store) {
     throw new Error("APP_DESCRIPTOR_INVALID");
   if (!(await listenerOwnedBy(d.pid, Number(new URL(d.origin).port))))
     throw new Error("APP_LISTENER_MISMATCH");
-  const challenge = await fetch(`${d.origin}/api/app`, {
+  // A transport failure or an expired budget is thrown as fetch gave it: the ensure waits retry it.
+  const { response: challenge } = await requestApp(INSPECT_REQUEST_MS, `${d.origin}/api/app`, {
     headers: { authorization: `Bearer ${randomBytes(32).toString("hex")}` },
-    signal: AbortSignal.timeout(10000),
   });
   if (challenge.status !== 401) throw new Error("APP_AUTH_INVALID");
-  const response = await fetch(`${d.origin}/api/app`, {
-    headers: { authorization: `Bearer ${d.token}` },
-    signal: AbortSignal.timeout(10000),
-  });
-  const snapshot = await response.json();
+  const { response, body: snapshot } = await requestApp(
+    INSPECT_REQUEST_MS,
+    `${d.origin}/api/app`,
+    { headers: { authorization: `Bearer ${d.token}` } },
+    (answer) => answer.json(),
+  );
   if (!response.ok || snapshot.instanceId !== d.instanceId)
     throw new Error("APP_IDENTITY_UNAVAILABLE");
   const after = readOwnedLock(store, LOCK),
@@ -184,7 +217,7 @@ export async function ensureAppService(
   const prefill = setup === undefined ? null : normalizeSetup(setup);
   const attach = async (service) => {
     if (prefill) {
-      const res = await fetch(`${service.origin}/api/prefill`, {
+      const res = await controlRequest("PREFILL_FAILED", `${service.origin}/api/prefill`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${service.token}`,
@@ -244,7 +277,7 @@ export async function ensureAppService(
 export async function stopAppService(store) {
   const service = await inspectAppService(store);
   if (service.status !== "running") return;
-  const response = await fetch(`${service.origin}/api/stop`, {
+  const response = await controlRequest("APP_STOP_FAILED", `${service.origin}/api/stop`, {
     method: "POST",
     headers: { authorization: `Bearer ${service.token}` },
   });
@@ -398,8 +431,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === SELF) {
       console.log(service.url);
     }
   } catch (e) {
-    // The code for scripts and the reason for whoever runs it (e.g. "PASSWORD_TOO_SHORT: …").
-    console.error(e.code && e.message && e.message !== e.code ? `${e.code}: ${e.message}` : (e.code ?? e.message));
+    // The code for scripts and the reason for whoever runs it (e.g. "PASSWORD_TOO_SHORT: …"). Only
+    // a string is a code: a DOMException's is a legacy number (a timeout's is 23), so its message
+    // alone is printed (#343).
+    const code = typeof e.code === "string" ? e.code : null;
+    console.error(code && e.message && e.message !== code ? `${code}: ${e.message}` : (code ?? e.message));
     process.exitCode = 1;
   }
 }
