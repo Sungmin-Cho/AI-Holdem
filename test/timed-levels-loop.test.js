@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {isDeepStrictEqual} from 'node:util';
@@ -63,17 +64,31 @@ const PUBLISH_CLI = fileURLToPath(new URL('../tools/publish.js', import.meta.url
 // records its attempt, its POST fails (PUBLISH_FAILED with the record's identity) and the live
 // lock is restored before the shim exits. Every other invocation is the real publisher. The
 // shim, its plan and its report live in their own owned directory, never inside the game
-// directory. The drop waits for the whole request: a connection dropped before the request is
-// written leaves fetch unsettled on Node 20 (and on Node 22 on Windows), and publish.js then
-// exits 13 with no reply; one dropped mid-body fails as EPIPE or ECONNRESET instead.
-async function transportFailingPublisher(t) {
+// directory. By default the drop waits for the whole request; one dropped mid-body fails as
+// EPIPE or ECONNRESET instead. `beforeRequest` (#339) answers the connection with FIN before
+// reading anything, half-open so the request written next is taken without a reset: on Node 20
+// (and on Node 22 on Windows) fetch then never settles, and the publisher must still end its
+// POST at the budget with the same PUBLISH_FAILED.
+async function transportFailingPublisher(t, {beforeRequest = false} = {}) {
   const dir = createOwnedTempDir('holdem-timed-shim');
   const plan = path.join(dir, 'plan.json');
   const report = path.join(dir, 'report.json');
   const shim = path.join(dir, 'publish-shim.cjs');
-  const drop = http.createServer((req) => { req.resume(); req.on('end', () => req.socket.destroy()); });
+  const sockets = new Set();
+  const drop = beforeRequest
+    ? net.createServer({allowHalfOpen: true}, (socket) => {
+      sockets.add(socket);
+      socket.on('error', () => {});
+      socket.on('close', () => sockets.delete(socket));
+      socket.end();
+    })
+    : http.createServer((req) => { req.resume(); req.on('end', () => req.socket.destroy()); });
   await new Promise((resolve) => drop.listen(0, '127.0.0.1', resolve));
-  t.after(() => new Promise((resolve) => { drop.closeAllConnections(); drop.close(resolve); }));
+  t.after(() => new Promise((resolve) => {
+    if (beforeRequest) for (const socket of sockets) socket.destroy();
+    else drop.closeAllConnections();
+    drop.close(() => resolve());
+  }));
   fs.writeFileSync(shim, [
     "const fs = require('node:fs');",
     "const path = require('node:path');",
@@ -125,7 +140,8 @@ async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand =
   const attempts = []; // by invocation: the recorded attempt a --retry found on disk, else null
   const injected = {index: null};
   const recovery = [];
-  const transport = transportFailOnce ? await transportFailingPublisher(t) : null;
+  const transport = transportFailOnce
+    ? await transportFailingPublisher(t, {beforeRequest: transportFailOnce === 'before-request'}) : null;
   const loop = createGameLoop({gameDir: root, resolver: async () => ({player: null, upper: null, notices: []}), opts: {
     port: 0, waitMs: 0, opponentRuntime: 'policy', pace: 'instant', resultHoldSec: 0,
     ...(managed ? {controlProtocolVersion: 1, playClockCheckpointMs: 10} : {}),
@@ -233,12 +249,11 @@ test('a timed tournament rises one level per hand after each level\'s play time'
 // #319: a real transport failure on a clock-carrying publish sends the loop down its automatic
 // resend (#274), which repeats the failed invocation's arguments, bound to the record that
 // invocation left. The publisher sends that record, so the relay shows the original clock.
-test('a resend after a failed POST shows the recorded clock, never a fresh one', {timeout: 120000}, async (t) => {
-  const f = await timedFixture(t, {transportFailOnce: true});
-  await f.loop.run();
+function assertBoundResendAfterTransportFailure(f) {
   const {failedIndex, resendIndex, shownAfterResend} = f.transport;
   assert.ok(Number.isInteger(failedIndex), 'a clock-carrying publish met the dropped connection');
   const failed = f.transport.report();
+  assert.equal(failed.status, 1, `the publisher replied instead of exiting unsettled: ${JSON.stringify(failed)}`);
   assert.equal(failed.reply?.code, 'PUBLISH_FAILED', JSON.stringify(failed.reply));
   const original = f.publishes[failedIndex];
   const recorded = failed.attemptBody;
@@ -253,6 +268,19 @@ test('a resend after a failed POST shows the recorded clock, never a fresh one',
   assert.ok(f.recovery.some((row) => row.event === 'server-recovery-verified' || row.event === 'server-recovered'), JSON.stringify(f.recovery));
   assert.equal(f.recovery.some((row) => row.event === 'publish-refused'), false, JSON.stringify(f.recovery));
   assertResendsCarryNoFreshClock(f);
+}
+
+test('a resend after a failed POST shows the recorded clock, never a fresh one', {timeout: 120000}, async (t) => {
+  const f = await timedFixture(t, {transportFailOnce: true});
+  await f.loop.run();
+  assertBoundResendAfterTransportFailure(f);
+});
+
+// #339: the same recovery when the relay drops the connection before it reads the request.
+test('a POST dropped before the relay reads it still fails as PUBLISH_FAILED and is resent bound to its record', {timeout: 120000}, async (t) => {
+  const f = await timedFixture(t, {transportFailOnce: 'before-request'});
+  await f.loop.run();
+  assertBoundResendAfterTransportFailure(f);
 });
 
 test('paused time does not count toward the level and the clock resumes after the park', {timeout: 120000}, async (t) => {
