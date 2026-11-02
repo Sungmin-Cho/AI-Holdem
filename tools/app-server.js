@@ -207,7 +207,8 @@ export function prepareRemoteHost({ port, listen = null, names = [], tlsCert = n
     remoteFailure("REMOTE_HOST_TLS_REQUIRED", "원격 호스트 리스너는 --remote-tls-cert와 --remote-tls-key가 필요합니다.");
   let tlsOptions, tlsIdentity;
   try {
-    tlsOptions = { cert: fs.readFileSync(tlsCert), key: fs.readFileSync(tlsKey) };
+    const cert = fs.readFileSync(tlsCert);
+    tlsOptions = { cert, key: tlsKey === tlsCert ? cert : fs.readFileSync(tlsKey) };
     tlsModule.createSecureContext(tlsOptions);
     tlsIdentity = tlsContentIdentity(tlsOptions.cert, tlsOptions.key);
   } catch {
@@ -283,6 +284,7 @@ export async function startAppServer({
   onStop = () => {},
   summaryCache = createSessionSummaryCache(),
   remoteHost = null,
+  tlsReloadMs = 10 * 60 * 1000,
 }) {
   if ((tlsCert && !tlsKey) || (!tlsCert && tlsKey)) {
     usage("--tls-cert와 --tls-key는 함께 필요합니다.");
@@ -293,8 +295,9 @@ export async function startAppServer({
   // The session manager already recovered its bound roster with engine players.
   if (!manager.room) { try { room.recover({}); } catch { /* no room yet */ } }
   const tls = Boolean(tlsCert && tlsKey);
+  const tlsCertBytes = tls ? fs.readFileSync(tlsCert) : null;
   const tlsOptions = tls
-    ? { cert: fs.readFileSync(tlsCert), key: fs.readFileSync(tlsKey) }
+    ? { cert: tlsCertBytes, key: tlsKey === tlsCert ? tlsCertBytes : fs.readFileSync(tlsKey) }
     : null;
   // Check the participant pair before any listener opens: creating the HTTPS server later would
   // throw after the loopback listener is already up.
@@ -1056,9 +1059,11 @@ export async function startAppServer({
     remoteSweep = null,
     remoteReloader = null,
     remoteHosts = new Set();
+  let publicReloader = null;
   const closeAll = async () => {
     clearInterval(remoteSweep);
     remoteReloader?.stop();
+    publicReloader?.stop();
     remoteAuth?.close();
     for (const listener of [remoteServer, publicServer, server]) {
       if (!listener?.listening) continue;
@@ -1151,6 +1156,17 @@ export async function startAppServer({
         publicServer.once("error", reject);
         publicServer.listen(publicPort, publicListen, resolve);
       });
+      // A participant port on HTTPS picks up a renewed certificate the same way, without a restart.
+      if (tls) {
+        publicReloader = createTlsReloader({
+          certPath: tlsCert,
+          keyPath: tlsKey,
+          intervalMs: tlsReloadMs,
+          initialIdentity: tlsContentIdentity(tlsOptions.cert, tlsOptions.key),
+          apply: (options) => publicServer.setSecureContext(options),
+        });
+        publicReloader.start();
+      }
     }
     if (remote) {
       remoteAuth = createRemoteHostAuth({ appDir: remote.appDir, ...remote.authOptions });

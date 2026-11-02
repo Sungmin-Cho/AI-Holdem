@@ -129,7 +129,7 @@ npm run app:stop -- /absolute/path/to/game
 
 ### 상시 서버와 원격 호스트
 
-맥미니처럼 늘 켜 둔 컴퓨터에서 앱을 돌리고, 호스트가 노트북·폰·태블릿 어느 기기에서든 브라우저로 로그인해 게임을 진행할 수 있다. 원격 호스트 리스너는 기본으로 꺼져 있고(`serve --remote-host-port`로 켠다), 루프백 로비·참가자 리스너(8899)는 그대로다.
+맥미니처럼 늘 켜 둔 컴퓨터에서 앱을 돌리고, 호스트가 노트북·폰·태블릿 어느 기기에서든 브라우저로 로그인해 게임을 진행할 수 있다. 원격 호스트 리스너는 기본으로 꺼져 있고(`serve --remote-host-port`로 켠다), 루프백 로비·참가자 리스너(8899)는 그대로다. **처음부터 따라 하는 배포 순서(확인 기록 포함)는 [맥미니 상시 서버 배포 가이드](deploy-mac-mini.ko.md)에 있다.** 이 절은 옵션과 동작 요약이다.
 
 - **HTTPS 전용**이다. 인증서·키(`--remote-tls-cert`·`--remote-tls-key`)가 없으면 서비스가 시작하지 않는다. 로그인 화면도 이 리스너에서만 열린다(참가자 포트·로컬 로비에는 없다).
 - 접속 이름을 `--remote-host-name`으로 등록한다(여러 번 가능, `127.0.0.1`은 로컬 로비 주소라 쓸 수 없다). Host 헤더가 등록한 이름·포트가 아니면 거부한다.
@@ -143,10 +143,9 @@ npm run app:stop -- /absolute/path/to/game
 2. 서버와 호스트 기기 모두 Tailscale에 로그인한다. 관리 콘솔 DNS 설정에서 MagicDNS와 HTTPS 인증서를 켠다.
 3. 인증서를 만든다. 이름은 `tailscale status`에 보이는 서버의 MagicDNS 이름(예: `mini.tail1234.ts.net`)이다.
    ```bash
-   mkdir -p ~/holdem-tls && chmod 700 ~/holdem-tls
-   tailscale cert --cert-file ~/holdem-tls/host.crt --key-file ~/holdem-tls/host.key mini.tail1234.ts.net
+   scripts/macmini/renew-tailscale-cert.sh mini.tail1234.ts.net ~/holdem-tls
    ```
-   설치 방식(앱 번들·Homebrew)에 따라 `tailscale` 경로와 쓸 수 있는 디렉터리가 다를 수 있다. 실패하면 `tailscale cert --help`로 확인한다.
+   스크립트는 `tailscale cert --cert-file - --key-file -` 한 번으로 인증서 체인과 키를 함께 받아, 모두 검증한 뒤 **한 파일 `host.pem`**(600)으로 바꾼다(이름 바꾸기 한 번 — 어긋난 쌍이 생기지 않는다). 앱에는 이 파일을 인증서와 키 양쪽으로 준다. App Store판 CLI는 샌드박스 탓에 파일 경로에 직접 쓰면 `~/Library/Containers/…` 아래로 가기 때문에 표준 출력으로 받는다. CLI 경로는 기본 `/Applications/Tailscale.app/Contents/MacOS/Tailscale`이고 환경 변수 `TAILSCALE`로 바꾼다.
 4. 원격 호스트 비밀번호를 정한다(12자 이상, 입력은 화면에 보이지 않는다). store 경로는 절대 경로다.
    ```bash
    node tools/app-service.js host-password /Users/me/holdem-store
@@ -158,7 +157,7 @@ npm run app:stop -- /absolute/path/to/game
 ```bash
 node tools/app-service.js serve /Users/me/holdem-store --player-runtime codex \
   --remote-host-port 8898 --remote-host-listen 100.101.102.103 --remote-host-name mini.tail1234.ts.net \
-  --remote-tls-cert ~/holdem-tls/host.crt --remote-tls-key ~/holdem-tls/host.key
+  --remote-tls-cert ~/holdem-tls/host.pem --remote-tls-key ~/holdem-tls/host.pem
 # remote host: https://mini.tail1234.ts.net:8898/
 ```
 
@@ -194,8 +193,8 @@ node tools/app-service.js serve /Users/me/holdem-store --player-runtime codex \
     <string>--remote-host-port</string><string>8898</string>
     <string>--remote-host-listen</string><string>100.101.102.103</string>
     <string>--remote-host-name</string><string>mini.tail1234.ts.net</string>
-    <string>--remote-tls-cert</string><string>/Users/me/holdem-tls/host.crt</string>
-    <string>--remote-tls-key</string><string>/Users/me/holdem-tls/host.key</string>
+    <string>--remote-tls-cert</string><string>/Users/me/holdem-tls/host.pem</string>
+    <string>--remote-tls-key</string><string>/Users/me/holdem-tls/host.pem</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -228,9 +227,9 @@ launchctl bootout gui/$(id -u)/com.ai-holdem.app                                
 - 잠자기를 끈다: `sudo pmset -a sleep 0 disksleep 0`. 정전 뒤 자동 부팅: `sudo pmset -a autorestart 1`.
 - LaunchAgent는 사용자가 로그인해야 실행된다. 재부팅 뒤에도 바로 뜨게 하려면 자동 로그인을 켠다(FileVault를 켜 두면 자동 로그인을 쓸 수 없다).
 - claude CLI 자격은 로그인 키체인에 있어 로그인 세션 밖에서는 열리지 않을 수 있다. codex CLI 자격은 `~/.codex/auth.json` 파일이다. 기본 로컬 정책 게임은 플레이어 LLM 없이 돌고, 코치·리뷰 모델이 없으면 사실 기반 기계 피드백을 남긴다.
-- 인증서 갱신: Tailscale 인증서는 90일짜리다. 서비스는 10분마다 인증서·키 파일 내용이 바뀌었는지 확인해 재시작 없이 교체하므로, 한 달에 한 번쯤 `tailscale cert …`를 다시 실행하는 launchd 주기 작업(`StartCalendarInterval`)을 두면 된다. 경로가 심볼릭 링크여도 링크가 가리키는 파일의 변경을 감지한다. 인증서와 키가 서로 맞지 않는 중간 상태는 적용하지 않고 다음 확인에서 다시 시도한다.
+- 인증서 갱신: Tailscale 인증서는 90일짜리다. tailscaled는 갱신할 때가 되면(CA 권고 시점, 없으면 수명의 2/3) 백그라운드에서 갱신하고 다음 호출에 새 쌍을 준다. 서비스는 10분마다 인증서·키 파일 내용이 바뀌었는지 확인해 재시작 없이 교체한다(원격 호스트 리스너와 HTTPS 참가자 포트 모두). 그래서 위 스크립트를 하루 한 번 돌리는 launchd 주기 작업(`StartCalendarInterval`)을 둔다 — plist 예시는 배포 가이드 §7.2. 경로가 심볼릭 링크여도 링크가 가리키는 파일의 변경을 감지한다. 인증서와 키가 서로 맞지 않는 중간 상태는 적용하지 않고 다음 확인에서 다시 시도한다.
 - Tailscale ACL로 8898 포트를 자기 기기에만 열어 두면 비밀번호 추측 시도도 tailnet 안으로 줄어든다.
-- 인증서 만료일 확인: `openssl x509 -in ~/holdem-tls/host.crt -noout -enddate`. 갱신 파일은 서비스 사용자가 읽을 수 있어야 한다.
+- 인증서 만료일 확인: `openssl x509 -in ~/holdem-tls/host.pem -noout -enddate`. 파일은 서비스 사용자가 읽을 수 있어야 한다.
 
 **6) 브라우저로 안 될 때 (SSH로 서버에서)**
 

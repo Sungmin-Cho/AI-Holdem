@@ -375,7 +375,11 @@ export function tlsContentIdentity(cert, key) {
 }
 
 export function createTlsReloader({ certPath, keyPath, apply, initialIdentity = null, intervalMs = 10 * 60 * 1000, readFile = fs.readFileSync, log = (line) => console.error(line) }) {
-  const read = () => ({ cert: readFile(certPath), key: readFile(keyPath) });
+  // One read when both name the same file (a combined PEM): the pair always comes from one version.
+  const read = () => {
+    const cert = readFile(certPath);
+    return { cert, key: keyPath === certPath ? cert : readFile(keyPath) };
+  };
   // What the server actually started with: the digest of the bytes it loaded.
   let applied = initialIdentity;
   if (applied === null) {
