@@ -1,6 +1,24 @@
 import {finalScreen} from './final-summary.js';
 import {paintFinalPanel} from './final-panel.js';
-import {appGameId, appEpoch, appFetch, eventStream, recoverFinalSnapshot, participantMode, authToken} from './app-transport.js';
+import {appGameId, appEpoch, appFetch as transportFetch, eventStream, recoverFinalSnapshot, participantMode, authToken} from './app-transport.js';
+import { HOST_TOKEN_KEY, goToLogin, isRemoteHostPage, reloadWhenRestored } from './remote-host.js';
+// A remote host table (password session) whose session ended signs in again; the local table keeps
+// its service-token flow and the participant page its own.
+const remoteHostTable = Boolean(appGameId) && !participantMode && isRemoteHostPage();
+if (remoteHostTable && window.top === window) reloadWhenRestored();
+function remoteSessionLost() {
+  if (!remoteHostTable) return false;
+  sessionStorage.removeItem(HOST_TOKEN_KEY);
+  goToLogin({ expired: true });
+  return true;
+}
+async function appFetch(endpoint, options) {
+  const response = await transportFetch(endpoint, options);
+  if (response.status === 401) remoteSessionLost();
+  return response;
+}
+// A remote table opened without a session (a new tab) signs in instead of showing a link error.
+if (remoteHostTable && !authToken()) goToLogin();
 import { createHintState, formatHint, hintPotPercent } from './hint-format.js';
 import { applyTrainingAnnotation, excludedFromAssessment, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
 import { formatReplay, actionVerbs } from './replay-format.js';
@@ -1819,7 +1837,8 @@ function renderSnapshot(snap) {
   for (const ann of ui.trainingAnnotations) mergeAnnotationOntoCards(ann);
   ui.review = snap.review;
   upsertHandReplays(snap.handReplays, true);
-  authenticatedStudyUrl = participantMode ? null : studyLink(snap.studyUrl);
+  // The study service is loopback-only: a remote host page has no working study link.
+  authenticatedStudyUrl = participantMode || remoteHostTable ? null : studyLink(snap.studyUrl);
   const study = $('study-open');
   study.hidden = !authenticatedStudyUrl;
   if (authenticatedStudyUrl) study.href = authenticatedStudyUrl;
@@ -2341,7 +2360,7 @@ else if (appGameId && new URLSearchParams(location.search).get('terminal') === '
   try { const snapshot=await getSnapshot();ui.sessionEnded=true;renderSnapshot(snapshot);paintEndedControls();setConn(false,'게임 종료');$('action-status').textContent='종료된 게임 기록입니다.'; } catch {showBootError('기록을 불러오지 못했습니다.');}
 }
 else {
-  const es = appGameId ? eventStream('events?after=0') : new EventSource(`/api/events?${new URLSearchParams({ token, after: '0' })}`);
+  const es = appGameId ? eventStream('events?after=0', { request: appFetch }) : new EventSource(`/api/events?${new URLSearchParams({ token, after: '0' })}`);
   es.addEventListener('hint-clear',event=>{
     try{const payload=JSON.parse(event.data);if(payload.decisionId===ui.view?.legal?.decisionId){hideHint(payload.decisionId);void actionController?.reconcile();}}catch{hideHint();}
   });

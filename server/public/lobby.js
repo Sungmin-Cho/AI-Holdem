@@ -6,6 +6,7 @@ import { createShellBridge } from './shell-bridge.js';
 import { renderQr, copyText } from './invite.js';
 import { openHelp, helpButton, wireHelpMenu } from './help-panel.js';
 import { paintShellContext } from './shell-context.js';
+import { HOST_TOKEN_KEY, isRemoteHostPage, loginPath, reloadWhenRestored } from './remote-host.js';
 const $ = (id) => document.getElementById(id),
   form = $("setup-form");
 const fragment = new URLSearchParams(location.hash.slice(1));
@@ -13,6 +14,14 @@ if (fragment.has("token")) {
   sessionStorage.setItem("holdem-app-token", fragment.get("token"));
   history.replaceState(null, "", location.pathname);
 }
+// The remote host listener signs in with a password; without a session go to its login page and
+// stop here (the navigation replaces this page).
+const remoteHost = isRemoteHostPage();
+if (remoteHost && !sessionStorage.getItem(HOST_TOKEN_KEY)) {
+  location.replace(loginPath());
+  await new Promise(() => {});
+}
+if (remoteHost) reloadWhenRestored();
 let appliedDefaults = false;
 let rejoinFor = null;
 let snapshot = null,
@@ -64,6 +73,11 @@ async function api(url, options = {}) {
     signal: options.signal ?? AbortSignal.timeout(timeoutMs ?? 30000),
   });
   const data = await response.json();
+  if (response.status === 401 && remoteHost) {
+    // An expired, logged-out or re-keyed remote session: sign in again.
+    sessionStorage.removeItem(HOST_TOKEN_KEY);
+    location.replace(loginPath({ expired: true }));
+  }
   if (!response.ok)
     throw Object.assign(new Error(data.code ?? "연결 실패"), {
       status: response.status,
@@ -919,6 +933,24 @@ $("review").onclick = () => {
     $("table").src=`/table?${new URLSearchParams({appGame:snapshot.gameId,epoch:snapshot.gameEpoch,terminal:'1'})}`;
   }
 };
+// The study service is loopback-only; a remote host signs out from the help menu instead.
+if (remoteHost) {
+  $("study").hidden = true;
+  $("logout").hidden = false;
+  $("logout").onclick = async () => {
+    try {
+      await fetch("/api/host/logout", {
+        method: "POST",
+        headers: { authorization: `Bearer ${sessionStorage.getItem(HOST_TOKEN_KEY) ?? ""}` },
+        signal: AbortSignal.timeout(10000),
+      });
+    } catch {
+      /* the session ends with this tab either way */
+    }
+    sessionStorage.removeItem(HOST_TOKEN_KEY);
+    location.replace(loginPath());
+  };
+}
 $("study").onclick = async () => {
   const tab = window.open("about:blank", "_blank");
   try {

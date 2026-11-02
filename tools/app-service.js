@@ -23,6 +23,7 @@ import {
 import { normalizeSetup } from "../shared/game-setup.js";
 import { createSessionManager } from "./session-manager.js";
 import { startAppServer } from "./app-server.js";
+import { hashPassword, writeHostCredential } from "./host-auth.js";
 const SELF = fileURLToPath(import.meta.url),
   LOCK = "app.lock.d";
 const listenerOwnedBy = createListenerOwnedBy({
@@ -105,6 +106,7 @@ export async function startAppService(
     publicHost = null,
     tlsCert = null,
     tlsKey = null,
+    remoteHost = null,
   } = {},
 ) {
   const dir = appDir(store),
@@ -143,6 +145,7 @@ export async function startAppService(
       publicHost,
       tlsCert,
       tlsKey,
+      remoteHost: remoteHost ? { ...remoteHost, appDir: dir } : null,
       onStop: () => void close(),
     });
     const identity = readOwnedLock(store, LOCK);
@@ -164,6 +167,8 @@ export async function startAppService(
       url: `${server.origin}/#token=${token}`,
       publicPort: server.publicPort,
       publicOrigin: server.publicOrigin,
+      remoteHostPort: server.remoteHostPort,
+      remoteHostOrigins: server.remoteHostOrigins,
     };
   } catch (error) {
     await close();
@@ -251,12 +256,18 @@ export async function stopAppService(store) {
   }
   throw new Error("APP_STOP_UNCONFIRMED");
 }
-function parseServeArgs(rest) {
+export function parseServeArgs(rest) {
   let playerRuntime = "codex";
   let publicPort = Number(process.env.HOLDEM_PUBLIC_PORT ?? 8899);
   let publicHost = null;
   let tlsCert = null;
   let tlsKey = null;
+  let remotePort = null;
+  let remoteListen = null;
+  const remoteNames = [];
+  let remoteTlsCert = null;
+  let remoteTlsKey = null;
+  let remoteSeen = false;
   for (let i = 0; i < rest.length; i += 1) {
     const flag = rest[i];
     const next = rest[i + 1];
@@ -265,8 +276,71 @@ function parseServeArgs(rest) {
     else if (flag === "--public-host") { publicHost = next; i += 1; }
     else if (flag === "--tls-cert") { tlsCert = next; i += 1; }
     else if (flag === "--tls-key") { tlsKey = next; i += 1; }
+    else if (flag === "--remote-host-port") { remotePort = Number(next); remoteSeen = true; i += 1; }
+    else if (flag === "--remote-host-listen") { remoteListen = next; remoteSeen = true; i += 1; }
+    else if (flag === "--remote-host-name") { remoteNames.push(next); remoteSeen = true; i += 1; }
+    else if (flag === "--remote-tls-cert") { remoteTlsCert = next; remoteSeen = true; i += 1; }
+    else if (flag === "--remote-tls-key") { remoteTlsKey = next; remoteSeen = true; i += 1; }
   }
-  return { playerRuntime, publicPort, publicHost, tlsCert, tlsKey };
+  // Any remote flag without the port is a half configuration: refuse it rather than run without it.
+  if (remoteSeen && remotePort === null)
+    throw Object.assign(new Error("원격 호스트 옵션에는 --remote-host-port가 필요합니다."), { code: "REMOTE_HOST_PORT_INVALID" });
+  const remoteHost = remotePort === null ? null : {
+    port: remotePort,
+    listen: remoteListen,
+    names: remoteNames,
+    tlsCert: remoteTlsCert,
+    tlsKey: remoteTlsKey,
+  };
+  return { playerRuntime, publicPort, publicHost, tlsCert, tlsKey, remoteHost };
+}
+async function readHiddenLine(question) {
+  const { stdin, stderr } = process;
+  stderr.write(question);
+  stdin.setEncoding("utf8");
+  stdin.setRawMode(true);
+  stdin.resume();
+  return new Promise((resolve, reject) => {
+    let value = "";
+    const finish = (error) => {
+      stdin.off("data", onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+      stderr.write("\n");
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const onData = (chunk) => {
+      for (const ch of chunk) {
+        if (ch === "\r" || ch === "\n") return finish();
+        if (ch === "\u0003" || ch === "\u0004")
+          return finish(Object.assign(new Error("취소했습니다."), { code: "CANCELLED" }));
+        if (ch === "\u007f" || ch === "\b") value = [...value].slice(0, -1).join("");
+        else if (ch >= " ") value += ch;
+      }
+    };
+    stdin.on("data", onData);
+  });
+}
+/** A TTY asks twice without echo; anything else reads the first line of stdin. */
+export async function readNewHostPassword({ stdin = process.stdin } = {}) {
+  if (stdin.isTTY) {
+    const first = await readHiddenLine("새 원격 호스트 비밀번호(12자 이상): ");
+    const second = await readHiddenLine("한 번 더 입력: ");
+    if (first !== second)
+      throw Object.assign(new Error("두 입력이 다릅니다."), { code: "PASSWORD_MISMATCH" });
+    return first;
+  }
+  const chunks = [];
+  for await (const chunk of stdin) chunks.push(chunk);
+  return Buffer.concat(chunks).toString("utf8").split(/\r?\n/)[0];
+}
+export async function setHostPassword(store, password) {
+  if (typeof store !== "string" || !path.isAbsolute(store))
+    throw Object.assign(new Error("absolute store path required"), { code: "USAGE" });
+  const record = await hashPassword(password);
+  writeHostCredential(appDir(store), record);
+  return record.credentialId;
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === SELF) {
   process.umask(0o077);
@@ -274,6 +348,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === SELF) {
   try {
     if (command === "serve") {
       const service = await startAppService(store, parseServeArgs(rest));
+      for (const origin of service.remoteHostOrigins ?? [])
+        console.log(`remote host: ${origin}/`);
       for (const signal of ["SIGINT", "SIGTERM"])
         process.once(
           signal,
@@ -282,6 +358,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === SELF) {
               process.exitCode = 1;
             }),
         );
+    } else if (command === "host-password") {
+      await setHostPassword(store, await readNewHostPassword());
+      console.log(
+        "원격 호스트 비밀번호를 저장했습니다. 이전 비밀번호로 만든 원격 세션은 다음 요청부터 끊깁니다.",
+      );
     } else if (command === "stop") {
       await stopAppService(store);
       console.log("앱 서비스를 정지했습니다.");
