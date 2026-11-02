@@ -143,8 +143,9 @@ scripts/macmini/renew-tailscale-cert.sh "$NAME" "$HOME/holdem-tls"
 스크립트가 하는 일:
 - `tailscale cert --cert-file - --key-file - <이름>` **한 번**으로 인증서와 키를 함께 받는다. 그래서 둘이 항상 짝이 맞는다.
 - 표준 출력으로 받으므로 App Store판 CLI의 샌드박스 문제를 피한다. 그 CLI가 파일 경로에 직접 쓰면 실제로는 `~/Library/Containers/…/Data` 아래로 간다.
-- 인증서와 키가 각각 읽히고 공개키가 같은지 확인한 뒤에만 `~/holdem-tls/host.crt`(644)·`host.key`(600)를 바꾼다. 실패하면 아무것도 바꾸지 않고 `… nothing replaced`로 끝난다(종료 코드 1).
-- 같은 디렉터리에서 한 번에 하나만 돈다(`.renew.lock`). 다른 실행이 잡고 있으면 종료 코드 75로 끝나고, 죽은 실행이 남긴 10분 넘은 잠금은 넘겨받는다.
+- 체인의 인증서 하나하나와 키(정확히 하나)가 각각 읽히고, 키가 첫 인증서와 짝이 맞을 때만 `~/holdem-tls/host.crt`(644)·`host.key`(600)를 바꾼다. 아니면 아무것도 바꾸지 않고 `… nothing replaced`로 끝난다(종료 코드 1).
+- 교체 도중 실패하면(키를 바꾼 뒤 인증서를 못 바꾸면) 이전 키를 되돌려 디스크의 쌍이 어긋나지 않게 한다.
+- 같은 디렉터리에서 한 번에 하나만 돈다. `.renew.lock` 파일에 대한 잠금(flock)을 실행이 끝날 때까지 쥐므로, 실행이 어떻게 끝나든(강제 종료 포함) 저절로 풀린다. 다른 실행이 돌고 있으면 종료 코드 75로 끝난다. `.renew.lock` 파일 자체는 남아 있어도 된다.
 
 ## 5. 호스트 비밀번호
 
@@ -301,7 +302,7 @@ launchctl kickstart gui/$(id -u)/com.ai-holdem.cert-renew && sleep 5 && tail -2 
 | launchd.log에 `REMOTE_HOST_LISTEN_REQUIRED`·`REMOTE_HOST_NAME_REQUIRED`·`REMOTE_HOST_TLS_REQUIRED` | plist 옵션 누락 | §7.1 plist 확인 후 `bootout`·`bootstrap` |
 | `REMOTE_HOST_TLS_INVALID` | 인증서·키를 못 읽음, 짝 불일치 | §4 스크립트 다시 실행, 경로 확인 |
 | `renew.log`에 `… nothing replaced` | Tailscale CLI 실패, HTTPS 인증서 꺼짐, 받은 쌍이 손상·불일치 | 기존 인증서는 그대로다. `"$TS" cert`를 인자 없이 실행해 메시지 확인 |
-| `renew.log`에 `another renewal is running` | 다른 갱신이 진행 중(종료 코드 75) | 다음 실행에서 자동으로 이어진다. 10분 넘게 남은 잠금은 자동 회수 |
+| `renew.log`에 `another renewal is running` | 다른 갱신이 진행 중(종료 코드 75) | 그 실행이 끝나면 잠금이 풀린다. 계속되면 `ps aux \| grep renew-tailscale-cert`로 멈춘 실행을 확인 |
 | `HOST_PASSWORD_NOT_SET` / `HOST_AUTH_INVALID` | 비밀번호 미설정 / 자격 파일 손상 | §5 `host-password` |
 | `EADDRNOTAVAIL`이 반복 | 바인드한 Tailscale IP가 없음(Tailscale 꺼짐, IP 바뀜) | Tailscale 상태 확인. `"$TS" ip -4`가 plist 값과 다르면 plist 수정 |
 | `EADDRINUSE` | 8898이나 8899를 다른 프로세스가 사용 | `lsof -nP -iTCP:8898 -sTCP:LISTEN` |
@@ -327,7 +328,7 @@ launchctl kickstart gui/$(id -u)/com.ai-holdem.cert-renew && sleep 5 && tail -2 
 | 재시작·해제 | `kickstart -k`, `bootout` | 즉시 재기동, 해제 뒤 프로세스 없음 |
 | 바인드 주소 없음 | `--remote-host-listen 192.0.2.123` | `EADDRNOTAVAIL`로 끝나고 launchd가 약 10초마다 재시도(35초에 4회) |
 | §7.2 갱신 작업 | 가짜 `tailscale`(인증서·키 출력)로 `kickstart` | launchd 기본 환경에서 `updated:`, `last exit code = 0`, 매일 04:17 등록 |
-| 갱신 스크립트 | 시험 `test/macmini-renew-cert.test.js` | 갱신·무변경·교체, 짝 불일치·파싱 실패(손상 PEM)·빈 출력·CLI 실패 거부(기존 파일 유지), 잠금 중 75·오래된 잠금 회수, ECDSA 키·인증서 체인 |
+| 갱신 스크립트 | 시험 `test/macmini-renew-cert.test.js` | 갱신·무변경·교체. 짝 불일치·손상 PEM·체인 뒤쪽 손상·손상 키·키 두 개·빈 출력·CLI 실패는 거부(기존 파일 유지). 교체 도중 실패 시 이전 키 복원. 실제 동시 실행 시 75, 강제 종료된 실행의 잠금은 저절로 풀리고 남은 임시 디렉터리는 다음 실행이 치움. ECDSA 키·체인은 TLS로 로드됨 |
 | 인증서 자동 반영 | 시험 `test/remote-host.test.js` | 원격 호스트 리스너와 HTTPS 참가자 포트 모두 새 연결에 갱신된 인증서를 준다(참가자 포트 연결은 이 PR에서 추가) |
 | `tailscale cert`·`ip`·`status` | Tailscale 소스(GitHub `tailscale/tailscale` main `49aa9c8`, 2026-10-31: `cmd/tailscale/cli/cert.go`·`ip.go`, `ipn/ipnstate/ipnstate.go`, `feature/acme/cert.go`) | 표준 출력(`-`) 지원, App Store판 샌드박스 쓰기 경로, 갱신 시점(ARI 우선·없으면 수명 2/3)과 "그 호출은 현재 쌍, 갱신은 백그라운드", `Self.DNSName`(끝에 점) |
 | 에너지 설정 이름·자동 로그인·원격 로그인 | Apple 사용자 안내 | 항목 이름, FileVault 켜짐 시 자동 로그인 불가, 공유 > 원격 로그인 경로 |
