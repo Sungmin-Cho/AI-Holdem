@@ -13,7 +13,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createOwnedTempDir } from "./helpers/owned-fixtures.mjs";
 import { fakeRelay, makeLoop, makeSession, startProxyApp } from "./helpers/relay-proxy-fixture.js";
-import { parseServeArgs, readHiddenLines, setHostPassword, startAppService } from "../tools/app-service.js";
+import { parseServeArgs, readHiddenLines, readNewHostPassword, setHostPassword, startAppService } from "../tools/app-service.js";
 import { EventEmitter } from "node:events";
 import { canonicalRemoteName, remoteHostForms, remoteOrigin, remoteRouteOf } from "../tools/app-server.js";
 import { createHostSessions, readHostCredential, verifyPassword } from "../tools/host-auth.js";
@@ -334,6 +334,35 @@ test("a renewed certificate is served to new connections without a restart", asy
   assert.equal((await request(port, { method: "POST", path: "/api/host/login", body: { password: PASSWORD }, ca: CERT_B.cert })).status, 200);
 });
 
+test("a participant port on HTTPS also serves a renewed certificate without a restart", async (t) => {
+  const dir = createOwnedTempDir("participant-renew");
+  const cert = path.join(dir, "host.crt"), key = path.join(dir, "host.key");
+  fs.copyFileSync(CERT_A.cert, cert);
+  fs.copyFileSync(CERT_A.key, key);
+  const app = await startAppService(createOwnedTempDir("participant-renew-store"), { publicPort: 0, tlsCert: cert, tlsKey: key, tlsReloadMs: 50 });
+  t.after(() => app.close());
+  const port = Number(new URL(app.publicOrigin).port);
+  const fingerprint = () => new Promise((resolve, reject) => {
+    const socket = tls.connect({ host: "127.0.0.1", port, servername: "localhost", rejectUnauthorized: false }, () => {
+      resolve(socket.getPeerX509Certificate().fingerprint256);
+      socket.end();
+    });
+    socket.on("error", reject);
+  });
+  const a = new X509Certificate(fs.readFileSync(CERT_A.cert)).fingerprint256;
+  const b = new X509Certificate(fs.readFileSync(CERT_B.cert)).fingerprint256;
+  assert.equal(await fingerprint(), a);
+  fs.copyFileSync(CERT_B.cert, cert);
+  fs.copyFileSync(CERT_B.key, key);
+  const deadline = Date.now() + 5000;
+  let seen = a;
+  while (seen !== b && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    seen = await fingerprint();
+  }
+  assert.equal(seen, b);
+});
+
 test("a certificate renewed between the server's first read and its reloader is still picked up", async (t) => {
   const dir = createOwnedTempDir("remote-host-renew-race");
   const cert = path.join(dir, "host.crt"), key = path.join(dir, "host.key");
@@ -495,7 +524,8 @@ test("serve reads the remote flags, exits when they fail, and host-password stor
   const store = createOwnedTempDir("remote-host-cli");
   const short = spawnSync(process.execPath, [APP_SERVICE, "host-password", store], { input: "too short\n", encoding: "utf8" });
   assert.equal(short.status, 1);
-  assert.match(short.stderr, /PASSWORD_TOO_SHORT/);
+  assert.match(short.stderr, /^PASSWORD_TOO_SHORT: 비밀번호는 12자 이상이어야 합니다\.$/m, "the code and the reason");
+  assert.doesNotMatch(short.stderr, /too short/, "the refused password is never printed");
   assert.equal(readHostCredential(path.join(store, ".app")), null);
   assert.equal(spawnSync(process.execPath, [APP_SERVICE, "host-password", "relative/store"], { input: `${PASSWORD}\n`, encoding: "utf8" }).status, 1);
   const set = spawnSync(process.execPath, [APP_SERVICE, "host-password", store], { input: `${PASSWORD}\r\nsecond line\n`, encoding: "utf8" });
@@ -587,4 +617,26 @@ test("the hidden password prompt never echoes: raw mode is on before the first p
   tty.stdin.emit("data", "abc\u0003");
   await assert.rejects(within(pending), { code: "CANCELLED" });
   assert.deepEqual(tty.events.slice(-2), ["raw:false", "pause"]);
+  // A CRLF split across two chunks is one line end; Ctrl-D cancels like Ctrl-C.
+  tty = fakeTty();
+  pending = readHiddenLines(prompts, tty);
+  tty.stdin.emit("data", "split password\r");
+  tty.stdin.emit("data", "\nsplit password\r");
+  assert.deepEqual(await within(pending), ["split password", "split password"]);
+  tty = fakeTty();
+  pending = readHiddenLines(prompts, tty);
+  tty.stdin.emit("data", "\u0004");
+  await assert.rejects(within(pending), { code: "CANCELLED" });
+  // Two different entries are refused before anything is hashed or written.
+  tty = fakeTty();
+  const stdin = Object.assign(tty.stdin, { isTTY: true });
+  const stderrWrite = process.stderr.write;
+  process.stderr.write = () => true;
+  try {
+    pending = readNewHostPassword({ stdin });
+    stdin.emit("data", "first password one\rsecond password two\r");
+    await assert.rejects(within(pending), { code: "PASSWORD_MISMATCH" });
+  } finally {
+    process.stderr.write = stderrWrite;
+  }
 });

@@ -83,6 +83,71 @@ test("the renewal script replaces nothing when the pair does not match or the CL
   assert.equal(run(["only-one-arg"]).status, 2);
 });
 
+test("the renewal script refuses parts that do not parse, even when both fail alike", posixOnly, (t) => {
+  if (!openssl) return t.skip("openssl not installed");
+  const { out, serve, run, pair } = fixture(t);
+  serve("a.crt", "a.key");
+  assert.equal(run().status, 0);
+  // PEM markers around garbage: the files are not empty, but neither part parses. A pipeline that
+  // reported only its last stage would hash two empty outputs and call them a match.
+  fs.writeFileSync(path.join(pair, "cert.pem"), "-----BEGIN CERTIFICATE-----\nnot base64 at all\n-----END CERTIFICATE-----\n");
+  fs.writeFileSync(path.join(pair, "key.pem"), "-----BEGIN PRIVATE KEY-----\nnot base64 either\n-----END PRIVATE KEY-----\n");
+  const result = run();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /does not parse; nothing replaced/);
+  assert.doesNotMatch(result.stdout, /updated/);
+  assert.equal(read(path.join(out, "host.crt")).trim(), read(path.join(FIXTURES, "a.crt")).trim());
+  assert.equal(read(path.join(out, "host.key")).trim(), read(path.join(FIXTURES, "a.key")).trim());
+});
+
+test("one renewal at a time per directory; a killed run's old lock is taken over", posixOnly, (t) => {
+  if (!openssl) return t.skip("openssl not installed");
+  const { out, serve, run } = fixture(t);
+  serve("a.crt", "a.key");
+  fs.mkdirSync(out, { recursive: true });
+  const lock = path.join(out, ".renew.lock");
+  fs.mkdirSync(lock);
+  let result = run();
+  assert.equal(result.status, 75);
+  assert.match(result.stderr, /another renewal is running/);
+  assert.equal(fs.existsSync(path.join(out, "host.crt")), false, "nothing written while another run holds the lock");
+  assert.equal(fs.existsSync(lock), true, "another run's lock is not removed");
+  const old = new Date(Date.now() - 20 * 60 * 1000);
+  fs.utimesSync(lock, old, old);
+  result = run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.existsSync(lock), false, "the run releases the lock it took over");
+  assert.deepEqual(fs.readdirSync(out).sort(), ["host.crt", "host.key"]);
+});
+
+test("a failing CLI leaves the files, no temporary directory and no lock", posixOnly, (t) => {
+  if (!openssl) return t.skip("openssl not installed");
+  const { out, serve, run, pair } = fixture(t);
+  serve("a.crt", "a.key");
+  assert.equal(run().status, 0);
+  fs.rmSync(path.join(pair, "cert.pem"));
+  const result = run();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /tailscale cert failed; nothing replaced/);
+  assert.deepEqual(fs.readdirSync(out).sort(), ["host.crt", "host.key"]);
+});
+
+test("an ECDSA key with a certificate chain installs whole", posixOnly, (t) => {
+  if (!openssl) return t.skip("openssl not installed");
+  const { out, run, pair } = fixture(t);
+  const ossl = (args) => spawnSync(openssl, args, { encoding: "utf8", cwd: pair });
+  // Tailscale serves an ECDSA P-256 key and a leaf followed by its issuer.
+  if (ossl(["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", "ec.key"]).status !== 0) return t.skip("openssl cannot make EC keys");
+  assert.equal(ossl(["req", "-x509", "-new", "-key", "ec.key", "-out", "leaf.crt", "-days", "2", "-subj", "/CN=mini.tail1234.ts.net"]).status, 0);
+  fs.writeFileSync(path.join(pair, "cert.pem"), read(path.join(pair, "leaf.crt")) + read(path.join(FIXTURES, "b.crt")));
+  fs.copyFileSync(path.join(pair, "ec.key"), path.join(pair, "key.pem"));
+  const result = run();
+  assert.equal(result.status, 0, result.stderr);
+  const installed = read(path.join(out, "host.crt"));
+  assert.equal((installed.match(/-----BEGIN CERTIFICATE-----/g) ?? []).length, 2, "the whole chain is kept");
+  assert.match(read(path.join(out, "host.key")), /-----BEGIN EC PRIVATE KEY-----/);
+});
+
 test("the deployment guide's serve commands use only flags serve reads", async () => {
   const { parseServeArgs } = await import("../tools/app-service.js");
   const guide = fs.readFileSync(new URL("../docs/deploy-mac-mini.ko.md", import.meta.url), "utf8");

@@ -283,6 +283,7 @@ export async function startAppServer({
   onStop = () => {},
   summaryCache = createSessionSummaryCache(),
   remoteHost = null,
+  tlsReloadMs = 10 * 60 * 1000,
 }) {
   if ((tlsCert && !tlsKey) || (!tlsCert && tlsKey)) {
     usage("--tls-cert와 --tls-key는 함께 필요합니다.");
@@ -1056,9 +1057,11 @@ export async function startAppServer({
     remoteSweep = null,
     remoteReloader = null,
     remoteHosts = new Set();
+  let publicReloader = null;
   const closeAll = async () => {
     clearInterval(remoteSweep);
     remoteReloader?.stop();
+    publicReloader?.stop();
     remoteAuth?.close();
     for (const listener of [remoteServer, publicServer, server]) {
       if (!listener?.listening) continue;
@@ -1151,6 +1154,17 @@ export async function startAppServer({
         publicServer.once("error", reject);
         publicServer.listen(publicPort, publicListen, resolve);
       });
+      // A participant port on HTTPS picks up a renewed certificate the same way, without a restart.
+      if (tls) {
+        publicReloader = createTlsReloader({
+          certPath: tlsCert,
+          keyPath: tlsKey,
+          intervalMs: tlsReloadMs,
+          initialIdentity: tlsContentIdentity(tlsOptions.cert, tlsOptions.key),
+          apply: (options) => publicServer.setSecureContext(options),
+        });
+        publicReloader.start();
+      }
     }
     if (remote) {
       remoteAuth = createRemoteHostAuth({ appDir: remote.appDir, ...remote.authOptions });

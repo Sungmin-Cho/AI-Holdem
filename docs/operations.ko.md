@@ -227,7 +227,7 @@ launchctl bootout gui/$(id -u)/com.ai-holdem.app                                
 - 잠자기를 끈다: `sudo pmset -a sleep 0 disksleep 0`. 정전 뒤 자동 부팅: `sudo pmset -a autorestart 1`.
 - LaunchAgent는 사용자가 로그인해야 실행된다. 재부팅 뒤에도 바로 뜨게 하려면 자동 로그인을 켠다(FileVault를 켜 두면 자동 로그인을 쓸 수 없다).
 - claude CLI 자격은 로그인 키체인에 있어 로그인 세션 밖에서는 열리지 않을 수 있다. codex CLI 자격은 `~/.codex/auth.json` 파일이다. 기본 로컬 정책 게임은 플레이어 LLM 없이 돌고, 코치·리뷰 모델이 없으면 사실 기반 기계 피드백을 남긴다.
-- 인증서 갱신: Tailscale 인증서는 90일짜리다. tailscaled는 수명의 2/3가 지나면 백그라운드에서 갱신하고 다음 호출에 새 쌍을 준다. 서비스는 10분마다 인증서·키 파일 내용이 바뀌었는지 확인해 재시작 없이 교체한다. 그래서 위 스크립트를 하루 한 번 돌리는 launchd 주기 작업(`StartCalendarInterval`)을 둔다 — plist 예시는 배포 가이드 §7.2. 경로가 심볼릭 링크여도 링크가 가리키는 파일의 변경을 감지한다. 인증서와 키가 서로 맞지 않는 중간 상태는 적용하지 않고 다음 확인에서 다시 시도한다.
+- 인증서 갱신: Tailscale 인증서는 90일짜리다. tailscaled는 갱신할 때가 되면(CA 권고 시점, 없으면 수명의 2/3) 백그라운드에서 갱신하고 다음 호출에 새 쌍을 준다. 서비스는 10분마다 인증서·키 파일 내용이 바뀌었는지 확인해 재시작 없이 교체한다(원격 호스트 리스너와 HTTPS 참가자 포트 모두). 그래서 위 스크립트를 하루 한 번 돌리는 launchd 주기 작업(`StartCalendarInterval`)을 둔다 — plist 예시는 배포 가이드 §7.2. 경로가 심볼릭 링크여도 링크가 가리키는 파일의 변경을 감지한다. 인증서와 키가 서로 맞지 않는 중간 상태는 적용하지 않고 다음 확인에서 다시 시도한다.
 - Tailscale ACL로 8898 포트를 자기 기기에만 열어 두면 비밀번호 추측 시도도 tailnet 안으로 줄어든다.
 - 인증서 만료일 확인: `openssl x509 -in ~/holdem-tls/host.crt -noout -enddate`. 갱신 파일은 서비스 사용자가 읽을 수 있어야 한다.
 

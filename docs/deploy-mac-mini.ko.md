@@ -16,7 +16,7 @@
 ## 빠른 순서
 
 1. 맥미니 전원·로그인·원격 접속 설정 (§1)
-2. Homebrew·Node·저장소·(선택) LLM CLI 설치 (§2)
+2. Homebrew·Node·저장소·(선택) LLM CLI 설치, 방화벽 허용 (§2)
 3. Tailscale 설치, MagicDNS·HTTPS 인증서 켜기 (§3)
 4. 인증서 받기 (§4) → 호스트 비밀번호 정하기 (§5)
 5. 터미널에서 한 번 띄워 폰으로 로그인 확인 (§6)
@@ -47,28 +47,17 @@ pmset -g | grep -E ' (sleep|disksleep|womp|autorestart) '
 앱은 **LaunchAgent**(로그인한 사용자 세션에서 도는 launchd 작업)로 돌린다. 그래서 재부팅 뒤 **누군가 그 계정으로 로그인해야** 앱이 뜬다. claude CLI 자격도 로그인 키체인에 있어 로그인 세션 안에서만 열린다.
 
 - Apple 안내대로 **FileVault가 켜져 있으면 자동 로그인을 쓸 수 없다.** `fdesetup status`로 확인한다.
-- 두 가지 중 고른다.
-  - **FileVault 유지(권장).** 정전·업데이트로 재부팅되면 화면 공유나 직접 연결로 한 번 로그인한다. 디스크 보호가 유지된다.
-  - **FileVault를 끄고 자동 로그인.** 시스템 설정 > 사용자 및 그룹 > 자동으로 로그인. 재부팅만으로 앱이 뜨지만, 맥미니를 가져간 사람이 그 계정에 바로 들어간다.
+- FileVault가 켜진 Mac은 재부팅하면 **디스크 잠금 해제(로그인) 화면**에서 멈춘다. 이 단계는 macOS와 Tailscale 앱이 뜨기 전이라 **tailnet·화면 공유로는 닿지 않는다고 보고 계획한다.** Tailscale 앱이 macOS 로그인 전에 연결되는지는 확인하지 못했다(§11). Apple 실리콘·최신 macOS의 원격 잠금 해제 기능도 여기서 확인하지 않았다.
+- 그래서 둘 중 고른다.
+  - **FileVault 유지(보안 우선).** 정전·업데이트로 재부팅되면 **맥미니 앞에서(키보드·모니터 연결)** 잠금을 풀고 로그인해야 앱이 다시 뜬다. 맥미니가 늘 손닿는 곳에 있을 때 맞다. UPS를 두면 정전 재부팅 자체가 줄어든다.
+  - **FileVault를 끄고 자동 로그인(무인 운영 우선).** 시스템 설정 > 사용자 및 그룹 > 자동으로 로그인. 재부팅만으로 앱이 다시 뜬다. 대신 디스크가 암호화되지 않아, 맥미니를 가져간 사람이 데이터를 읽을 수 있고 재부팅하면 그 계정으로 바로 들어간다.
 
 ### 1.3 관리용 원격 접속
 
-비밀번호를 잊었거나 서비스가 안 뜰 때는 브라우저로 고칠 수 없다. 맥미니에 셸로 들어갈 길을 하나 열어 둔다.
+비밀번호를 잊었거나 서비스가 안 뜰 때는 브라우저로 고칠 수 없다. 맥미니에 셸로 들어갈 길을 하나 열어 둔다(맥미니가 켜져 있고 로그인된 상태가 전제다 — §1.2).
 
 - **시스템 설정 > 일반 > 공유 > 원격 로그인** 을 켜고, "다음 사용자만 허용"으로 이 계정만 고른다.
 - 접속은 tailnet 안에서 `ssh <계정>@<맥미니 MagicDNS 이름>`(Tailscale을 켠 기기에서).
-
-### 1.4 방화벽
-
-`/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate`가 켜짐(enabled)이면, node가 들어오는 연결을 받도록 허용한다. 방화벽이 켜진 상태에서는 확인하지 못했다(§11). 허용 대화상자가 맥미니 화면에 뜰 수도 있으니, 처음 한 번은 화면 공유로 확인한다.
-
-```bash
-NODE_REAL=$(realpath "$(command -v node)")
-sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add "$NODE_REAL"
-sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp "$NODE_REAL"
-```
-
-`brew upgrade node` 뒤에는 실제 경로가 바뀌므로 다시 실행한다.
 
 ## 2. 소프트웨어 설치
 
@@ -94,6 +83,22 @@ codex login status     # Codex — ~/.codex/auth.json
 ```
 
 로그인 안 됐으면 각각 `claude auth login`, `codex login`. claude 자격은 키체인에 있어 §1.2의 로그인 세션이 필요하다. codex는 파일 자격이다.
+
+### 2.3 방화벽
+
+```bash
+/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate
+```
+
+꺼져(disabled) 있으면 건너뛴다. 켜져(enabled) 있으면 §2.1에서 설치한 node가 들어오는 연결을 받도록 허용한다. 방화벽이 켜진 상태는 확인하지 못했다(§11). 허용 대화상자가 맥미니 화면에 뜰 수도 있으니, 처음 한 번은 맥미니 화면에서 확인한다.
+
+```bash
+NODE_REAL=$(realpath "$(command -v node)") || { echo "node를 먼저 설치한다(§2.1)"; false; }
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add "$NODE_REAL"
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp "$NODE_REAL"
+```
+
+`brew upgrade node` 뒤에는 실제 경로가 바뀌므로 다시 실행한다.
 
 ## 3. Tailscale
 
@@ -138,7 +143,8 @@ scripts/macmini/renew-tailscale-cert.sh "$NAME" "$HOME/holdem-tls"
 스크립트가 하는 일:
 - `tailscale cert --cert-file - --key-file - <이름>` **한 번**으로 인증서와 키를 함께 받는다. 그래서 둘이 항상 짝이 맞는다.
 - 표준 출력으로 받으므로 App Store판 CLI의 샌드박스 문제를 피한다. 그 CLI가 파일 경로에 직접 쓰면 실제로는 `~/Library/Containers/…/Data` 아래로 간다.
-- 인증서와 키의 공개키가 같은지 확인한 뒤에만 `~/holdem-tls/host.crt`(644)·`host.key`(600)를 바꾼다.
+- 인증서와 키가 각각 읽히고 공개키가 같은지 확인한 뒤에만 `~/holdem-tls/host.crt`(644)·`host.key`(600)를 바꾼다. 실패하면 아무것도 바꾸지 않고 `… nothing replaced`로 끝난다(종료 코드 1).
+- 같은 디렉터리에서 한 번에 하나만 돈다(`.renew.lock`). 다른 실행이 잡고 있으면 종료 코드 75로 끝나고, 죽은 실행이 남긴 10분 넘은 잠금은 넘겨받는다.
 
 ## 5. 호스트 비밀번호
 
@@ -251,8 +257,8 @@ launchctl bootstrap gui/$(id -u) "$RENEW"
 launchctl kickstart gui/$(id -u)/com.ai-holdem.cert-renew && sleep 5 && tail -2 "$TLS/renew.log"
 ```
 
-- tailscaled는 인증서 수명의 2/3가 지나면 백그라운드에서 갱신하고, 그다음 호출에서 새 인증서를 돌려준다(Tailscale 소스 확인). 하루 한 번이면 90일 인증서가 만료되기 훨씬 전에 바뀐다.
-- 앱은 10분마다 인증서·키의 **내용**을 비교해 바뀌면 재시작 없이 교체한다.
+- tailscaled는 갱신할 때가 되면 그 호출에서는 지금 인증서를 돌려주고 백그라운드에서 갱신을 시작한다. 그 뒤 호출이 새 인증서를 받는다. 갱신 시점은 CA가 알려 주는 권고(ARI)를 우선하고, 그걸 못 얻으면 수명의 2/3 지점이다(Tailscale 소스 확인, §11). 하루 한 번이면 90일 인증서가 만료되기 훨씬 전에 바뀐다.
+- 앱은 10분마다 인증서·키의 **내용**을 비교해 바뀌면 재시작 없이 교체한다. 원격 호스트 리스너와, HTTPS로 켠 참가자 포트 모두 해당한다.
 - App Store판을 쓰거나 CLI 위치가 다르면 plist `EnvironmentVariables`에 `TAILSCALE`(CLI 경로)을 넣는다.
 
 ## 8. 호스트 기기에서 접속
@@ -268,7 +274,7 @@ launchctl kickstart gui/$(id -u)/com.ai-holdem.cert-renew && sleep 5 && tail -2 
 참가자를 받을 때(온라인 세션):
 - 참가 링크는 참가자 포트 8899다. 같은 LAN의 참가자는 로비가 보여 주는 LAN 주소 링크로 들어온다.
 - tailnet 안의 참가자에게 MagicDNS 이름으로 된 링크를 보이려면 §7.1의 `ProgramArguments`에 `--public-host` `<이름>`을 더한다.
-- 참가자 포트도 HTTPS로 하려면 `--tls-cert`·`--tls-key`(같은 인증서 파일)를 더한다.
+- 참가자 포트도 HTTPS로 하려면 `--tls-cert`·`--tls-key`(같은 인증서 파일)를 더한다. 갱신된 인증서는 원격 호스트 리스너처럼 재시작 없이 반영된다.
 
 ## 9. 운영
 
@@ -294,13 +300,15 @@ launchctl kickstart gui/$(id -u)/com.ai-holdem.cert-renew && sleep 5 && tail -2 
 |---|---|---|
 | launchd.log에 `REMOTE_HOST_LISTEN_REQUIRED`·`REMOTE_HOST_NAME_REQUIRED`·`REMOTE_HOST_TLS_REQUIRED` | plist 옵션 누락 | §7.1 plist 확인 후 `bootout`·`bootstrap` |
 | `REMOTE_HOST_TLS_INVALID` | 인증서·키를 못 읽음, 짝 불일치 | §4 스크립트 다시 실행, 경로 확인 |
+| `renew.log`에 `… nothing replaced` | Tailscale CLI 실패, HTTPS 인증서 꺼짐, 받은 쌍이 손상·불일치 | 기존 인증서는 그대로다. `"$TS" cert`를 인자 없이 실행해 메시지 확인 |
+| `renew.log`에 `another renewal is running` | 다른 갱신이 진행 중(종료 코드 75) | 다음 실행에서 자동으로 이어진다. 10분 넘게 남은 잠금은 자동 회수 |
 | `HOST_PASSWORD_NOT_SET` / `HOST_AUTH_INVALID` | 비밀번호 미설정 / 자격 파일 손상 | §5 `host-password` |
 | `EADDRNOTAVAIL`이 반복 | 바인드한 Tailscale IP가 없음(Tailscale 꺼짐, IP 바뀜) | Tailscale 상태 확인. `"$TS" ip -4`가 plist 값과 다르면 plist 수정 |
 | `EADDRINUSE` | 8898이나 8899를 다른 프로세스가 사용 | `lsof -nP -iTCP:8898 -sTCP:LISTEN` |
 | 브라우저 403 `BAD_ORIGIN` | 등록하지 않은 이름·IP로 접속 | `--remote-host-name`의 이름으로 접속(여러 개 등록 가능) |
 | 인증서 경고 | 이름이 인증서와 다름, 또는 만료 | MagicDNS 이름으로 접속, `renew.log`·만료일 확인 |
 | 로그인 429 `LOGIN_RATE_LIMIT` | 주소별 5회 또는 전체 50회 실패 | 15분 대기 또는 서비스 재시작(잠금은 메모리에만 있음) |
-| 재부팅 뒤 안 뜸 | 로그인 전이라 LaunchAgent가 아직 안 돎 | §1.2 — 로그인하면 뜬다 |
+| 재부팅 뒤 안 뜸 | 로그인 전이라 LaunchAgent가 아직 안 돎(FileVault가 켜져 있으면 디스크 잠금 해제 화면) | §1.2 — 맥미니 앞에서 잠금 해제·로그인하면 뜬다 |
 | LLM 상대·코치가 안 됨 | CLI 자격 없음, `PATH` 누락 | §2.2 상태 확인, plist `PATH` |
 
 ## 11. 확인 기록
@@ -309,7 +317,7 @@ launchctl kickstart gui/$(id -u)/com.ai-holdem.cert-renew && sleep 5 && tail -2 
 
 | 항목 | 방법 | 결과 |
 |---|---|---|
-| `host-password` TTY 입력 | `expect`로 두 번 입력 | 저장·검증 성공. 이 과정에서 **두 번째 입력이 화면에 찍히는 결함**을 찾아 같은 PR에서 고쳤다(원시 모드를 두 입력 내내 유지) |
+| `host-password` TTY 입력 | `expect`로 두 번 입력 | 저장·검증 성공. 이 과정에서 **두 번째 입력이 화면에 찍히는 결함**을 찾아 같은 PR에서 고쳤다(원시 모드를 두 입력 내내 유지). 오류는 코드 뒤에 이유를 붙여 출력하도록 고쳤다(`PASSWORD_TOO_SHORT: …`) |
 | LaunchAgent 환경 | 진단 작업 | `USER`·`HOME`이 설정되고, plist `PATH`로 node·claude·codex를 찾음. `claude auth status`(키체인)·`codex login status` 로그인 상태 |
 | `PATH` 없는 launchd | 진단 작업 | `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, node·claude·codex 모두 없음 |
 | §7.1 plist | `plutil -lint` → `bootstrap`(임시 레이블·시험 인증서, `127.0.0.1`로 Tailscale IP 대신) | 1초 안에 원격 로그인 200, 등록 안 된 Host 403 |
@@ -319,9 +327,15 @@ launchctl kickstart gui/$(id -u)/com.ai-holdem.cert-renew && sleep 5 && tail -2 
 | 재시작·해제 | `kickstart -k`, `bootout` | 즉시 재기동, 해제 뒤 프로세스 없음 |
 | 바인드 주소 없음 | `--remote-host-listen 192.0.2.123` | `EADDRNOTAVAIL`로 끝나고 launchd가 약 10초마다 재시도(35초에 4회) |
 | §7.2 갱신 작업 | 가짜 `tailscale`(인증서·키 출력)로 `kickstart` | launchd 기본 환경에서 `updated:`, `last exit code = 0`, 매일 04:17 등록 |
-| 갱신 스크립트 | 시험 `test/macmini-renew-cert.test.js` + ECDSA 키 수동 확인 | 갱신·무변경·교체·짝 불일치 거부·빈 출력 거부 |
-| `tailscale cert`·`ip`·`status` | Tailscale 소스(GitHub `cmd/tailscale/cli/cert.go`·`ip.go`, `ipn/ipnstate`, `feature/acme/cert.go`) | 표준 출력(`-`) 지원, App Store판 샌드박스 쓰기 경로, 수명 2/3 지점 백그라운드 갱신, `Self.DNSName`(끝에 점) |
+| 갱신 스크립트 | 시험 `test/macmini-renew-cert.test.js` | 갱신·무변경·교체, 짝 불일치·파싱 실패(손상 PEM)·빈 출력·CLI 실패 거부(기존 파일 유지), 잠금 중 75·오래된 잠금 회수, ECDSA 키·인증서 체인 |
+| 인증서 자동 반영 | 시험 `test/remote-host.test.js` | 원격 호스트 리스너와 HTTPS 참가자 포트 모두 새 연결에 갱신된 인증서를 준다(참가자 포트 연결은 이 PR에서 추가) |
+| `tailscale cert`·`ip`·`status` | Tailscale 소스(GitHub `tailscale/tailscale` main `49aa9c8`, 2026-10-31: `cmd/tailscale/cli/cert.go`·`ip.go`, `ipn/ipnstate/ipnstate.go`, `feature/acme/cert.go`) | 표준 출력(`-`) 지원, App Store판 샌드박스 쓰기 경로, 갱신 시점(ARI 우선·없으면 수명 2/3)과 "그 호출은 현재 쌍, 갱신은 백그라운드", `Self.DNSName`(끝에 점) |
 | 에너지 설정 이름·자동 로그인·원격 로그인 | Apple 사용자 안내 | 항목 이름, FileVault 켜짐 시 자동 로그인 불가, 공유 > 원격 로그인 경로 |
 | `pmset`·방화벽 명령 | `man pmset`, `socketfilterfw -h` | 키·옵션 존재 확인. 방화벽은 꺼진 상태라 켜진 상태의 동작은 확인 못 함 |
 
-확인하지 못한 것: 실제 Tailscale 인증서 발급·tailnet 접속, 방화벽이 켜진 상태, 자동 로그인 재부팅, 맥미니 특유의 전원 옵션. 처음 배포할 때 §6에서 폰 로그인까지 확인하고, 재부팅 한 번으로 §1.2·§7.1을 확인한다.
+확인하지 못한 것:
+- 실제 Tailscale 인증서 발급·tailnet 접속.
+- Tailscale 앱이 macOS 로그인 전에 연결되는지, FileVault 잠금 해제의 원격 방법. tailscale.com 문서가 이 환경에서 열리지 않았다.
+- 방화벽이 켜진 상태, 자동 로그인 재부팅, 맥미니 특유의 전원 옵션.
+
+처음 배포할 때 §6에서 폰 로그인까지 확인하고, 재부팅 한 번으로 §1.2·§7.1을 확인한다.

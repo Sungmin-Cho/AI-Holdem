@@ -107,6 +107,7 @@ export async function startAppService(
     tlsCert = null,
     tlsKey = null,
     remoteHost = null,
+    tlsReloadMs,
   } = {},
 ) {
   const dir = appDir(store),
@@ -146,6 +147,7 @@ export async function startAppService(
       tlsCert,
       tlsKey,
       remoteHost: remoteHost ? { ...remoteHost, appDir: dir } : null,
+      ...(tlsReloadMs === undefined ? {} : { tlsReloadMs }),
       onStop: () => void close(),
     });
     const identity = readOwnedLock(store, LOCK);
