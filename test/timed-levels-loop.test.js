@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {isDeepStrictEqual} from 'node:util';
 import {createHash, randomUUID} from 'node:crypto';
 import {createGameLoop, parseGameLoopArgs} from '../tools/game-loop.js';
 import {cliModeDefaults} from '../shared/game-setup.js';
@@ -28,11 +29,26 @@ const publishedClock = (value) => {
 };
 const sha256 = (text) => createHash('sha256').update(text).digest('hex');
 
-// A resend carries the recorded body only, never a fresh clock.
-function assertResendsCarryNoFreshClock(publishes) {
-  const retries = publishes.filter((args) => args.includes('--retry'));
-  assert.ok(retries.every((args) => !args.includes('--level-clock')));
+// A resend carries the recorded body only, never a fresh clock (#319). The drain after
+// ATTEMPT_PENDING names no body, so it carries no clock at all. The automatic resend after a
+// failed POST (#274) repeats the failed invocation's arguments, bound to the record that
+// invocation left: publish.js sends that record and builds nothing from the body flags, so the
+// clock among those arguments is the failed invocation's own, never a new reading.
+const RESEND_ONLY = new Set(['--expect-attempt-sha256', '--expect-game-epoch', '--deadline-monotonic-ns']);
+const withoutResendFlags = (args) => args.filter((arg, i) => arg !== '--retry' && !RESEND_ONLY.has(arg) && !RESEND_ONLY.has(args[i - 1]));
+function assertResendsCarryNoFreshClock(publishes, recovery = []) {
+  publishes.forEach((args, index) => {
+    if (!args.includes('--retry') || !args.includes('--level-clock')) return;
+    // Which recovery ran: a refusal names its status and code; a transport failure logs none.
+    const detail = () => JSON.stringify({index, flags: args.filter((arg) => arg.startsWith('--')), recovery});
+    assert.ok(args.includes('--expect-attempt-sha256'), `a clock-carrying resend is bound to the record it resends: ${detail()}`);
+    const repeated = withoutResendFlags(args);
+    assert.ok(publishes.slice(0, index).some((earlier) => !earlier.includes('--retry') && isDeepStrictEqual(withoutResendFlags(earlier), repeated)),
+      `a clock-carrying resend repeats an earlier invocation's arguments exactly: ${detail()}`);
+  });
 }
+const RECOVERY_EVENTS = new Set(['publish-refused', 'publish-recovery', 'server-recovered']);
+const RECOVERY_FIELDS = ['event', 'code', 'mode', 'httpStatus', 'serverCode', 'retry', 'bound', 'retire'];
 
 const PUBLISH_CLI = fileURLToPath(new URL('../tools/publish.js', import.meta.url));
 
@@ -97,11 +113,16 @@ async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand =
   const clock = {play: 1000.25};
   const control = {holdUser: false};
   const publishes = [];
+  const recovery = [];
   const transport = transportFailOnce ? await transportFailingPublisher(t) : null;
   const loop = createGameLoop({gameDir: root, resolver: async () => ({player: null, upper: null, notices: []}), opts: {
     port: 0, waitMs: 0, opponentRuntime: 'policy', pace: 'instant', resultHoldSec: 0,
     ...(managed ? {controlProtocolVersion: 1, playClockCheckpointMs: 10} : {}),
     ...(transport ? {publishCliPath: transport.shim} : {}),
+    // Closed fields of the publish recovery records only, for failure messages.
+    log: (record) => {
+      if (RECOVERY_EVENTS.has(record.event)) recovery.push(Object.fromEntries(RECOVERY_FIELDS.filter((key) => key in record).map((key) => [key, record[key]])));
+    },
     playClockNow: () => clock.play,
     onPublishInvoke: (args) => {
       publishes.push([...args]);
@@ -144,7 +165,7 @@ async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand =
     } catch { /* the relay may be between states */ } finally { posting = false; }
   }, 20);
   t.after(async () => { clearInterval(timer); await loop.requestStop().catch(() => {}); });
-  return {root, loop, clock, control, publishes, transport, stop: () => { clearInterval(timer); return loop.requestStop(); }};
+  return {root, loop, clock, control, publishes, recovery, transport, stop: () => { clearInterval(timer); return loop.requestStop(); }};
 }
 
 test('CLI and setup carry the level minutes to a tournament', () => {
@@ -185,7 +206,7 @@ test('a timed tournament rises one level per hand after each level\'s play time'
   }
   const retries = f.publishes.filter((args) => args.includes('--retry'));
   assert.ok(retries.length >= 1, 'the injected failure made the loop resend');
-  assertResendsCarryNoFreshClock(f.publishes);
+  assertResendsCarryNoFreshClock(f.publishes, f.recovery);
   const snap = readJson(f.root, 'ui-snapshot.json');
   if (snap.view && !snap.view.gameOver) {
     assert.deepEqual(snap.levelClock.nextBlinds, blindsForLevel(engine.level + 1, engine.config.blinds0));
@@ -211,7 +232,7 @@ test('a resend after a failed POST shows the recorded clock, never a fresh one',
   assert.equal(argAfter(resend, '--level-clock'), argAfter(original, '--level-clock'), 'the resend repeats the failed invocation\'s arguments, clock included');
   assert.deepEqual(shownAfterResend, recorded.levelClock, 'the relay shows the recorded clock');
   assert.ok(handLevels(f.root).length >= 3, 'the game went on after the resend');
-  assertResendsCarryNoFreshClock(f.publishes);
+  assertResendsCarryNoFreshClock(f.publishes, f.recovery);
 });
 
 test('paused time does not count toward the level and the clock resumes after the park', {timeout: 120000}, async (t) => {
