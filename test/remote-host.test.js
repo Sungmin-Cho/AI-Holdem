@@ -334,6 +334,33 @@ test("a renewed certificate is served to new connections without a restart", asy
   assert.equal((await request(port, { method: "POST", path: "/api/host/login", body: { password: PASSWORD }, ca: CERT_B.cert })).status, 200);
 });
 
+test("one combined file serves as certificate and key, and its renewal is picked up", async (t) => {
+  const dir = createOwnedTempDir("remote-host-combined");
+  const pem = path.join(dir, "host.pem");
+  const combined = (pair) => Buffer.concat([fs.readFileSync(pair.cert), fs.readFileSync(pair.key)]);
+  fs.writeFileSync(pem, combined(CERT_A), { mode: 0o600 });
+  const { port } = await boot(t, { remote: { tlsCert: pem, tlsKey: pem, tlsReloadMs: 50 } });
+  assert.equal((await login(port)).status, 200);
+  // Renewed the way the script does it: a complete new file renamed over the old one.
+  fs.writeFileSync(`${pem}.next`, combined(CERT_B), { mode: 0o600 });
+  fs.renameSync(`${pem}.next`, pem);
+  const b = new X509Certificate(fs.readFileSync(CERT_B.cert)).fingerprint256;
+  const fingerprint = () => new Promise((resolve, reject) => {
+    const socket = tls.connect({ host: "127.0.0.1", port, servername: "localhost", rejectUnauthorized: false }, () => {
+      resolve(socket.getPeerX509Certificate().fingerprint256);
+      socket.end();
+    });
+    socket.on("error", reject);
+  });
+  const deadline = Date.now() + 5000;
+  let seen = await fingerprint();
+  while (seen !== b && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    seen = await fingerprint();
+  }
+  assert.equal(seen, b);
+});
+
 test("a participant port on HTTPS also serves a renewed certificate without a restart", async (t) => {
   const dir = createOwnedTempDir("participant-renew");
   const cert = path.join(dir, "host.crt"), key = path.join(dir, "host.key");

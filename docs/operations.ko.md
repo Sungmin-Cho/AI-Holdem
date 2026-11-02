@@ -145,7 +145,7 @@ npm run app:stop -- /absolute/path/to/game
    ```bash
    scripts/macmini/renew-tailscale-cert.sh mini.tail1234.ts.net ~/holdem-tls
    ```
-   스크립트는 `tailscale cert --cert-file - --key-file -` 한 번으로 인증서와 키를 함께 받아 짝을 확인한 뒤에만 `host.crt`·`host.key`를 바꾼다. App Store판 CLI는 샌드박스 탓에 파일 경로에 직접 쓰면 `~/Library/Containers/…` 아래로 가기 때문에 표준 출력으로 받는다. CLI 경로는 기본 `/Applications/Tailscale.app/Contents/MacOS/Tailscale`이고 환경 변수 `TAILSCALE`로 바꾼다.
+   스크립트는 `tailscale cert --cert-file - --key-file -` 한 번으로 인증서 체인과 키를 함께 받아, 모두 검증한 뒤 **한 파일 `host.pem`**(600)으로 바꾼다(이름 바꾸기 한 번 — 어긋난 쌍이 생기지 않는다). 앱에는 이 파일을 인증서와 키 양쪽으로 준다. App Store판 CLI는 샌드박스 탓에 파일 경로에 직접 쓰면 `~/Library/Containers/…` 아래로 가기 때문에 표준 출력으로 받는다. CLI 경로는 기본 `/Applications/Tailscale.app/Contents/MacOS/Tailscale`이고 환경 변수 `TAILSCALE`로 바꾼다.
 4. 원격 호스트 비밀번호를 정한다(12자 이상, 입력은 화면에 보이지 않는다). store 경로는 절대 경로다.
    ```bash
    node tools/app-service.js host-password /Users/me/holdem-store
@@ -157,7 +157,7 @@ npm run app:stop -- /absolute/path/to/game
 ```bash
 node tools/app-service.js serve /Users/me/holdem-store --player-runtime codex \
   --remote-host-port 8898 --remote-host-listen 100.101.102.103 --remote-host-name mini.tail1234.ts.net \
-  --remote-tls-cert ~/holdem-tls/host.crt --remote-tls-key ~/holdem-tls/host.key
+  --remote-tls-cert ~/holdem-tls/host.pem --remote-tls-key ~/holdem-tls/host.pem
 # remote host: https://mini.tail1234.ts.net:8898/
 ```
 
@@ -193,8 +193,8 @@ node tools/app-service.js serve /Users/me/holdem-store --player-runtime codex \
     <string>--remote-host-port</string><string>8898</string>
     <string>--remote-host-listen</string><string>100.101.102.103</string>
     <string>--remote-host-name</string><string>mini.tail1234.ts.net</string>
-    <string>--remote-tls-cert</string><string>/Users/me/holdem-tls/host.crt</string>
-    <string>--remote-tls-key</string><string>/Users/me/holdem-tls/host.key</string>
+    <string>--remote-tls-cert</string><string>/Users/me/holdem-tls/host.pem</string>
+    <string>--remote-tls-key</string><string>/Users/me/holdem-tls/host.pem</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -229,7 +229,7 @@ launchctl bootout gui/$(id -u)/com.ai-holdem.app                                
 - claude CLI 자격은 로그인 키체인에 있어 로그인 세션 밖에서는 열리지 않을 수 있다. codex CLI 자격은 `~/.codex/auth.json` 파일이다. 기본 로컬 정책 게임은 플레이어 LLM 없이 돌고, 코치·리뷰 모델이 없으면 사실 기반 기계 피드백을 남긴다.
 - 인증서 갱신: Tailscale 인증서는 90일짜리다. tailscaled는 갱신할 때가 되면(CA 권고 시점, 없으면 수명의 2/3) 백그라운드에서 갱신하고 다음 호출에 새 쌍을 준다. 서비스는 10분마다 인증서·키 파일 내용이 바뀌었는지 확인해 재시작 없이 교체한다(원격 호스트 리스너와 HTTPS 참가자 포트 모두). 그래서 위 스크립트를 하루 한 번 돌리는 launchd 주기 작업(`StartCalendarInterval`)을 둔다 — plist 예시는 배포 가이드 §7.2. 경로가 심볼릭 링크여도 링크가 가리키는 파일의 변경을 감지한다. 인증서와 키가 서로 맞지 않는 중간 상태는 적용하지 않고 다음 확인에서 다시 시도한다.
 - Tailscale ACL로 8898 포트를 자기 기기에만 열어 두면 비밀번호 추측 시도도 tailnet 안으로 줄어든다.
-- 인증서 만료일 확인: `openssl x509 -in ~/holdem-tls/host.crt -noout -enddate`. 갱신 파일은 서비스 사용자가 읽을 수 있어야 한다.
+- 인증서 만료일 확인: `openssl x509 -in ~/holdem-tls/host.pem -noout -enddate`. 파일은 서비스 사용자가 읽을 수 있어야 한다.
 
 **6) 브라우저로 안 될 때 (SSH로 서버에서)**
 

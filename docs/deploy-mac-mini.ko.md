@@ -143,10 +143,10 @@ scripts/macmini/renew-tailscale-cert.sh "$NAME" "$HOME/holdem-tls"
 스크립트가 하는 일:
 - `tailscale cert --cert-file - --key-file - <이름>` **한 번**으로 인증서와 키를 함께 받는다. 그래서 둘이 항상 짝이 맞는다.
 - 표준 출력으로 받으므로 App Store판 CLI의 샌드박스 문제를 피한다. 그 CLI가 파일 경로에 직접 쓰면 실제로는 `~/Library/Containers/…/Data` 아래로 간다.
-- 체인의 인증서 하나하나와 키(정확히 하나)가 각각 읽히고, 키가 첫 인증서와 짝이 맞을 때만 `~/holdem-tls/host.crt`(644)·`host.key`(600)를 바꾼다. 아니면 아무것도 바꾸지 않고 `… nothing replaced`로 끝난다(종료 코드 1).
-- 교체 도중 실패하면(키를 바꾼 뒤 인증서를 못 바꾸면) 이전 키를 되돌려 디스크의 쌍이 어긋나지 않게 한다. 되돌리기마저 실패하면 이전 키를 `host.key.previous`로 남기고 그 사실을 알린다.
-- 같은 디렉터리에서 한 번에 하나만 돈다. `.renew.lock` 파일에 대한 잠금(flock)을 그 실행과 실행이 띄운 프로세스(예: `tailscale` 호출)가 쥐고, 그 프로세스들이 모두 끝나면 운영체제가 푼다(강제 종료 포함). 다른 실행이 돌고 있으면 종료 코드 75로 끝난다. `.renew.lock` 파일 자체는 남아 있어도 된다.
-- 작업 파일은 `~/holdem-tls/.renew-work`에서만 만들고 지운다. 강제 종료된 실행이 남긴 작업 디렉터리(키 사본이 있을 수 있다)는 다음 실행이 치운다.
+- 인증서 체인과 키를 **한 파일 `~/holdem-tls/host.pem`(600)**에 담는다. 앱은 이 파일 하나를 인증서와 키로 함께 읽는다(아래 §6·§7.1의 `--remote-tls-cert`·`--remote-tls-key`가 같은 파일).
+- 체인의 인증서 하나하나와 키(정확히 하나)가 각각 읽히고, 키가 첫 인증서와 짝이 맞을 때만 새 파일로 바꾼다. 아니면 아무것도 바꾸지 않고 `… nothing replaced`로 끝난다(종료 코드 1).
+- 교체는 이름 바꾸기 한 번이라, 앱은 옛 쌍이나 새 쌍 중 하나만 본다. 두 번 동시에 돌아도 각자 완전한 쌍을 넣고 나중 것이 남을 뿐, 어긋난 쌍은 생기지 않는다.
+- 강제 종료된 실행은 `~/holdem-tls/.host.pem.XXXXXX` 임시 파일(600)을 남길 수 있다. 지워도 된다.
 
 ## 5. 호스트 비밀번호
 
@@ -168,7 +168,7 @@ launchd에 맡기기 전에 직접 띄워 본다.
 cd ~/AI-Holdem
 node tools/app-service.js serve "$HOME/AI-Holdem/game" --player-runtime codex \
   --remote-host-port 8898 --remote-host-listen "$IP" --remote-host-name "$NAME" \
-  --remote-tls-cert "$HOME/holdem-tls/host.crt" --remote-tls-key "$HOME/holdem-tls/host.key"
+  --remote-tls-cert "$HOME/holdem-tls/host.pem" --remote-tls-key "$HOME/holdem-tls/host.pem"
 # remote host: https://mini.tail1234.ts.net:8898/
 ```
 
@@ -207,8 +207,8 @@ cat > "$PLIST" <<EOF
     <string>--remote-host-port</string><string>8898</string>
     <string>--remote-host-listen</string><string>$IP</string>
     <string>--remote-host-name</string><string>$NAME</string>
-    <string>--remote-tls-cert</string><string>$TLS/host.crt</string>
-    <string>--remote-tls-key</string><string>$TLS/host.key</string>
+    <string>--remote-tls-cert</string><string>$TLS/host.pem</string>
+    <string>--remote-tls-key</string><string>$TLS/host.pem</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
@@ -276,7 +276,7 @@ launchctl kickstart gui/$(id -u)/com.ai-holdem.cert-renew && sleep 5 && tail -2 
 참가자를 받을 때(온라인 세션):
 - 참가 링크는 참가자 포트 8899다. 같은 LAN의 참가자는 로비가 보여 주는 LAN 주소 링크로 들어온다.
 - tailnet 안의 참가자에게 MagicDNS 이름으로 된 링크를 보이려면 §7.1의 `ProgramArguments`에 `--public-host` `<이름>`을 더한다.
-- 참가자 포트도 HTTPS로 하려면 `--tls-cert`·`--tls-key`(같은 인증서 파일)를 더한다. 갱신된 인증서는 원격 호스트 리스너처럼 재시작 없이 반영된다.
+- 참가자 포트도 HTTPS로 하려면 `--tls-cert`·`--tls-key`에 같은 `host.pem`을 준다. 갱신된 인증서는 원격 호스트 리스너처럼 재시작 없이 반영된다.
 
 ## 9. 운영
 
@@ -290,7 +290,7 @@ launchctl kickstart gui/$(id -u)/com.ai-holdem.cert-renew && sleep 5 && tail -2 
 | 해제 | `launchctl bootout gui/$(id -u)/com.ai-holdem.app` |
 | 업데이트 | `cd ~/AI-Holdem && git pull && npm ci && launchctl kickstart -k gui/$(id -u)/com.ai-holdem.app` |
 | 비밀번호 변경 | `node tools/app-service.js host-password "$HOME/AI-Holdem/game"` (재시작 불필요, 기존 세션 끊김) |
-| 인증서 만료일 | `openssl x509 -in ~/holdem-tls/host.crt -noout -enddate` |
+| 인증서 만료일 | `openssl x509 -in ~/holdem-tls/host.pem -noout -enddate` |
 
 - 서비스가 다시 시작하면(업데이트·크래시·재부팅) 진행 중이던 게임은 저절로 이어지지 않는다. 로비의 **저장된 게임 불러오기**로 이어 간다.
 - 맥미니에서 `start game`(에이전트 스킬)을 쓰면, 떠 있는 이 서비스에 연결한다. 새 서비스를 띄우지 않는다.
@@ -303,8 +303,7 @@ launchctl kickstart gui/$(id -u)/com.ai-holdem.cert-renew && sleep 5 && tail -2 
 | launchd.log에 `REMOTE_HOST_LISTEN_REQUIRED`·`REMOTE_HOST_NAME_REQUIRED`·`REMOTE_HOST_TLS_REQUIRED` | plist 옵션 누락 | §7.1 plist 확인 후 `bootout`·`bootstrap` |
 | `REMOTE_HOST_TLS_INVALID` | 인증서·키를 못 읽음, 짝 불일치 | §4 스크립트 다시 실행, 경로 확인 |
 | `renew.log`에 `… nothing replaced` | Tailscale CLI 실패, HTTPS 인증서 꺼짐, 받은 쌍이 손상·불일치 | 기존 인증서는 그대로다. `"$TS" cert`를 인자 없이 실행해 메시지 확인 |
-| `renew.log`에 `another renewal is running` | 다른 갱신이 진행 중(종료 코드 75) | 그 실행이 끝나면 잠금이 풀린다. 계속되면 `lsof ~/holdem-tls/.renew.lock`으로 잠금을 쥔 프로세스(멈춘 `tailscale` 호출 포함)를 찾아 끝낸다 |
-| `renew.log`에 `mismatched pair; the previous key is kept at …` | 인증서 교체와 키 되돌리기가 모두 실패(권한·디스크 문제) | 원인을 고친 뒤 `mv ~/holdem-tls/host.key.previous ~/holdem-tls/host.key`, 그다음 스크립트를 다시 실행 |
+| `~/holdem-tls/.host.pem.XXXXXX` 파일이 남음 | 갱신 도중 강제 종료됨 | 지워도 된다(설치된 `host.pem`은 온전하다) |
 | `HOST_PASSWORD_NOT_SET` / `HOST_AUTH_INVALID` | 비밀번호 미설정 / 자격 파일 손상 | §5 `host-password` |
 | `EADDRNOTAVAIL`이 반복 | 바인드한 Tailscale IP가 없음(Tailscale 꺼짐, IP 바뀜) | Tailscale 상태 확인. `"$TS" ip -4`가 plist 값과 다르면 plist 수정 |
 | `EADDRINUSE` | 8898이나 8899를 다른 프로세스가 사용 | `lsof -nP -iTCP:8898 -sTCP:LISTEN` |
@@ -330,7 +329,7 @@ launchctl kickstart gui/$(id -u)/com.ai-holdem.cert-renew && sleep 5 && tail -2 
 | 재시작·해제 | `kickstart -k`, `bootout` | 즉시 재기동, 해제 뒤 프로세스 없음 |
 | 바인드 주소 없음 | `--remote-host-listen 192.0.2.123` | `EADDRNOTAVAIL`로 끝나고 launchd가 약 10초마다 재시도(35초에 4회) |
 | §7.2 갱신 작업 | 가짜 `tailscale`(인증서·키 출력)로 `kickstart` | launchd 기본 환경에서 `updated:`, `last exit code = 0`, 매일 04:17 등록 |
-| 갱신 스크립트 | 시험 `test/macmini-renew-cert.test.js` | 갱신·무변경·교체. 짝 불일치·손상 PEM·체인 뒤쪽 손상·손상 키·키 두 개·빈 출력·CLI 실패는 거부(기존 파일 유지). 교체 도중 실패 시 이전 키 복원, 복원도 실패하면 `host.key.previous` 보존. 실제 동시 실행은 환경 변수와 무관하게 75. 셸만 죽이면 잠금은 살아 있는 자식이 쥐고 있다가 자식이 끝날 때 풀리고, 프로세스 그룹째 죽이면 바로 풀림. 남은 작업 디렉터리는 다음 실행이 치우고, 상관없는 `.renew.*` 디렉터리나 그런 이름의 출력 디렉터리는 건드리지 않음. ECDSA 키·체인은 TLS로 로드됨 |
+| 갱신 스크립트 | 시험 `test/macmini-renew-cert.test.js` | 결합 파일 `host.pem` 설치·무변경·교체, TLS로 로드됨. 짝 불일치·손상 PEM·체인 뒤쪽 손상·손상 키·키 두 개·빈 출력·CLI 실패는 거부(설치된 파일·임시 파일 상태 확인). 실제 동시 실행 두 개는 각자 완전한 쌍을 넣고 나중 것이 남음. 강제 종료돼도 설치된 파일은 온전. ECDSA 키·체인 |
 | 인증서 자동 반영 | 시험 `test/remote-host.test.js` | 원격 호스트 리스너와 HTTPS 참가자 포트 모두 새 연결에 갱신된 인증서를 준다(참가자 포트 연결은 이 PR에서 추가) |
 | `tailscale cert`·`ip`·`status` | Tailscale 소스(GitHub `tailscale/tailscale` main `49aa9c8`, 2026-10-31: `cmd/tailscale/cli/cert.go`·`ip.go`, `ipn/ipnstate/ipnstate.go`, `feature/acme/cert.go`) | 표준 출력(`-`) 지원, App Store판 샌드박스 쓰기 경로, 갱신 시점(ARI 우선·없으면 수명 2/3)과 "그 호출은 현재 쌍, 갱신은 백그라운드", `Self.DNSName`(끝에 점) |
 | 에너지 설정 이름·자동 로그인·원격 로그인 | Apple 사용자 안내 | 항목 이름, FileVault 켜짐 시 자동 로그인 불가, 공유 > 원격 로그인 경로 |
