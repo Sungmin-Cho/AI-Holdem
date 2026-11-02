@@ -189,8 +189,15 @@ async function endChild(child, { grace = true } = {}) {
 async function stalledCliFixture(t, prefix) {
   const cli = fileURLToPath(new URL("../tools/app-service.js", import.meta.url));
   const root = createOwnedTempDir(prefix);
-  const serve = spawn(process.execPath, [cli, "serve", root, "--public-port", "0"], { stdio: "ignore" });
+  // The app directory first, as ensureAppService makes it: on Windows a private directory takes a
+  // PowerShell child to create (1-2s), and of two processes that both found it missing, the later
+  // creator gets EEXIST. The serve child losing that race to the readiness poll below exited.
+  assert.equal((await inspectAppService(root)).status, "stopped");
+  const serve = spawn(process.execPath, [cli, "serve", root, "--public-port", "0"], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
   registerOwnedProcess(serve, "app-serve-stalled-cli");
+  let serveErr = "";
+  serve.stderr.setEncoding("utf8");
+  serve.stderr.on("data", (chunk) => { serveErr += chunk; });
   // The real stop first (it releases the app's lock); whatever it found, the child must exit.
   t.after(async () => {
     await stopAppService(root).catch(() => {});
@@ -204,7 +211,7 @@ async function stalledCliFixture(t, prefix) {
     } catch {
       /* not serving yet */
     }
-    if (serve.exitCode !== null || Date.now() > deadline) assert.fail("the app did not start serving");
+    if (serve.exitCode !== null || Date.now() > deadline) assert.fail(`the app did not start serving: exit=${serve.exitCode} ${serveErr.slice(-600)}`);
     await sleep(100);
   }
 }
@@ -214,6 +221,7 @@ function runStalledCli(cli, preload, args, env) {
     const child = execFile(process.execPath, ["--require", preload, cli, ...args], {
       encoding: "utf8",
       timeout: process.platform === "win32" ? 240000 : 40000,
+      windowsHide: true,
       env: { ...process.env, HOLDEM_PUBLIC_PORT: "0", ...env },
     }, (error, stdout, stderr) => resolve({ code: error ? error.code : 0, signal: error?.signal ?? null, stdout, stderr }));
     registerOwnedProcess(child, "app-cli-stalled");
@@ -272,7 +280,7 @@ test("one-shot app CLI neither waits on nor fails over the body of an answer it 
     "const http = require('node:http');",
     "const server = http.createServer((req, res) => { req.resume(); res.writeHead(200, { 'content-type': 'application/json' }); res.write('{'); });",
     "server.listen(0, '127.0.0.1', () => process.stdout.write(server.address().port + '\\n'));",
-  ].join("\n")], { stdio: ["ignore", "pipe", "ignore"] });
+  ].join("\n")], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
   registerOwnedProcess(listener, "open-body-listener");
   t.after(() => endChild(listener, { grace: false }));
   const port = await new Promise((resolve, reject) => {
