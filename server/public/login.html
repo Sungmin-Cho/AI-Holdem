@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <title>AI 홀덤 · 호스트 로그인</title>
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/design-tokens.css" />
+    <link rel="stylesheet" href="/ui-base.css" />
+    <link rel="stylesheet" href="/lobby.css" />
+    <script type="module" src="/login.js"></script>
+  </head>
+  <body class="ui-page lobby login-page">
+    <main class="ui-card login-card">
+      <h1 class="login-title">AI 홀덤 호스트 로그인</h1>
+      <p id="login-note" class="ui-help">서버에 설정한 원격 호스트 비밀번호를 입력하세요.</p>
+      <!-- Disabled until login.js runs over HTTPS: without it nothing can be submitted, and POST
+           keeps a password out of any URL. -->
+      <form id="login-form" class="login-form" method="post" novalidate>
+        <input type="text" name="username" autocomplete="username" value="host" hidden />
+        <label class="ui-field"
+          ><span class="ui-label">비밀번호</span>
+          <input id="password" name="password" class="ui-input" type="password" autocomplete="current-password" maxlength="1024" required autofocus disabled
+        /></label>
+        <p id="login-error" class="ui-error" role="alert"></p>
+        <button id="login-submit" class="ui-btn ui-btn--primary ui-btn--lg ui-btn--block" type="submit" disabled>로그인</button>
+      </form>
+    </main>
+  </body>
+</html>

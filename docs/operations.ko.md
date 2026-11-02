@@ -127,6 +127,120 @@ npm run app:stop -- /absolute/path/to/game
 
 앱 서비스와 학습 서비스는 게임보다 오래 유지된다. 로비의 접속 토큰은 URL fragment에서 sessionStorage로 옮겨지고 relay 토큰은 브라우저에 전달하지 않는다. 링크와 private descriptor를 공유하지 않는다. 기존 직접 실행 게임이 활성 상태면 로비가 소유권을 가져오지 않는다.
 
+### 상시 서버와 원격 호스트
+
+맥미니처럼 늘 켜 둔 컴퓨터에서 앱을 돌리고, 호스트가 노트북·폰·태블릿 어느 기기에서든 브라우저로 로그인해 게임을 진행할 수 있다. 원격 호스트 리스너는 기본으로 꺼져 있고(`serve --remote-host-port`로 켠다), 루프백 로비·참가자 리스너(8899)는 그대로다.
+
+- **HTTPS 전용**이다. 인증서·키(`--remote-tls-cert`·`--remote-tls-key`)가 없으면 서비스가 시작하지 않는다. 로그인 화면도 이 리스너에서만 열린다(참가자 포트·로컬 로비에는 없다).
+- 접속 이름을 `--remote-host-name`으로 등록한다(여러 번 가능, `127.0.0.1`은 로컬 로비 주소라 쓸 수 없다). Host 헤더가 등록한 이름·포트가 아니면 거부한다.
+- 바인드 주소 `--remote-host-listen`은 **기본값이 없다**. 서버의 Tailscale IP(`tailscale ip -4`, 예: `100.101.102.103`)를 권한다 — 그래야 tailnet에 들어온 기기만 로그인 화면에 닿고, 앱 비밀번호가 두 번째 층이 된다. `0.0.0.0`(모든 인터페이스)을 고르면 같은 LAN의 기기도 로그인 화면에 닿는다. 그때는 macOS 방화벽이나 공유기 설정으로 막을지 직접 판단한다.
+- 로그인은 서버에 설정한 **비밀번호 하나**다. 세션은 서버 메모리에만 있어 서비스가 다시 시작하면 다시 로그인한다.
+- 공유기 포트포워딩으로 인터넷에 직접 여는 것은 권하지 않는다.
+
+**1) 준비 (서버 컴퓨터)**
+
+1. Node 20 이상, 이 저장소, `npm ci`.
+2. 서버와 호스트 기기 모두 Tailscale에 로그인한다. 관리 콘솔 DNS 설정에서 MagicDNS와 HTTPS 인증서를 켠다.
+3. 인증서를 만든다. 이름은 `tailscale status`에 보이는 서버의 MagicDNS 이름(예: `mini.tail1234.ts.net`)이다.
+   ```bash
+   mkdir -p ~/holdem-tls && chmod 700 ~/holdem-tls
+   tailscale cert --cert-file ~/holdem-tls/host.crt --key-file ~/holdem-tls/host.key mini.tail1234.ts.net
+   ```
+   설치 방식(앱 번들·Homebrew)에 따라 `tailscale` 경로와 쓸 수 있는 디렉터리가 다를 수 있다. 실패하면 `tailscale cert --help`로 확인한다.
+4. 원격 호스트 비밀번호를 정한다(12자 이상, 입력은 화면에 보이지 않는다). store 경로는 절대 경로다.
+   ```bash
+   node tools/app-service.js host-password /Users/me/holdem-store
+   ```
+   다시 실행하면 비밀번호가 바뀌고, 이전 비밀번호로 로그인한 원격 세션은 모두 끊긴다. 서비스를 다시 시작할 필요는 없다.
+
+**2) 실행**
+
+```bash
+node tools/app-service.js serve /Users/me/holdem-store --player-runtime codex \
+  --remote-host-port 8898 --remote-host-listen 100.101.102.103 --remote-host-name mini.tail1234.ts.net \
+  --remote-tls-cert ~/holdem-tls/host.crt --remote-tls-key ~/holdem-tls/host.key
+# remote host: https://mini.tail1234.ts.net:8898/
+```
+
+원격 옵션 하나라도 주면서 `--remote-host-port`를 빠뜨리거나, 바인드 주소·이름·인증서·비밀번호 중 하나라도 없으면 시작하지 않는다(오류 코드가 표준 오류로 나온다). 바인드 주소가 아직 없으면(부팅 직후 Tailscale이 늦게 뜬 경우) `EADDRNOTAVAIL`로 끝나고, launchd가 다시 띄울 때 성공한다. 참가자 리스너도 같은 인증서로 HTTPS를 쓰려면 `--tls-cert`·`--tls-key`, 참가 링크에 MagicDNS 이름을 보이려면 `--public-host`를 더한다.
+
+**3) 접속**
+
+호스트 기기에서 Tailscale을 켜고 `https://mini.tail1234.ts.net:8898/`을 연다. 로그인 화면에서 비밀번호를 넣으면 로컬과 같은 로비가 열린다. 로그인은 브라우저 탭마다 따로이고, `도움말·설정` 메뉴의 `로그아웃`으로 끝낸다.
+
+- 세션은 2시간 동안 **요청이** 없거나 로그인 뒤 24시간이 지나면 끝난다. 로비를 열어 둔 탭은 계속 상태를 묻기 때문에 사실상 24시간까지 유지된다. 동시에 8개까지 유지하고 넘치면 가장 오래된 세션을 끊는다. 세션이 끝나면 로비와 테이블은 로그인 화면으로 돌아간다.
+- 한 주소에서 비밀번호를 5번 틀리면 그 주소는 15분 동안 로그인할 수 없다. 모든 주소를 합쳐 15분에 50번 틀리면 15분 동안 새 로그인을 막는다(이미 로그인한 세션은 그대로).
+- 로그인 성공·실패·잠김은 서비스의 표준 오류에 `[remote-host]`로 시작하는 줄(주소만)로 남는다 — 아래 launchd 예시에서는 `<store>/.app/launchd.log`, 터미널에서 직접 `serve`하면 그 터미널이다.
+- 원격에서는 **앱 정지와 학습실을 쓸 수 없다**. 학습실은 서버 컴퓨터에서 연다. 앱 정지는 서버에서 한다(아래 launchd).
+
+**4) launchd로 상시 실행 (macOS)**
+
+`~/Library/LaunchAgents/com.ai-holdem.app.plist` 예시(경로는 자기 환경으로 바꾼다):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.ai-holdem.app</string>
+  <key>WorkingDirectory</key><string>/Users/me/AI-Holdem</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>tools/app-service.js</string>
+    <string>serve</string>
+    <string>/Users/me/holdem-store</string>
+    <string>--player-runtime</string><string>codex</string>
+    <string>--remote-host-port</string><string>8898</string>
+    <string>--remote-host-listen</string><string>100.101.102.103</string>
+    <string>--remote-host-name</string><string>mini.tail1234.ts.net</string>
+    <string>--remote-tls-cert</string><string>/Users/me/holdem-tls/host.crt</string>
+    <string>--remote-tls-key</string><string>/Users/me/holdem-tls/host.key</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/Users/me/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>StandardOutPath</key><string>/Users/me/holdem-store/.app/launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/me/holdem-store/.app/launchd.log</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ai-holdem.app.plist   # 등록·시작
+launchctl kickstart -k gui/$(id -u)/com.ai-holdem.app                            # 재시작(업데이트 뒤)
+launchctl bootout gui/$(id -u)/com.ai-holdem.app                                 # 정지·해제
+```
+
+- `serve`는 포그라운드로 돈다. `npm run app`(분리 기동)은 launchd에 쓰지 않는다.
+- `KeepAlive.SuccessfulExit=false`라 비정상 종료만 다시 띄운다. `npm run app:stop`처럼 정상 정지하면 다시 뜨지 않는다.
+- `PATH`에 node와 플레이어·코치 CLI(`codex`, `claude`)가 있는 디렉터리를 넣는다. launchd 기본 PATH에는 `/opt/homebrew/bin`과 `~/.local/bin`이 없다.
+- LaunchAgent는 그 사용자(로그인한 계정)로 돈다. store·인증서·CLI 자격 모두 그 사용자의 것이어야 한다.
+- 서비스가 다시 시작하면 진행 중이던 게임은 저절로 재개되지 않는다. 로비에 "저장된 게임이 있습니다"가 뜨면 **저장된 게임 불러오기**를 눌러 이어 간다(처리 중이던 명령이 있었다면 일시정지 상태로 복구된다).
+- 이 서비스가 떠 있는 동안 `start game`(스킬)은 같은 store의 이 서비스에 연결한다.
+- 업데이트: `git pull && npm ci` 뒤 `launchctl kickstart -k …`.
+
+**5) 늘 켜 두기**
+
+- 잠자기를 끈다: `sudo pmset -a sleep 0 disksleep 0`. 정전 뒤 자동 부팅: `sudo pmset -a autorestart 1`.
+- LaunchAgent는 사용자가 로그인해야 실행된다. 재부팅 뒤에도 바로 뜨게 하려면 자동 로그인을 켠다(FileVault를 켜 두면 자동 로그인을 쓸 수 없다).
+- claude CLI 자격은 로그인 키체인에 있어 로그인 세션 밖에서는 열리지 않을 수 있다. codex CLI 자격은 `~/.codex/auth.json` 파일이다. 기본 로컬 정책 게임은 플레이어 LLM 없이 돌고, 코치·리뷰 모델이 없으면 사실 기반 기계 피드백을 남긴다.
+- 인증서 갱신: Tailscale 인증서는 90일짜리다. 서비스는 10분마다 인증서·키 파일 내용이 바뀌었는지 확인해 재시작 없이 교체하므로, 한 달에 한 번쯤 `tailscale cert …`를 다시 실행하는 launchd 주기 작업(`StartCalendarInterval`)을 두면 된다. 경로가 심볼릭 링크여도 링크가 가리키는 파일의 변경을 감지한다. 인증서와 키가 서로 맞지 않는 중간 상태는 적용하지 않고 다음 확인에서 다시 시도한다.
+- Tailscale ACL로 8898 포트를 자기 기기에만 열어 두면 비밀번호 추측 시도도 tailnet 안으로 줄어든다.
+- 인증서 만료일 확인: `openssl x509 -in ~/holdem-tls/host.crt -noout -enddate`. 갱신 파일은 서비스 사용자가 읽을 수 있어야 한다.
+
+**6) 브라우저로 안 될 때 (SSH로 서버에서)**
+
+원격 로그인이 막히면 브라우저만으로는 고칠 수 없다. 서버에 SSH(같은 Tailscale 망의 `tailscale ssh` 포함)로 들어가 처리한다.
+
+- 비밀번호를 잊었거나 자격 파일이 손상됐다(`HOST_AUTH_INVALID`): `node tools/app-service.js host-password <store>`로 다시 정한다. 재시작은 필요 없다.
+- 서비스가 뜨지 않는다: `<store>/.app/launchd.log`의 마지막 오류 코드(`REMOTE_HOST_…`, `HOST_PASSWORD_NOT_SET`, `EADDRINUSE` 등)를 보고 고친 뒤 `launchctl kickstart -k …`.
+- 로그인이 잠겼다(`LOGIN_RATE_LIMIT`): 15분을 기다리거나 서비스를 다시 시작한다(잠금 기록은 메모리에만 있다).
+- 원격 호스트를 끄려면 plist에서 `--remote-…` 옵션을 지우고 다시 시작한다. 남은 `<store>/.app/host-auth.json`은 원격 리스너가 없으면 쓰이지 않는다. 지우면 다음에 켤 때 비밀번호를 다시 정해야 한다.
+
 ### 사이드카 직접 기동
 
 스킬 없이 같은 게임을 띄울 때. `init`과 서버 기동은 사이드카가 하므로 직접 부르지 않는다.
