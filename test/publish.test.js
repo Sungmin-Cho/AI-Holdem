@@ -609,15 +609,17 @@ async function finBeforeRequestListener() {
   };
 }
 
-// #339: a fetch that never settles, whatever its signal does — the worst case on every version.
-// Only the named route stalls; every other request is real. The moment the caller's signal
-// aborts is written down synchronously.
+// #339: a call that never settles, whatever its signal does — the worst case on every version.
+// Only the named route stalls; every other request is real. Stage `request` (the default) is a
+// fetch that never settles; stage `body` answers 200 at once with a body that never ends. The
+// moment the caller's signal aborts is written down synchronously.
 function writeStallingFetch() {
   const dir = createOwnedTempDir('holdem-stall');
   const preload = path.join(dir, 'stall-fetch.cjs');
   fs.writeFileSync(preload, [
     "const fs = require('node:fs');",
     'const route = process.env.HOLDEM_TEST_STALL_ROUTE;',
+    "const stage = process.env.HOLDEM_TEST_STALL_STAGE ?? 'request';",
     'const report = process.env.HOLDEM_TEST_STALL_REPORT;',
     'const realFetch = globalThis.fetch;',
     'globalThis.fetch = (url, init = {}) => {',
@@ -626,6 +628,10 @@ function writeStallingFetch() {
     "  init.signal?.addEventListener('abort', () => {",
     '    fs.writeFileSync(report, JSON.stringify({ calledAt, abortedAt: String(process.hrtime.bigint()) }));',
     '  }, { once: true });',
+    "  if (stage === 'body') {",
+    '    const endless = new ReadableStream({ pull: () => new Promise(() => {}) });',
+    "    return Promise.resolve(new Response(endless, { status: 200, headers: { 'content-type': 'application/json' } }));",
+    '  }',
     '  return new Promise(() => {});',
     '};',
     '',
@@ -633,7 +639,12 @@ function writeStallingFetch() {
   return { preload, report: path.join(dir, 'abort.json') };
 }
 
-// Runs the publisher once and keeps however it ended: an exit with no reply is the failure.
+// A deadline that leaves the publisher time to start and take its lock on a slow runner.
+const deadlineIn = (ms) => process.hrtime.bigint() + BigInt(ms) * 1_000_000n;
+const msFrom = (deadline, at) => Number(BigInt(at) - deadline) / 1e6;
+
+// Runs the publisher once and keeps however it ended, and when: an exit with no reply is the
+// failure.
 async function runRaw(dir, args, { nodeArgs = [], env = null } = {}) {
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, [...nodeArgs, TOOL, ...args, '--game-dir', dir], {
@@ -641,9 +652,12 @@ async function runRaw(dir, args, { nodeArgs = [], env = null } = {}) {
       timeout: 30000,
       ...(env ? { env: { ...process.env, ...env } } : {}),
     });
-    return { code: 0, stdout, stderr };
+    return { code: 0, stdout, stderr, endedAt: process.hrtime.bigint() };
   } catch (error) {
-    return { code: error.code, signal: error.signal, stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? '') };
+    return {
+      code: error.code, signal: error.signal, stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? ''),
+      endedAt: process.hrtime.bigint(),
+    };
   }
 }
 
@@ -655,10 +669,10 @@ function replyOf(result) {
 const endedAs = (result) => JSON.stringify({ code: result.code, signal: result.signal, stdout: result.stdout.slice(-300), stderr: result.stderr.slice(-300) });
 
 // The identity a failed POST reports is the record it left behind.
-function assertFailedWithRecordIdentity(dir, result) {
+function assertFailedWithRecordIdentity(dir, result, code = 'PUBLISH_FAILED') {
   assert.equal(result.code, 1, `the publisher replies instead of exiting unsettled: ${endedAs(result)}`);
   const reply = replyOf(result);
-  assert.equal(reply?.code, 'PUBLISH_FAILED', endedAs(result));
+  assert.equal(reply?.code, code, endedAs(result));
   const record = JSON.parse(fs.readFileSync(path.join(dir, '.publish-attempt.json'), 'utf8'));
   assert.deepEqual(reply.attempt, {
     bodySha256: createHash('sha256').update(JSON.stringify(record.body)).digest('hex'),
@@ -677,7 +691,7 @@ test('publish: 요청을 읽기 전에 끊는 relay에도 기록 identity를 실
     for (let i = 0; i < 3; i += 1) {
       const dir = tmpDir();
       writeLockJson(dir, relay.port);
-      const deadline = process.hrtime.bigint() + 4_000_000_000n;
+      const deadline = deadlineIn(6000);
       assertFailedWithRecordIdentity(dir, await runRaw(dir, ['--from', turnFile(dir, sampleTurn()), '--deadline-monotonic-ns', String(deadline)]));
     }
   } finally {
@@ -685,21 +699,38 @@ test('publish: 요청을 읽기 전에 끊는 relay에도 기록 identity를 실
   }
 });
 
-test('publish: 정착하지 않는 POST도 예산에서 끊어 PUBLISH_FAILED로 답하고, 예산을 넘겨 붙잡지 않는다 (#339)', async () => {
+// The POST keeps the budget the deadline leaves it, and nothing holds it, or the process, past
+// the deadline.
+async function runStalledPost(stage) {
   const dir = tmpDir();
   const stall = writeStallingFetch();
   writeLockJson(dir, await deadPort());
-  const deadline = process.hrtime.bigint() + 4_000_000_000n;
+  const deadline = deadlineIn(6000);
   const result = await runRaw(dir, ['--from', turnFile(dir, sampleTurn()), '--deadline-monotonic-ns', String(deadline)], {
     nodeArgs: ['--require', stall.preload],
-    env: { HOLDEM_TEST_STALL_ROUTE: '/api/publish', HOLDEM_TEST_STALL_REPORT: stall.report },
+    env: { HOLDEM_TEST_STALL_ROUTE: '/api/publish', HOLDEM_TEST_STALL_STAGE: stage, HOLDEM_TEST_STALL_REPORT: stall.report },
   });
-  assertFailedWithRecordIdentity(dir, result);
   assert.ok(fs.existsSync(stall.report), `the stalled POST was aborted: ${endedAs(result)}`);
-  const { abortedAt } = JSON.parse(fs.readFileSync(stall.report, 'utf8'));
-  // The POST keeps the budget the deadline leaves it, and nothing holds it past the deadline.
-  const fromDeadlineMs = Number(BigInt(abortedAt) - deadline) / 1e6;
-  assert.ok(fromDeadlineMs >= -1000 && fromDeadlineMs <= 2000, `aborted ${fromDeadlineMs}ms from the deadline`);
+  const abortedMs = msFrom(deadline, JSON.parse(fs.readFileSync(stall.report, 'utf8')).abortedAt);
+  assert.ok(abortedMs >= -1000 && abortedMs <= 2000, `aborted ${abortedMs}ms from the deadline`);
+  const endedMs = msFrom(deadline, result.endedAt);
+  assert.ok(endedMs <= 3000, `the publisher ended ${endedMs}ms after the deadline`);
+  return { dir, result };
+}
+
+test('publish: 정착하지 않는 POST도 예산에서 끊어 PUBLISH_FAILED로 답하고, 예산을 넘겨 붙잡지 않는다 (#339)', async () => {
+  const { dir, result } = await runStalledPost('request');
+  assertFailedWithRecordIdentity(dir, result);
+});
+
+// A 200 whose body never arrives keeps its old classification: an unreadable answer is a refusal
+// of this exact record (PUBLISH_REJECTED with the closed 200/NONE fields), now at the budget.
+test('publish: 끝나지 않는 응답 본문도 예산에서 끊어 이전처럼 PUBLISH_REJECTED로 답한다 (#339)', async () => {
+  const { dir, result } = await runStalledPost('body');
+  assertFailedWithRecordIdentity(dir, result, 'PUBLISH_REJECTED');
+  const reply = replyOf(result);
+  assert.equal(reply.httpStatus, 200);
+  assert.equal(reply.serverCode, 'NONE');
 });
 
 test('publish --wait: 게시 뒤 정착하지 않는 대기도 대기 예산에서 끝나 게시 결과를 돌려준다 (#339)', async () => {
