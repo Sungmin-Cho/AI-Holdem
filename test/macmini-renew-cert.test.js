@@ -138,6 +138,74 @@ test("only the checked blocks are installed: other PEM labels are refused, stray
   assert.equal(loads(pem()), true);
 });
 
+test("malformed PEM layouts are refused, CRLF output installs, and the same pair rearranged is unchanged", posixOnly, (t) => {
+  if (!openssl) return t.skip("openssl not installed");
+  const { out, serve, run, pem } = fixture(t);
+  serve(fixtureText("a.crt"), fixtureText("a.key"));
+  assert.equal(run().status, 0);
+  const good = read(pem());
+  const cert = fixtureText("b.crt"), key = fixtureText("b.key");
+  const body = (text) => text.split("\n").filter((line) => line && !line.startsWith("-----")).join("\n") + "\n";
+  const alias = (label, text) => `-----BEGIN ${label}-----\n${body(text)}-----END ${label}-----\n`;
+  const cases = [
+    // A second BEGIN on the same line as a certificate's: counted once, and OpenSSL reads no block there.
+    ["two BEGIN markers on one line", `-----BEGIN CERTIFICATE----------BEGIN X509 CERTIFICATE-----\n${body(cert)}-----END X509 CERTIFICATE-----\n${cert}`, key],
+    ["a BEGIN in the middle of a line", `${cert}note -----BEGIN X509 CERTIFICATE-----\n${body(cert)}-----END X509 CERTIFICATE-----\n`, key],
+    ["a certificate BEGIN in the middle of a line", `note -----BEGIN CERTIFICATE-----\n${body(cert)}-----END CERTIFICATE-----\n${cert}`, key],
+    ["a certificate with no END", `-----BEGIN CERTIFICATE-----\n${body(cert)}${cert}`, key],
+    ["a certificate BEGIN inside the key block", cert, key.replace(/\n(?=-----END)/, "\n-----BEGIN CERTIFICATE-----\n")],
+    ["an alias label as the only leaf", alias("X509 CERTIFICATE", cert), key],
+  ];
+  for (const [label, certText, keyText] of cases) {
+    serve(certText, keyText);
+    const result = run();
+    assert.equal(result.status, 1, `${label}: ${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, /nothing replaced/, label);
+    assert.equal(read(pem()), good, `${label}: the installed file is untouched`);
+    assert.deepEqual(fs.readdirSync(out), ["host.pem"], `${label}: no temporary file is left`);
+  }
+  // CRLF line ends are kept as received and still load.
+  serve(cert.replaceAll("\n", "\r\n"), key.replaceAll("\n", "\r\n"));
+  let result = run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(read(pem()), (cert + key).replaceAll("\n", "\r\n"));
+  assert.equal(loads(pem()), true);
+  // The comparison is with the rebuilt file, so stray text or the key first is not a change.
+  serve(cert, key);
+  assert.equal(run().status, 0);
+  const inode = fs.statSync(pem()).ino;
+  serve(`note\n${key}`, `${cert}more\n`);
+  result = run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^unchanged: /);
+  assert.equal(fs.statSync(pem()).ino, inode);
+});
+
+test("a failure between the two temporary files leaves neither behind", posixOnly, (t) => {
+  if (!openssl) return t.skip("openssl not installed");
+  const realMktemp = ["/usr/bin/mktemp", "/bin/mktemp"].find((file) => fs.existsSync(file));
+  if (!realMktemp) return t.skip("mktemp not found");
+  const { dir, out, serve, run, pem } = fixture(t);
+  serve(fixtureText("a.crt"), fixtureText("a.key"));
+  assert.equal(run().status, 0);
+  // A mktemp that works once, then fails (out of inodes, quota).
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "mktemp"), [
+    "#!/bin/sh",
+    `if [ -e "${bin}/used" ]; then echo "mktemp: no space" >&2; exit 1; fi`,
+    `: > "${bin}/used"`,
+    `exec ${realMktemp} "$@"`,
+    "",
+  ].join("\n"), { mode: 0o755 });
+  serve(fixtureText("b.crt"), fixtureText("b.key"));
+  const result = run(undefined, { PATH: `${bin}:${process.env.PATH}` });
+  assert.notEqual(result.status, 0);
+  assert.equal(fs.existsSync(path.join(bin, "used")), true, "the first mktemp ran");
+  assert.equal(read(pem()), fixtureText("a.crt") + fixtureText("a.key"));
+  assert.deepEqual(fs.readdirSync(out), ["host.pem"], "the first temporary file is removed too");
+});
+
 test("a directory in host.pem's place is refused, not filled", posixOnly, (t) => {
   if (!openssl) return t.skip("openssl not installed");
   const { dir, out, serve, run, pem } = fixture(t);

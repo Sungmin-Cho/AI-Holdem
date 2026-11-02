@@ -32,9 +32,12 @@ name=$1
 dir=$2
 umask 077
 mkdir -p "$dir"
+# The trap is set before either file exists, so a failure between the two mktemp calls leaves none.
+tmp=
+out=
+trap 'rm -f ${tmp:+"$tmp"} ${out:+"$out"}' EXIT
 tmp=$(mktemp "$dir/.host.pem.XXXXXX")
 out=$(mktemp "$dir/.host.pem.XXXXXX")
-trap 'rm -f "$tmp" "$out"' EXIT
 fail() {
   echo "$1; nothing replaced" >&2
   exit 1

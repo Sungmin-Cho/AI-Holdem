@@ -331,7 +331,7 @@ launchctl kickstart gui/$(id -u)/com.ai-holdem.cert-renew && sleep 5 && tail -2 
 | 재시작·해제 | `kickstart -k`, `bootout` | 즉시 재기동, 해제 뒤 프로세스 없음 |
 | 바인드 주소 없음 | `--remote-host-listen 192.0.2.123` | `EADDRNOTAVAIL`로 끝나고 launchd가 약 10초마다 재시도(35초에 4회) |
 | §7.2 갱신 작업 | 가짜 `tailscale`(인증서·키 출력)로 `kickstart` | launchd 기본 환경에서 `updated:`, `last exit code = 0`, 매일 04:17 등록 |
-| 갱신 스크립트 | 시험 `test/macmini-renew-cert.test.js` | 결합 파일 `host.pem` 설치·무변경·교체, TLS로 로드됨. 짝 불일치·손상 PEM·체인 뒤쪽 손상·손상 키·키 두 개·빈 출력·다른 PEM 레이블(`X509 CERTIFICATE`·`TRUSTED CERTIFICATE`)·`host.pem` 자리의 디렉터리(링크 포함)·CLI 실패는 거부(설치된 파일·임시 파일 상태 확인). 블록 밖 글은 버리고 키가 먼저 와도 체인 뒤로 놓음. 실제 동시 실행 두 개는 각자 완전한 쌍을 넣고 나중 것이 남음. 강제 종료돼도 설치된 파일은 온전. ECDSA 키·체인 |
+| 갱신 스크립트 | 시험 `test/macmini-renew-cert.test.js` | 결합 파일 `host.pem` 설치·무변경·교체, TLS로 로드됨. 짝 불일치·손상 PEM·체인 뒤쪽 손상·손상 키·키 두 개·빈 출력·다른 PEM 레이블(`X509 CERTIFICATE`·`TRUSTED CERTIFICATE`)·`host.pem` 자리의 디렉터리(링크 포함)·비정상 PEM 배치(한 줄에 BEGIN 둘, 줄 중간 BEGIN, END 없음, 키 안의 BEGIN)·CLI 실패·두 번째 임시 파일 생성 실패는 거부(설치된 파일·임시 파일 상태 확인). CRLF 출력은 설치되고, 같은 쌍을 순서만 바꿔 받으면 무변경. 블록 밖 글은 버리고 키가 먼저 와도 체인 뒤로 놓음. 실제 동시 실행 두 개는 각자 완전한 쌍을 넣고 나중 것이 남음. 강제 종료돼도 설치된 파일은 온전. ECDSA 키·체인 |
 | 인증서 자동 반영 | 시험 `test/remote-host.test.js` | 원격 호스트 리스너와 HTTPS 참가자 포트 모두 새 연결에 갱신된 인증서를 준다(참가자 포트 연결은 이 PR에서 추가). 시작할 때 결합 파일은 리스너마다 한 번만 읽는다 |
 | `tailscale cert`·`ip`·`status` | Tailscale 소스(GitHub `tailscale/tailscale` main `49aa9c8`, 2026-10-31: `cmd/tailscale/cli/cert.go`·`ip.go`, `ipn/ipnstate/ipnstate.go`, `feature/acme/cert.go`) | 표준 출력(`-`) 지원, App Store판 샌드박스 쓰기 경로, 갱신 시점(ARI 우선·없으면 수명 2/3)과 "그 호출은 현재 쌍, 갱신은 백그라운드", `Self.DNSName`(끝에 점) |
 | 에너지 설정 이름·자동 로그인·원격 로그인 | Apple 사용자 안내 | 항목 이름, FileVault 켜짐 시 자동 로그인 불가, 공유 > 원격 로그인 경로 |
