@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, ownedProcessStartTime, parseOwnedLockIdentity, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
 import { startDrillServer } from './drill-server.js';
 import { lstatExact, fstatExact, plainIdOf } from '../shared/exact-stat.js';
+import { boundedNetworkCall } from './bounded-network-call.js';
 
 const SELF = fileURLToPath(import.meta.url);
 const LOCK = 'study.lock.d';
@@ -534,8 +535,6 @@ function publicHandle(value) {
     storeIdentity: value.storeIdentity, port: value.port,
     studyUrl: `http://127.0.0.1:${value.port}/#token=${value.drillToken}` };
 }
-// AbortSignal.timeout accepts integers only. Both the request-local deadline
-// and the caller's shared monotonic budget must still permit a whole millisecond.
 export function isStudyTransportFailure(error) {
   const message = String(error?.message ?? '');
   if (error?.name === 'TypeError' && message.includes('fetch failed')) return true;
@@ -547,32 +546,49 @@ export function shouldRetryLiveWait(error, { afterOwner, owner, descriptorState,
   if (descriptorState !== 'valid') return error?.code === 'STUDY_DESCRIPTOR_CORRUPT';
   return isStudyTransportFailure(error);
 }
+// A network budget is a whole number of milliseconds. Both the request-local deadline
+// and the caller's shared monotonic budget must still permit one.
 export function studyHttpTimeout(deadline, maximum = HTTP_WAIT_MS) {
   const localRemaining = deadline === undefined ? maximum : Math.floor(deadline - platformNow());
   const timeout = Math.min(localRemaining, platformTimeout(maximum));
   if (!Number.isSafeInteger(timeout) || timeout <= 0) fail();
   return timeout;
 }
+// #343: the request and every read of its answer end at the one budget, whatever fetch does
+// (tools/bounded-network-call.js). Some clients are one-shot processes — `npm run study:stop`,
+// the latency observer's cleanup once its loop has ended — and a fetch that never settled used
+// to empty their event loop: exit 13, no message. A long-lived caller (the app, a game loop)
+// reached the expiry before and meets it at the same budget now. Expiry rejects as
+// AbortSignal.timeout did (TimeoutError), so verified() and the live-wait retry classify it as
+// they always have.
 async function httpJson(value, route, { control = false, body, badToken = false, deadline } = {}) {
-  const timeout = studyHttpTimeout(deadline);
-  const response = await fetch(`http://127.0.0.1:${value.port}${route}`, {
-    method: body === undefined ? 'GET' : 'POST',
-    headers: { [control ? 'x-study-control' : 'x-drill-token']:
-      badToken ? 'invalid-study-health-probe' : (control ? value.controlToken : value.drillToken) },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(timeout), redirect: 'error',
-  });
-  // Health/control responses are small; never trust an arbitrary listener's stream.
-  const reader = response.body.getReader(); let size = 0; const chunks = [];
+  const call = boundedNetworkCall(studyHttpTimeout(deadline));
   try {
-    while (true) {
-      const { done, value: bytes } = await reader.read(); if (done) break;
-      size += bytes.length;
-      if (size > MAX_DESCRIPTOR) { await reader.cancel(); fail(); }
-      chunks.push(bytes);
+    const response = await call.settle(fetch(`http://127.0.0.1:${value.port}${route}`, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { [control ? 'x-study-control' : 'x-drill-token']:
+        badToken ? 'invalid-study-health-probe' : (control ? value.controlToken : value.drillToken) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: call.signal, redirect: 'error',
+    }));
+    // Health/control responses are small; never trust an arbitrary listener's stream.
+    const reader = response.body.getReader(); let size = 0; const chunks = [];
+    try {
+      while (true) {
+        const { done, value: bytes } = await call.settle(reader.read()); if (done) break;
+        size += bytes.length;
+        if (size > MAX_DESCRIPTOR) { await call.settle(reader.cancel()); fail(); }
+        chunks.push(bytes);
+      }
+    } finally {
+      // A read still pending at the budget is rejected by the release, never left holding the lock
+      // (Node 20 and 26 measured).
+      reader.releaseLock();
     }
-  } finally { reader.releaseLock(); }
-  return { status: response.status, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) };
+    return { status: response.status, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) };
+  } finally {
+    call.release();
+  }
 }
 async function verified(ctx, descriptor, owner, deadline) {
   if (descriptor.state !== 'valid' || !descriptorMatches(descriptor.value, ctx, owner)) fail();

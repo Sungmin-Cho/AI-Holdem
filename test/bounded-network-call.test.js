@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { boundedNetworkCall } from '../tools/bounded-network-call.js';
+import { boundedNetworkCall, MAX_NETWORK_BUDGET_MS } from '../tools/bounded-network-call.js';
 import { registerOwnedProcess } from './helpers/owned-fixtures.mjs';
 
 const MODULE_URL = new URL('../tools/bounded-network-call.js', import.meta.url).href;
@@ -11,15 +11,17 @@ const isTimeout = (error) => error instanceof DOMException && error.name === 'Ti
   && error.message === 'The operation was aborted due to timeout';
 
 const execFilePromise = promisify(execFile);
-// A one-shot process: nothing but `source` keeps its event loop alive. It reports how it ended
+// A one-shot process: nothing but `source` keeps its event loop alive. It reports when it ended
 // from its own clock, synchronously at exit — the parent observes the exit late while it
-// registers the child (a synchronous identity probe, up to 15s on Windows).
+// registers the child (a synchronous identity probe, up to 15s on Windows). The exit code is the
+// one the parent observes: on Node 20 the 'exit' event of an unsettled top-level await carries 0
+// although the process exits 13.
 async function runOneShot(source) {
   const preamble = [
     "import fs from 'node:fs';",
     `import { boundedNetworkCall } from ${JSON.stringify(MODULE_URL)};`,
     'const started = process.hrtime.bigint();',
-    "process.on('exit', (code) => { fs.writeSync(1, JSON.stringify({ code, ms: Number(process.hrtime.bigint() - started) / 1e6 }) + '\\n'); });",
+    "process.on('exit', () => { fs.writeSync(1, JSON.stringify({ ms: Number(process.hrtime.bigint() - started) / 1e6 }) + '\\n'); });",
   ].join('\n');
   const pending = execFilePromise(process.execPath, ['--input-type=module', '-e', `${preamble}\n${source}`], {
     encoding: 'utf8',
@@ -39,11 +41,13 @@ async function runOneShot(source) {
   return { code, stderr, reported };
 }
 
-test('boundedNetworkCall accepts the whole-millisecond budgets AbortSignal.timeout accepted, and nothing else', () => {
-  for (const budget of [1.5, -1, 2 ** 32, Number.NaN, Infinity, '10', null, undefined]) {
+// A timer cuts a delay past 2^31-1 to 1ms with only a warning, so such a budget is refused.
+test('boundedNetworkCall accepts a whole-millisecond budget a timer can hold, and nothing else', () => {
+  assert.equal(MAX_NETWORK_BUDGET_MS, 2 ** 31 - 1);
+  for (const budget of [1.5, -1, 2 ** 31, 2 ** 32, Number.NaN, Infinity, '10', null, undefined]) {
     assert.throws(() => boundedNetworkCall(budget), RangeError, `budget ${String(budget)}`);
   }
-  for (const budget of [0, 1, 0xFFFF_FFFF]) {
+  for (const budget of [0, 1, MAX_NETWORK_BUDGET_MS]) {
     const call = boundedNetworkCall(budget);
     call.release();
     assert.equal(call.signal.aborted, false);
@@ -93,7 +97,7 @@ test('control: a one-shot process waiting only on AbortSignal.timeout exits 13, 
     "await new Promise((resolve, reject) => { signal.addEventListener('abort', () => reject(signal.reason)); });",
   ].join('\n'));
   assert.equal(code, 13);
-  assert.equal(reported?.code, 13);
+  assert.ok(reported, 'the process recorded its exit');
 });
 
 test('boundedNetworkCall keeps a one-shot process alive to its budget and ends it with the TimeoutError, never exit 13', async () => {
@@ -103,7 +107,7 @@ test('boundedNetworkCall keeps a one-shot process alive to its budget and ends i
   ].join('\n'));
   assert.equal(code, 1, stderr);
   assert.match(stderr, /TimeoutError/);
-  assert.equal(reported?.code, 1);
+  assert.ok(reported, 'the process recorded its exit');
   assert.ok(reported.ms >= 290 && reported.ms <= 3000, `ended ${reported.ms}ms into a 300ms budget`);
 });
 
@@ -113,6 +117,6 @@ test('boundedNetworkCall release lets a one-shot process exit at once, long befo
     "try { await call.settle(Promise.resolve('done')); } finally { call.release(); }",
   ].join('\n'));
   assert.equal(code, 0, stderr);
-  assert.equal(reported?.code, 0);
+  assert.ok(reported, 'the process recorded its exit');
   assert.ok(reported.ms <= 3000, `held ${reported.ms}ms after release`);
 });
