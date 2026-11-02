@@ -31,23 +31,29 @@ const sha256 = (text) => createHash('sha256').update(text).digest('hex');
 
 // A resend carries the recorded body only, never a fresh clock (#319). The drain after
 // ATTEMPT_PENDING names no body, so it carries no clock at all. The automatic resend after a
-// failed POST (#274) repeats the failed invocation's arguments, bound to the record that
-// invocation left: publish.js sends that record and builds nothing from the body flags, so the
-// clock among those arguments is the failed invocation's own, never a new reading.
+// failed POST (#274) is spawned right after the invocation that failed, repeats its arguments
+// and is bound to the record that invocation left: publish.js sends that record and builds
+// nothing from the body flags. So the record on disk when the resend runs must be the bound one
+// and must carry the very clock its arguments name.
 const RESEND_ONLY = new Set(['--expect-attempt-sha256', '--expect-game-epoch', '--deadline-monotonic-ns']);
 const withoutResendFlags = (args) => args.filter((arg, i) => arg !== '--retry' && !RESEND_ONLY.has(arg) && !RESEND_ONLY.has(args[i - 1]));
-function assertResendsCarryNoFreshClock(publishes, recovery = []) {
+function assertResendsCarryNoFreshClock({publishes, attempts, recovery}) {
   publishes.forEach((args, index) => {
     if (!args.includes('--retry') || !args.includes('--level-clock')) return;
-    // Which recovery ran: a refusal names its status and code; a transport failure logs none.
+    // Which recovery ran: a refusal logs publish-refused before the relay check; a transport
+    // failure logs only the relay check (server-recovery-verified or server-recovered).
     const detail = () => JSON.stringify({index, flags: args.filter((arg) => arg.startsWith('--')), recovery});
-    assert.ok(args.includes('--expect-attempt-sha256'), `a clock-carrying resend is bound to the record it resends: ${detail()}`);
-    const repeated = withoutResendFlags(args);
-    assert.ok(publishes.slice(0, index).some((earlier) => !earlier.includes('--retry') && isDeepStrictEqual(withoutResendFlags(earlier), repeated)),
-      `a clock-carrying resend repeats an earlier invocation's arguments exactly: ${detail()}`);
+    const bound = argAfter(args, '--expect-attempt-sha256');
+    assert.ok(bound, `a clock-carrying resend is bound to the record it resends: ${detail()}`);
+    const failed = publishes[index - 1];
+    assert.ok(failed && !failed.includes('--retry') && isDeepStrictEqual(withoutResendFlags(failed), withoutResendFlags(args)),
+      `a clock-carrying resend repeats the invocation that failed just before it: ${detail()}`);
+    const record = attempts[index];
+    assert.equal(record ? sha256(JSON.stringify(record.body)) : null, bound, `the bound record is the one on disk when the resend ran: ${detail()}`);
+    assert.deepEqual(record.body.levelClock, publishedClock(argAfter(args, '--level-clock')), `the record it sends carries that same clock: ${detail()}`);
   });
 }
-const RECOVERY_EVENTS = new Set(['publish-refused', 'publish-recovery', 'server-recovered']);
+const RECOVERY_EVENTS = new Set(['publish-refused', 'publish-recovery', 'server-recovery-verified', 'server-recovered']);
 const RECOVERY_FIELDS = ['event', 'code', 'mode', 'httpStatus', 'serverCode', 'retry', 'bound', 'retire'];
 
 const PUBLISH_CLI = fileURLToPath(new URL('../tools/publish.js', import.meta.url));
@@ -113,6 +119,8 @@ async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand =
   const clock = {play: 1000.25};
   const control = {holdUser: false};
   const publishes = [];
+  const attempts = []; // by invocation: the recorded attempt a --retry found on disk, else null
+  const injected = {index: null};
   const recovery = [];
   const transport = transportFailOnce ? await transportFailingPublisher(t) : null;
   const loop = createGameLoop({gameDir: root, resolver: async () => ({player: null, upper: null, notices: []}), opts: {
@@ -126,11 +134,14 @@ async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand =
     playClockNow: () => clock.play,
     onPublishInvoke: (args) => {
       publishes.push([...args]);
+      // The publisher is spawned right after this: a resend will send the record on disk now.
+      attempts.push(args.includes('--retry') ? peekJson(root, '.publish-attempt.json') : null);
       clock.play += stepMs;
       // One injected publisher failure on a clock-carrying publish makes the loop resend.
       if (failOnce && args.includes('--level-clock') && readJson(root, 'state.json').handNo >= 2) {
         const code = failOnce;
         failOnce = null;
+        injected.index = publishes.length - 1;
         throw Object.assign(new Error('injected publish failure'), {code});
       }
       if (!transport) return;
@@ -165,7 +176,7 @@ async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand =
     } catch { /* the relay may be between states */ } finally { posting = false; }
   }, 20);
   t.after(async () => { clearInterval(timer); await loop.requestStop().catch(() => {}); });
-  return {root, loop, clock, control, publishes, recovery, transport, stop: () => { clearInterval(timer); return loop.requestStop(); }};
+  return {root, loop, clock, control, publishes, attempts, injected, recovery, transport, stop: () => { clearInterval(timer); return loop.requestStop(); }};
 }
 
 test('CLI and setup carry the level minutes to a tournament', () => {
@@ -204,9 +215,12 @@ test('a timed tournament rises one level per hand after each level\'s play time'
     assert.equal(clock.running, '1');
     assert.ok(Number.isFinite(Date.parse(clock.at)));
   }
-  const retries = f.publishes.filter((args) => args.includes('--retry'));
-  assert.ok(retries.length >= 1, 'the injected failure made the loop resend');
-  assertResendsCarryNoFreshClock(f.publishes, f.recovery);
+  // The injected ATTEMPT_PENDING is drained next, without a clock and without a binding.
+  assert.ok(Number.isInteger(f.injected.index), 'the injected failure happened');
+  const drain = f.publishes[f.injected.index + 1];
+  assert.ok(drain?.includes('--retry'), 'the injected failure made the loop drain the recorded attempt');
+  assert.equal(drain.includes('--level-clock') || drain.includes('--expect-attempt-sha256'), false, JSON.stringify(drain));
+  assertResendsCarryNoFreshClock(f);
   const snap = readJson(f.root, 'ui-snapshot.json');
   if (snap.view && !snap.view.gameOver) {
     assert.deepEqual(snap.levelClock.nextBlinds, blindsForLevel(engine.level + 1, engine.config.blinds0));
@@ -232,7 +246,10 @@ test('a resend after a failed POST shows the recorded clock, never a fresh one',
   assert.equal(argAfter(resend, '--level-clock'), argAfter(original, '--level-clock'), 'the resend repeats the failed invocation\'s arguments, clock included');
   assert.deepEqual(shownAfterResend, recorded.levelClock, 'the relay shows the recorded clock');
   assert.ok(handLevels(f.root).length >= 3, 'the game went on after the resend');
-  assertResendsCarryNoFreshClock(f.publishes, f.recovery);
+  // The diagnostics tell a transport failure from a refusal: the relay check, no refusal.
+  assert.ok(f.recovery.some((row) => row.event === 'server-recovery-verified' || row.event === 'server-recovered'), JSON.stringify(f.recovery));
+  assert.equal(f.recovery.some((row) => row.event === 'publish-refused'), false, JSON.stringify(f.recovery));
+  assertResendsCarryNoFreshClock(f);
 });
 
 test('paused time does not count toward the level and the clock resumes after the park', {timeout: 120000}, async (t) => {
