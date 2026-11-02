@@ -11,8 +11,10 @@
 # - Every certificate in the chain and the key must parse, and the key must match the leaf, before
 #   anything is replaced; unchanged files are left alone. If replacing fails half way, the previous
 #   pair is put back.
-# - One run at a time per directory: an flock on <directory>/.renew.lock held for the life of the
-#   run, so it is released however the run ends (even when killed) and never needs taking over.
+# - One run at a time per directory: an flock on <directory>/.renew.lock held by the run and the
+#   processes it starts, released by the kernel once they have all exited (however they end), so it
+#   never needs taking over. `lsof <directory>/.renew.lock` lists the holders.
+# - Working files live only in <directory>/.renew-work, which this script alone creates and clears.
 # - When a renewal is due, tailscaled starts it in the background and a later call hands out the
 #   new pair: a daily run picks it up long before expiry. The running app reloads a changed pair
 #   within ten minutes, without a restart.
@@ -30,19 +32,28 @@ name=$1
 dir=$2
 umask 077
 mkdir -p "$dir"
-if [ -z "${HOLDEM_RENEW_LOCKED:-}" ]; then
+lockfile="$dir/.renew.lock"
+# Only a run that holds the lock knows the token written into the lock file after it locked it;
+# anything else (including a stray environment variable) goes through the lock.
+if [ -z "${HOLDEM_RENEW_TOKEN:-}" ] || [ "$(cat "$lockfile" 2>/dev/null)" != "$HOLDEM_RENEW_TOKEN" ]; then
   # Re-run this script under an exclusive, non-blocking flock that the exec'd shell inherits.
-  HOLDEM_RENEW_LOCKED=1 exec perl -e '
+  exec perl -e '
     $^F = 255;  # keep the lock descriptor open across exec
-    open(my $lock, ">>", shift) or die "cannot open the lock: $!\n";
+    open(my $lock, "+>>", shift) or die "cannot open the lock: $!\n";
     flock($lock, 6) or do { print STDERR "another renewal is running\n"; exit 75 };  # LOCK_EX|LOCK_NB
+    my $token = sprintf("%d-%d-%08x%08x", $$, time, int(rand(2**32)), int(rand(2**32)));
+    truncate($lock, 0); seek($lock, 0, 0); print $lock $token; $lock->flush;
+    $ENV{HOLDEM_RENEW_TOKEN} = $token;
     exec @ARGV or die "cannot run the renewal: $!\n";
-  ' "$dir/.renew.lock" /bin/sh "$0" "$@"
+  ' "$lockfile" /bin/sh "$0" "$@"
 fi
 # Holding the lock, no other run is active: clear what a killed run left (it may hold a key copy).
-find "$dir" -maxdepth 1 -type d -name '.renew.*' -exec rm -rf {} +
-tmp=$(mktemp -d "$dir/.renew.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT
+# Only this script's own working directory is ever removed.
+work="$dir/.renew-work"
+rm -rf "$work"
+mkdir "$work"
+tmp="$work"
+trap 'rm -rf "$work"; : > "$lockfile"' EXIT
 fail() {
   echo "$1; nothing replaced" >&2
   exit 1
@@ -80,7 +91,12 @@ if ! mv "$tmp/host.crt" "$dir/host.crt"; then
   if [ -n "$had_key" ] && mv "$tmp/previous.key" "$dir/host.key"; then
     fail "could not replace the certificate; the previous key was put back"
   fi
-  echo "could not replace the certificate, and the previous key could not be put back: $dir holds a mismatched pair" >&2
+  # Keep the previous key out of the working directory so cleanup cannot take it.
+  if [ -n "$had_key" ] && cp -p "$tmp/previous.key" "$dir/host.key.previous"; then
+    echo "could not replace the certificate, and the previous key could not be put back: $dir holds a mismatched pair; the previous key is kept at $dir/host.key.previous" >&2
+  else
+    echo "could not replace the certificate, and the previous key could not be put back: $dir holds a mismatched pair" >&2
+  fi
   exit 1
 fi
 echo "updated: $enddate"

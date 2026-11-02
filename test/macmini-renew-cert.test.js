@@ -25,7 +25,8 @@ function fixture(t) {
     "#!/bin/sh",
     '[ "$1" = cert ] && [ "$2" = --cert-file ] && [ "$3" = - ] && [ "$4" = --key-file ] && [ "$5" = - ] && [ "$6" = mini.tail1234.ts.net ] || { echo "unexpected args: $*" >&2; exit 64; }',
     'echo "Wrote public cert to -" >&2',
-    '[ -n "${CLI_SLEEP:-}" ] && sleep "$CLI_SLEEP"',
+    // With CLI_WAIT set, say "started" and hold until the test releases (no fixed sleeps).
+    'if [ -n "${CLI_WAIT:-}" ]; then : > "$PAIR_DIR/started"; i=0; while [ ! -e "$PAIR_DIR/release" ] && [ "$i" -lt 600 ]; do sleep 0.05; i=$((i+1)); done; fi',
     'cat "$PAIR_DIR/cert.pem" "$PAIR_DIR/key.pem"',
     "",
   ].join("\n"), { mode: 0o755 });
@@ -33,10 +34,22 @@ function fixture(t) {
     fs.copyFileSync(path.join(FIXTURES, certName), path.join(pair, "cert.pem"));
     fs.copyFileSync(path.join(FIXTURES, keyName), path.join(pair, "key.pem"));
   };
-  const env = (extra = {}) => ({ ...process.env, TAILSCALE: fake, PAIR_DIR: pair, OPENSSL: openssl, HOLDEM_RENEW_LOCKED: "", ...extra });
+  const env = (extra = {}) => ({ ...process.env, TAILSCALE: fake, PAIR_DIR: pair, OPENSSL: openssl, HOLDEM_RENEW_TOKEN: "", ...extra });
   const run = (args = ["mini.tail1234.ts.net", out], extra = {}) => spawnSync("/bin/sh", [SCRIPT, ...args], { encoding: "utf8", env: env(extra) });
   const start = (extra = {}) => spawn("/bin/sh", [SCRIPT, "mini.tail1234.ts.net", out], { env: env(extra), detached: true, stdio: ["ignore", "pipe", "pipe"] });
-  return { dir, out, serve, run, start, pair };
+  const waitFor = async (predicate, label) => {
+    const deadline = Date.now() + 15000;
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error(`timed out: ${label}`);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  };
+  // Is the lock free right now? (a separate non-blocking flock on the same file)
+  const lockFree = () => spawnSync("perl", ["-e", 'open(my $f, ">>", shift) or exit 2; exit(flock($f, 6) ? 0 : 1)', path.join(out, ".renew.lock")]).status === 0;
+  const started = () => fs.existsSync(path.join(pair, "started"));
+  const release = () => fs.writeFileSync(path.join(pair, "release"), "");
+  const rearm = () => { for (const name of ["started", "release"]) fs.rmSync(path.join(pair, name), { force: true }); };
+  return { dir, out, serve, run, start, pair, waitFor, lockFree, started, release, rearm };
 }
 const read = (file) => fs.readFileSync(file, "utf8");
 
@@ -105,34 +118,73 @@ test("the renewal script refuses parts that do not parse, even when both fail al
 const exited = (child) => new Promise((resolve) => child.once("exit", (code) => resolve(code)));
 const collect = (child) => { let text = ""; child.stderr.on("data", (d) => { text += d; }); child.stdout.on("data", (d) => { text += d; }); return () => text; };
 
-test("one renewal at a time per directory: a concurrent run gets 75, the lock ends with its holder", posixOnly, async (t) => {
+test("one renewal at a time per directory, whatever the environment says", posixOnly, async (t) => {
   if (!openssl) return t.skip("openssl not installed");
-  const { out, serve, run, start } = fixture(t);
+  const { out, serve, run, start, waitFor, started, release } = fixture(t);
   serve("a.crt", "a.key");
-  // Two real runs at once: the first holds the lock while its CLI call is slow.
-  const first = start({ CLI_SLEEP: "2" });
+  const first = start({ CLI_WAIT: "1" });
   const firstOutput = collect(first);
   const firstDone = exited(first);
   t.after(() => { try { process.kill(-first.pid, "SIGKILL"); } catch { /* already gone */ } });
-  const deadline = Date.now() + 5000;
-  while (!fs.existsSync(path.join(out, ".renew.lock")) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
-  await new Promise((r) => setTimeout(r, 300));
-  const second = run();
-  assert.equal(second.status, 75, second.stderr);
-  assert.match(second.stderr, /another renewal is running/);
+  await waitFor(started, "the first run reached its CLI call");
+  for (const token of ["", "1", "0", "not-the-token"]) {
+    const second = run(undefined, { HOLDEM_RENEW_TOKEN: token });
+    assert.equal(second.status, 75, `token ${JSON.stringify(token)}: ${second.stderr}`);
+    assert.match(second.stderr, /another renewal is running/);
+  }
+  assert.equal(fs.existsSync(path.join(out, ".renew-work")), true, "the first run's working directory survives the refused runs");
+  release();
   assert.equal(await firstDone, 0, firstOutput());
   assert.match(firstOutput(), /updated: /);
-  // A run killed mid-way (its whole process group) releases the lock with it: nothing to take over.
+});
+
+test("the lock ends with the last process holding it; a killed run's leftovers are cleared", posixOnly, async (t) => {
+  if (!openssl) return t.skip("openssl not installed");
+  const { out, serve, run, start, waitFor, lockFree, started, release, rearm } = fixture(t);
+  serve("a.crt", "a.key");
+  assert.equal(run().status, 0);
   serve("b.crt", "b.key");
-  const killed = start({ CLI_SLEEP: "5" });
-  const killedDone = exited(killed);
-  await new Promise((r) => setTimeout(r, 700));
-  process.kill(-killed.pid, "SIGKILL");
-  await killedDone;
+  // Killing only the shell leaves the lock with its still-running child (the CLI call).
+  let victim = start({ CLI_WAIT: "1" });
+  let done = exited(victim);
+  t.after(() => { try { process.kill(-victim.pid, "SIGKILL"); } catch { /* already gone */ } });
+  await waitFor(started, "the CLI call started");
+  process.kill(victim.pid, "SIGKILL");
+  await done;
+  assert.equal(lockFree(), false, "the CLI child still holds the inherited lock");
+  release();
+  await waitFor(lockFree, "the lock is released once the child exits");
+  // Killing the whole run mid-way: the lock goes with it, and the working directory it left
+  // (it may hold a key copy) is cleared by the next run.
+  rearm();
+  victim = start({ CLI_WAIT: "1" });
+  done = exited(victim);
+  await waitFor(started, "the CLI call started again");
+  assert.equal(fs.existsSync(path.join(out, ".renew-work")), true);
+  process.kill(-victim.pid, "SIGKILL");
+  await done;
+  await waitFor(lockFree, "the lock is released with the killed process group");
   const after = run();
   assert.equal(after.status, 0, after.stderr);
   assert.equal(read(path.join(out, "host.crt")).trim(), read(path.join(FIXTURES, "b.crt")).trim());
-  assert.deepEqual(fs.readdirSync(out).sort(), [".renew.lock", "host.crt", "host.key"], "the next run clears what the killed run left (it may hold a key copy)");
+  assert.deepEqual(fs.readdirSync(out).sort(), [".renew.lock", "host.crt", "host.key"]);
+  assert.equal(read(path.join(out, ".renew.lock")), "", "a finished run leaves no token behind");
+});
+
+test("cleanup removes only the script's own working directory", posixOnly, (t) => {
+  if (!openssl) return t.skip("openssl not installed");
+  const { dir, serve, run } = fixture(t);
+  // An output directory whose own name looks like a temporary one, next to an unrelated backup.
+  const out = path.join(dir, ".renew.tls");
+  fs.mkdirSync(path.join(out, ".renew.backup"), { recursive: true });
+  fs.writeFileSync(path.join(out, ".renew.backup", "keep.txt"), "mine");
+  fs.copyFileSync(path.join(FIXTURES, "a.crt"), path.join(out, "host.crt"));
+  fs.copyFileSync(path.join(FIXTURES, "a.key"), path.join(out, "host.key"));
+  serve("b.crt", "b.key");
+  const result = run(["mini.tail1234.ts.net", out]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(read(path.join(out, ".renew.backup", "keep.txt")), "mine");
+  assert.equal(read(path.join(out, "host.crt")).trim(), read(path.join(FIXTURES, "b.crt")).trim());
 });
 
 test("a failing CLI leaves the files, no temporary directory and no lock", posixOnly, (t) => {
@@ -194,6 +246,23 @@ test("a replace that fails half way puts the previous key back", posixOnly, (t) 
   assert.match(result.stderr, /could not replace the certificate; the previous key was put back; nothing replaced/);
   assert.equal(read(path.join(out, "host.crt")).trim(), read(path.join(FIXTURES, "a.crt")).trim());
   assert.equal(read(path.join(out, "host.key")).trim(), read(path.join(FIXTURES, "a.key")).trim(), "the pair on disk still matches");
+});
+
+test("when even the previous key cannot be put back, it is kept beside the pair", posixOnly, (t) => {
+  if (!openssl) return t.skip("openssl not installed");
+  const { dir, out, serve, run } = fixture(t);
+  serve("a.crt", "a.key");
+  assert.equal(run().status, 0);
+  const bin = path.join(dir, "bin2");
+  fs.mkdirSync(bin);
+  const realMv = ["/bin/mv", "/usr/bin/mv"].find((file) => fs.existsSync(file));
+  fs.writeFileSync(path.join(bin, "mv"), `#!/bin/sh\ncase "$1:$2" in */previous.key:*|*:*/host.crt) echo "mv: refused" >&2; exit 1 ;; esac\nexec ${realMv} "$@"\n`, { mode: 0o755 });
+  serve("b.crt", "b.key");
+  const result = run(undefined, { PATH: `${bin}:${process.env.PATH}` });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /mismatched pair; the previous key is kept at .*host\.key\.previous/);
+  assert.equal(read(path.join(out, "host.key.previous")).trim(), read(path.join(FIXTURES, "a.key")).trim());
+  assert.equal(fs.statSync(path.join(out, "host.key.previous")).mode & 0o777, 0o600);
 });
 
 test("an ECDSA key with a certificate chain installs whole", posixOnly, (t) => {
