@@ -220,3 +220,9 @@ body.has-game .seat-management { order: 11; flex: none; max-width: none; max-hei
 .help-menu__list .ui-btn { justify-content: flex-start; }
 .lobby-first { margin: var(--sp-1) 0 0; }
 .lobby-first .ui-btn { padding: 0; min-height: var(--tap); color: var(--c-info-text); }
+/* Remote host login — served only by the remote host listener. */
+.login-page { min-height: 100dvh; display: grid; place-items: center; padding: var(--sp-6) var(--sp-4); }
+.login-card { width: min(400px, 100%); display: grid; gap: var(--sp-3); padding: var(--sp-6); }
+.login-title { margin: 0; font-size: var(--fs-22); }
+.login-card p { margin: 0; }
+.login-form { display: grid; gap: var(--sp-4); }

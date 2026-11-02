@@ -16,6 +16,14 @@ import { rankPlayers } from "../server/public/final-summary.js";
 import { HOST_ID } from "../shared/seat-roles.js";
 import { statExact } from "../shared/exact-stat.js";
 import { SPECTATOR_ID, viewerRole } from "../shared/viewer-access.js";
+import tlsModule from "node:tls";
+import net from "node:net";
+import {
+  createRemoteHostAuth,
+  createTlsReloader,
+  readHostCredential,
+  tlsContentIdentity,
+} from "./host-auth.js";
 const PUBLIC = fileURLToPath(new URL("../server/public/", import.meta.url));
 const SHARED = fileURLToPath(new URL("../shared/", import.meta.url));
 const json = (res, status, value) => {
@@ -101,20 +109,30 @@ const ASSET_TYPES = {
 // Everything else stays no-store so a restarted service never serves stale code.
 const cacheControlFor = (name) =>
   path.extname(name) === ".woff2" ? "public, max-age=86400" : "no-store";
-function serveAsset(res, rel) {
+// The login page exists only where a password may be typed: the HTTPS remote host listener. The
+// participant listener (HTTP by default) serves neither it nor the host lobby page.
+const REMOTE_ONLY_ASSETS = new Set(["login.html", "login.js"]);
+const HOST_ONLY_PAGES = new Set(["lobby.html"]);
+function serveAsset(res, rel, listener = "loopback") {
   const shared = rel.startsWith("shared/");
   const name = shared ? rel.slice(7) : rel;
   if (
     !/^[a-zA-Z0-9_.-]+$/.test(name) ||
     name.startsWith(".") ||
-    (shared && !SHARED_ASSETS.includes(name))
+    (shared && !SHARED_ASSETS.includes(name)) ||
+    (!shared && listener !== "remote" && REMOTE_ONLY_ASSETS.has(name)) ||
+    (!shared && listener === "participant" && HOST_ONLY_PAGES.has(name))
   ) {
     json(res, 404, { code: "NOT_FOUND" });
     return;
   }
   let content;
   try {
-    content = fs.readFileSync(path.join(shared ? SHARED : PUBLIC, name));
+    const dir = shared ? SHARED : PUBLIC;
+    // Exact names only: on a case-insensitive file system "/Login.html" would otherwise open
+    // login.html past the per-listener checks above.
+    if (!fs.readdirSync(dir).includes(name)) throw Object.assign(new Error(), { code: "ENOENT" });
+    content = fs.readFileSync(path.join(dir, name));
   } catch {
     json(res, 404, { code: "NOT_FOUND" });
     return;
@@ -124,6 +142,132 @@ function serveAsset(res, rel) {
     "cache-control": cacheControlFor(name),
   });
   res.end(content);
+}
+
+const remoteFailure = (code, message) => {
+  throw Object.assign(new Error(message), { code });
+};
+const HOSTNAME_RE = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+/**
+ * The hostname a browser sends for this name — lower case, an IPv6 literal compressed and
+ * bracketed, a numeric IPv4 spelling normalized — or null when it is not a DNS name or an IP.
+ */
+export function canonicalRemoteName(raw) {
+  const text = String(raw ?? "").trim().replace(/^\[(.*)\]$/, "$1");
+  if (!text || !/^[A-Za-z0-9.:-]+$/.test(text)) return null;
+  // A colon is only an IPv6 literal here, never a port ("1:2" would parse as host 0.0.0.1).
+  if (text.includes(":") && !net.isIPv6(text)) return null;
+  let hostname;
+  try {
+    hostname = new URL(`https://${net.isIPv6(text) ? `[${text}]` : text}/`).hostname;
+  } catch {
+    return null;
+  }
+  const bare = hostname.replace(/^\[(.*)\]$/, "$1");
+  return net.isIPv6(bare) || net.isIPv4(hostname) || HOSTNAME_RE.test(hostname) ? hostname : null;
+}
+/** The canonical Host value (URL.host: the default :443 dropped) of a header, or null. */
+function canonicalHostHeader(value) {
+  const text = String(value ?? "");
+  if (!/^[A-Za-z0-9.:[\]-]+$/.test(text)) return null;
+  try {
+    return new URL(`https://${text}`).host;
+  } catch {
+    return null;
+  }
+}
+/** Canonical Host values a browser sends for these (already canonical) names on this port. */
+export function remoteHostForms(names, port) {
+  const forms = new Set();
+  for (const name of names) forms.add(new URL(`https://${name}:${port}`).host);
+  return forms;
+}
+/**
+ * Validate the remote host listener before any listener starts: HTTPS only, at least one name the
+ * Host header must match, and a password credential already set for this store.
+ */
+export function prepareRemoteHost({ port, listen = null, names = [], tlsCert = null, tlsKey = null, appDir = null, authOptions = {}, requestTimeoutMs = 15_000, tlsReloadMs = 10 * 60 * 1000, sweepMs = 60_000 }, storeDir) {
+  if (!Number.isSafeInteger(port) || port < 0 || port > 65535)
+    remoteFailure("REMOTE_HOST_PORT_INVALID", "--remote-host-port는 0~65535 정수여야 합니다.");
+  if (!Array.isArray(names) || names.length === 0)
+    remoteFailure("REMOTE_HOST_NAME_REQUIRED", "--remote-host-name이 하나 이상 필요합니다.");
+  const canonical = [];
+  for (const raw of names) {
+    const name = canonicalRemoteName(raw);
+    if (!name) remoteFailure("REMOTE_HOST_NAME_INVALID", `원격 호스트 이름이 올바르지 않습니다: ${raw}`);
+    // Pages tell the local lobby from a remote one by this exact hostname.
+    if (name === "127.0.0.1")
+      remoteFailure("REMOTE_HOST_NAME_INVALID", "127.0.0.1은 로컬 로비 주소라 원격 호스트 이름으로 쓸 수 없습니다.");
+    if (!canonical.includes(name)) canonical.push(name);
+  }
+  // No default: binding every interface is a choice the operator makes explicitly.
+  if (typeof listen !== "string" || listen.trim() === "")
+    remoteFailure("REMOTE_HOST_LISTEN_REQUIRED", "--remote-host-listen 주소가 필요합니다(예: Tailscale IP).");
+  if (!tlsCert || !tlsKey)
+    remoteFailure("REMOTE_HOST_TLS_REQUIRED", "원격 호스트 리스너는 --remote-tls-cert와 --remote-tls-key가 필요합니다.");
+  let tlsOptions, tlsIdentity;
+  try {
+    tlsOptions = { cert: fs.readFileSync(tlsCert), key: fs.readFileSync(tlsKey) };
+    tlsModule.createSecureContext(tlsOptions);
+    tlsIdentity = tlsContentIdentity(tlsOptions.cert, tlsOptions.key);
+  } catch {
+    remoteFailure("REMOTE_HOST_TLS_INVALID", "원격 호스트 인증서·키를 읽지 못했거나 서로 맞지 않습니다.");
+  }
+  const dir = appDir ?? path.join(storeDir, ".app");
+  if (!readHostCredential(dir))
+    remoteFailure("HOST_PASSWORD_NOT_SET", "원격 호스트 비밀번호가 없습니다. 먼저 `node tools/app-service.js host-password <store>`를 실행하세요.");
+  return { port, listen: listen.trim(), names: canonical, tlsCert, tlsKey, tlsOptions, tlsIdentity, appDir: dir, authOptions, requestTimeoutMs, tlsReloadMs, sweepMs };
+}
+// The remote host listener serves exactly these host routes; everything else is decided before
+// authentication (participant and unknown routes 404, local-only ones refused), so a route added
+// to the shared host API later is not reachable remotely until it is listed here.
+const REMOTE_HOST_ROUTES = [
+  /^\/api\/app$/,
+  /^\/api\/room$/,
+  /^\/api\/commands$/,
+  /^\/api\/commands\/[^/]+$/,
+  /^\/api\/app\/interrupt-decision$/,
+  /^\/api\/game\/[0-9a-f-]{36}\/(summary|hud|report|reveal|skip-result|snapshot|events|action-status|training-detail|action)$/,
+];
+export function remoteRouteOf(pathname) {
+  if (pathname === "/api/host/login") return "login";
+  if (pathname === "/api/host/logout") return "logout";
+  if (pathname === "/api/stop" || pathname === "/api/prefill") return "forbidden";
+  if (pathname === "/api/study") return "study";
+  return REMOTE_HOST_ROUTES.some((route) => route.test(pathname)) ? "host" : "not-found";
+}
+// Both sides are canonical URL.host values, so "name" and "name:443" compare equal.
+function sameRemoteOrigin(originHeader, host) {
+  try {
+    const origin = new URL(originHeader);
+    return origin.protocol === "https:" && origin.host === host;
+  } catch {
+    return false;
+  }
+}
+export function remoteOrigin(name, port) {
+  return new URL(`https://${name}:${port}`).origin;
+}
+function createSocketTracker(maxPerAddr, maxTotal) {
+  const counts = new Map();
+  let live = 0;
+  return (socket) => {
+    const addr = socket.remoteAddress ?? "unknown";
+    const n = counts.get(addr) ?? 0;
+    if (n >= maxPerAddr || live >= maxTotal) {
+      socket.destroy();
+      return false;
+    }
+    counts.set(addr, n + 1);
+    live += 1;
+    socket.on("close", () => {
+      const left = (counts.get(addr) ?? 1) - 1;
+      if (left <= 0) counts.delete(addr);
+      else counts.set(addr, left);
+      live = Math.max(0, live - 1);
+    });
+    return true;
+  };
 }
 
 export async function startAppServer({
@@ -138,10 +282,12 @@ export async function startAppServer({
   tlsKey = null,
   onStop = () => {},
   summaryCache = createSessionSummaryCache(),
+  remoteHost = null,
 }) {
   if ((tlsCert && !tlsKey) || (!tlsCert && tlsKey)) {
     usage("--tls-cert와 --tls-key는 함께 필요합니다.");
   }
+  const remote = remoteHost ? prepareRemoteHost(remoteHost, storeDir) : null;
   let origin;
   const room = manager.room ?? createRoomManager({ storeDir });
   // The session manager already recovered its bound roster with engine players.
@@ -150,6 +296,15 @@ export async function startAppServer({
   const tlsOptions = tls
     ? { cert: fs.readFileSync(tlsCert), key: fs.readFileSync(tlsKey) }
     : null;
+  // Check the participant pair before any listener opens: creating the HTTPS server later would
+  // throw after the loopback listener is already up.
+  if (tls) {
+    try {
+      tlsModule.createSecureContext(tlsOptions);
+    } catch {
+      usage("--tls-cert와 --tls-key를 읽지 못했거나 서로 맞지 않습니다.");
+    }
+  }
   const connections = new Map();
   const addrCounts = new Map();
   const sseByParticipant = new Map();
@@ -307,7 +462,7 @@ export async function startAppServer({
     pruneJoinAttempts(joinAttempts, now);
     return row.count > 10;
   }
-  async function proxyGame({ req, res, url, gameId, endpoint, seat, recheck = null }) {
+  async function proxyGame({ req, res, url, gameId, endpoint, seat, recheck = null, remote = false }) {
     const expectedMethod = endpoint === "action" ? "POST" : "GET";
     if (req.method !== expectedMethod) {
       json(res, 405, { code: "METHOD_NOT_ALLOWED" });
@@ -441,6 +596,37 @@ export async function startAppServer({
       "content-type": upstream.headers["content-type"] ?? "application/json",
       "cache-control": "no-store",
     });
+    if (remote && endpoint === "snapshot") {
+      // The study service is loopback-only: its capability link never leaves for a remote device.
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of upstream) {
+        size += chunk.length;
+        if (size > 64 * 1024 * 1024) {
+          controller.abort();
+          res.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      }
+      if (current.gameId !== manager.current?.gameId || !access.stillBound()) {
+        controller.abort();
+        res.end();
+        return;
+      }
+      let text = Buffer.concat(chunks).toString("utf8");
+      try {
+        const value = JSON.parse(text);
+        if (value && typeof value === "object" && !Array.isArray(value) && Object.hasOwn(value, "studyUrl")) {
+          delete value.studyUrl;
+          text = JSON.stringify(value);
+        }
+      } catch {
+        /* not JSON: nothing to strip */
+      }
+      res.end(text);
+      return;
+    }
     for await (const chunk of upstream) {
       if (current.gameId !== manager.current?.gameId || !access.stillBound()) {
         controller.abort();
@@ -469,6 +655,150 @@ export async function startAppServer({
     }
     res.end();
   }
+  // Everything a host may do once authenticated. The loopback listener authenticates with the
+  // per-start service token, the remote host listener with a password session (tools/host-auth.js);
+  // neither accepts the other's credential.
+  async function hostApi(req, res, url, pathname, { remote = false } = {}) {
+    if (req.method === "GET" && pathname === "/api/app") {
+      const view = manager.snapshot();
+      const host = room.hostView();
+      const publishedPort = publicPort == null
+        ? null
+        : publicServer?.address()?.port ?? publicPort;
+      json(res, 200, {
+        ...view,
+        viewerRole: viewerRole(committedView(), HOST_ID),
+        room: host
+          ? {
+              ...host,
+              tls,
+              links: host.joinCode && publishedPort != null
+                ? joinLinks(publishedPort, room.load().joinCode, { tls, publicHost })
+                : [],
+            }
+          : null,
+      });
+      return;
+    }
+    if (req.method === "POST" && pathname === "/api/room") {
+      const body = await bodyOf(req);
+      const op = body?.op;
+      if (op === "open") json(res, 200, room.open(body));
+      else if (op === "update") json(res, 200, room.update(body));
+      else if (op === "rotate-code") json(res, 200, { joinCode: room.rotateCode() });
+      else if (op === "reissue") json(res, 200, room.reissue(body.participantId));
+      else if (op === "remove") { room.remove(body.participantId); json(res, 200, { ok: true }); }
+      else if (op === "close") json(res, 200, room.close());
+      else json(res, 400, { code: "BAD_COMMAND" });
+      return;
+    }
+    if (req.method === "POST" && pathname === "/api/commands") {
+      const result = manager.command(await bodyOf(req));
+      json(
+        res,
+        result.status === "accepted" ? 202 : 200,
+        publicReceipt(result),
+      );
+      return;
+    }
+    if (req.method === "GET" && pathname.startsWith("/api/commands/")) {
+      json(res, 200, publicReceipt(manager.receipt(pathname.slice(14))));
+      return;
+    }
+    if (req.method === "POST" && pathname === "/api/prefill") {
+      manager.setPrefill(await bodyOf(req));
+      json(res, 200, { ok: true });
+      return;
+    }
+    if (req.method === "POST" && pathname === "/api/study") {
+      const service = await ensureStudyService(storeDir);
+      json(res, 200, { url: service.studyUrl });
+      return;
+    }
+    if (req.method === "POST" && pathname === "/api/stop") {
+      json(res, 202, { ok: true });
+      setImmediate(onStop);
+      return;
+    }
+    const summaryMatch=/^\/api\/game\/([0-9a-f-]{36})\/summary$/.exec(pathname);
+    if(summaryMatch){await serveSummary(req,res,summaryMatch[1]);return;}
+    const insightMatch=/^\/api\/game\/([0-9a-f-]{36})\/(hud|report|reveal)$/.exec(pathname);
+    if(insightMatch){await serveInsight(req,res,insightMatch[1],insightMatch[2]);return;}
+    if(pathname==='/api/app/interrupt-decision') {
+      if(req.method!=='POST'){json(res,405,{code:'METHOD_NOT_ALLOWED'});return;}
+      const body=await bodyOf(req);
+      if(!body || Array.isArray(body) || Object.keys(body).length!==4 ||
+        !['expectedGameId','gameEpoch','decisionId','generation'].every(key=>Object.hasOwn(body,key)) ||
+        typeof body.expectedGameId!=='string' || typeof body.gameEpoch!=='string' ||
+        typeof body.decisionId!=='string' || !body.decisionId || !Number.isSafeInteger(body.generation) || body.generation<1) {
+        json(res,400,{code:'BAD_COMMAND'});return;
+      }
+      const snapshot=manager.snapshot();
+      if(manager.current?.gameId!==body.expectedGameId || snapshot.gameEpoch!==body.gameEpoch || !manager.session) {
+        json(res,409,{code:'STALE_GAME'});return;
+      }
+      const {gameEpoch,decisionId,generation}=body;
+      json(res,200,await manager.session.loop.interruptDecision({gameEpoch,decisionId,generation}));return;
+    }
+    const skipMatch = /^\/api\/game\/([0-9a-f-]{36})\/skip-result$/.exec(pathname);
+    if (skipMatch) {
+      if (req.method !== "POST") { json(res, 405, {code:"METHOD_NOT_ALLOWED"}); return; }
+      const snapshot = manager.snapshot();
+      if (manager.current?.gameId !== skipMatch[1] ||
+          req.headers["x-game-epoch"] !== snapshot.gameEpoch || !manager.session) {
+        json(res, 409, {code:"STALE_GAME"}); return;
+      }
+      const body = await bodyOf(req);
+      if (!body || Array.isArray(body) || Object.keys(body).length !== 1 ||
+          !Number.isSafeInteger(body.handNo) || body.handNo < 1) {
+        json(res, 400, {code:"BAD_COMMAND"}); return;
+      }
+      json(res, 200, manager.session.loop.skipHandResult(body.handNo));
+      return;
+    }
+    const match =
+      /^\/api\/game\/([0-9a-f-]{36})\/(snapshot|events|action-status|training-detail|action)$/.exec(
+        pathname,
+      );
+    if (!match) {
+      json(res, 404, { code: "NOT_FOUND" });
+      return;
+    }
+    const [, gameId, endpoint] = match;
+    await proxyGame({ req, res, url, gameId, endpoint, seat: HOST_ID, remote });
+  }
+  function hostError(res, error) {
+    if (res.destroyed) return;
+    if (res.headersSent) {
+      res.destroy();
+      return;
+    }
+    const code = error.code ?? "APP_UNAVAILABLE";
+    json(
+      res,
+      code === "ENOENT"
+        ? 404
+        : code === "PAYLOAD_TOO_LARGE"
+          ? 413
+          : [
+                "BAD_JSON",
+                "BAD_COMMAND",
+                "INVALID_SETUP",
+                "BAD_QUERY",
+              ].includes(code)
+            ? 400
+            : 409,
+      { code },
+    );
+  }
+  function hostSecurityHeaders(res) {
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'self'",
+    );
+  }
   const server = http.createServer(async (req, res) => {
     try {
       if (
@@ -480,12 +810,7 @@ export async function startAppServer({
       }
       const url = new URL(req.url, origin),
         pathname = url.pathname;
-      res.setHeader("Referrer-Policy", "no-referrer");
-      res.setHeader("X-Content-Type-Options", "nosniff");
-      res.setHeader(
-        "Content-Security-Policy",
-        "default-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'self'",
-      );
+      hostSecurityHeaders(res);
       if (pathname === "/api/join" || pathname.startsWith("/api/p/")) {
         json(res, 404, { code: "NOT_FOUND" });
         return;
@@ -510,136 +835,9 @@ export async function startAppServer({
         json(res, 401, { code: "UNAUTHORIZED" });
         return;
       }
-      if (req.method === "GET" && pathname === "/api/app") {
-        const view = manager.snapshot();
-        const host = room.hostView();
-        const publishedPort = publicPort == null
-          ? null
-          : publicServer?.address()?.port ?? publicPort;
-        json(res, 200, {
-          ...view,
-          viewerRole: viewerRole(committedView(), HOST_ID),
-          room: host
-            ? {
-                ...host,
-                tls,
-                links: host.joinCode && publishedPort != null
-                  ? joinLinks(publishedPort, room.load().joinCode, { tls, publicHost })
-                  : [],
-              }
-            : null,
-        });
-        return;
-      }
-      if (req.method === "POST" && pathname === "/api/room") {
-        const body = await bodyOf(req);
-        const op = body?.op;
-        if (op === "open") json(res, 200, room.open(body));
-        else if (op === "update") json(res, 200, room.update(body));
-        else if (op === "rotate-code") json(res, 200, { joinCode: room.rotateCode() });
-        else if (op === "reissue") json(res, 200, room.reissue(body.participantId));
-        else if (op === "remove") { room.remove(body.participantId); json(res, 200, { ok: true }); }
-        else if (op === "close") json(res, 200, room.close());
-        else json(res, 400, { code: "BAD_COMMAND" });
-        return;
-      }
-      if (req.method === "POST" && pathname === "/api/commands") {
-        const result = manager.command(await bodyOf(req));
-        json(
-          res,
-          result.status === "accepted" ? 202 : 200,
-          publicReceipt(result),
-        );
-        return;
-      }
-      if (req.method === "GET" && pathname.startsWith("/api/commands/")) {
-        json(res, 200, publicReceipt(manager.receipt(pathname.slice(14))));
-        return;
-      }
-      if (req.method === "POST" && pathname === "/api/prefill") {
-        manager.setPrefill(await bodyOf(req));
-        json(res, 200, { ok: true });
-        return;
-      }
-      if (req.method === "POST" && pathname === "/api/study") {
-        const service = await ensureStudyService(storeDir);
-        json(res, 200, { url: service.studyUrl });
-        return;
-      }
-      if (req.method === "POST" && pathname === "/api/stop") {
-        json(res, 202, { ok: true });
-        setImmediate(onStop);
-        return;
-      }
-      const summaryMatch=/^\/api\/game\/([0-9a-f-]{36})\/summary$/.exec(pathname);
-      if(summaryMatch){await serveSummary(req,res,summaryMatch[1]);return;}
-      const insightMatch=/^\/api\/game\/([0-9a-f-]{36})\/(hud|report|reveal)$/.exec(pathname);
-      if(insightMatch){await serveInsight(req,res,insightMatch[1],insightMatch[2]);return;}
-      if(pathname==='/api/app/interrupt-decision') {
-        if(req.method!=='POST'){json(res,405,{code:'METHOD_NOT_ALLOWED'});return;}
-        const body=await bodyOf(req);
-        if(!body || Array.isArray(body) || Object.keys(body).length!==4 ||
-          !['expectedGameId','gameEpoch','decisionId','generation'].every(key=>Object.hasOwn(body,key)) ||
-          typeof body.expectedGameId!=='string' || typeof body.gameEpoch!=='string' ||
-          typeof body.decisionId!=='string' || !body.decisionId || !Number.isSafeInteger(body.generation) || body.generation<1) {
-          json(res,400,{code:'BAD_COMMAND'});return;
-        }
-        const snapshot=manager.snapshot();
-        if(manager.current?.gameId!==body.expectedGameId || snapshot.gameEpoch!==body.gameEpoch || !manager.session) {
-          json(res,409,{code:'STALE_GAME'});return;
-        }
-        const {gameEpoch,decisionId,generation}=body;
-        json(res,200,await manager.session.loop.interruptDecision({gameEpoch,decisionId,generation}));return;
-      }
-      const skipMatch = /^\/api\/game\/([0-9a-f-]{36})\/skip-result$/.exec(pathname);
-      if (skipMatch) {
-        if (req.method !== "POST") { json(res, 405, {code:"METHOD_NOT_ALLOWED"}); return; }
-        const snapshot = manager.snapshot();
-        if (manager.current?.gameId !== skipMatch[1] ||
-            req.headers["x-game-epoch"] !== snapshot.gameEpoch || !manager.session) {
-          json(res, 409, {code:"STALE_GAME"}); return;
-        }
-        const body = await bodyOf(req);
-        if (!body || Array.isArray(body) || Object.keys(body).length !== 1 ||
-            !Number.isSafeInteger(body.handNo) || body.handNo < 1) {
-          json(res, 400, {code:"BAD_COMMAND"}); return;
-        }
-        json(res, 200, manager.session.loop.skipHandResult(body.handNo));
-        return;
-      }
-      const match =
-        /^\/api\/game\/([0-9a-f-]{36})\/(snapshot|events|action-status|training-detail|action)$/.exec(
-          pathname,
-        );
-      if (!match) {
-        json(res, 404, { code: "NOT_FOUND" });
-        return;
-      }
-      const [, gameId, endpoint] = match;
-      await proxyGame({ req, res, url, gameId, endpoint, seat: HOST_ID });
+      await hostApi(req, res, url, pathname);
     } catch (error) {
-      if (res.destroyed) return;
-      if (res.headersSent) {
-        res.destroy();
-        return;
-      }
-      const code = error.code ?? "APP_UNAVAILABLE";
-      json(
-        res,
-        code === "ENOENT"
-          ? 404
-          : code === "PAYLOAD_TOO_LARGE"
-            ? 413
-            : [
-                  "BAD_JSON",
-                  "BAD_COMMAND",
-                  "INVALID_SETUP",
-                  "BAD_QUERY",
-                ].includes(code)
-              ? 400
-              : 409,
-        { code },
-      );
+      hostError(res, error);
     }
   });
   await new Promise((resolve, reject) => {
@@ -834,7 +1032,7 @@ export async function startAppServer({
         return;
       }
       const rel = pathname === "/join" ? "join.html" : pathname === "/table" ? "index.html" : pathname.slice(1);
-      serveAsset(res, rel);
+      serveAsset(res, rel, "participant");
     } catch (error) {
       if (!res.headersSent) json(res, 400, { code: error.code ?? "BAD_JSON" });
     }
@@ -850,30 +1048,162 @@ export async function startAppServer({
   publicServer.on("connection", (socket) => {
     if (!trackSocket(socket)) return;
   });
-  if (publicPort != null) {
-    await new Promise((resolve, reject) => {
-      publicServer.once("error", reject);
-      publicServer.listen(publicPort, publicListen, resolve);
-    });
-  }
-  stateChanged(manager.snapshot());
-  return {
-    stateChanged,
-    server,
-    origin,
-    publicPort: publicPort == null ? null : publicServer.address()?.port ?? publicPort,
-    publicOrigin: publicPort == null
-      ? null
-      : `${tls ? "https" : "http"}://127.0.0.1:${publicServer.address()?.port ?? publicPort}`,
-    close: async () => {
-      if (publicPort != null) {
-        publicServer.closeAllConnections();
-        await new Promise((resolve) => publicServer.close(resolve));
-      }
-      server.closeAllConnections();
-      await new Promise((resolve) => server.close(resolve));
-    },
+  // Everything after the loopback listener opens is one startup: if any later step fails, close
+  // every listener and timer opened so far. The caller holds no handle yet, and an open listener
+  // would keep a failed serve alive instead of exiting for launchd to retry.
+  let remoteServer = null,
+    remoteAuth = null,
+    remoteSweep = null,
+    remoteReloader = null,
+    remoteHosts = new Set();
+  const closeAll = async () => {
+    clearInterval(remoteSweep);
+    remoteReloader?.stop();
+    remoteAuth?.close();
+    for (const listener of [remoteServer, publicServer, server]) {
+      if (!listener?.listening) continue;
+      listener.closeAllConnections();
+      await new Promise((resolve) => listener.close(resolve));
+    }
   };
+  // Remote host listener (opt-in): HTTPS, an allowlisted Host header, and a password session. It
+  // serves the host lobby and table, never the participant routes, and refuses the service token.
+  const remoteHandler = async (req, res) => {
+    try {
+      const host = canonicalHostHeader(req.headers.host);
+      if (!host || !remoteHosts.has(host)) {
+        json(res, 403, { code: "BAD_ORIGIN" });
+        return;
+      }
+      const url = new URL(req.url, `https://${host}`),
+        pathname = url.pathname;
+      hostSecurityHeaders(res);
+      if (!pathname.startsWith("/api/")) {
+        if (req.method !== "GET") {
+          json(res, 405, { code: "METHOD_NOT_ALLOWED" });
+          return;
+        }
+        serveAsset(res, pathname === "/" ? "lobby.html" : pathname === "/table" ? "index.html" : pathname === "/login" ? "login.html" : pathname.slice(1), "remote");
+        return;
+      }
+      // Navigations may arrive from anywhere; API calls only from this origin.
+      if ((req.headers.origin && !sameRemoteOrigin(req.headers.origin, host))
+        || req.headers["sec-fetch-site"] === "cross-site") {
+        json(res, 403, { code: "BAD_ORIGIN" });
+        return;
+      }
+      const route = remoteRouteOf(pathname);
+      if (route === "not-found") {
+        json(res, 404, { code: "NOT_FOUND" });
+        return;
+      }
+      if (route === "forbidden") {
+        json(res, 403, { code: "REMOTE_FORBIDDEN" });
+        return;
+      }
+      if (route === "study") {
+        json(res, 409, { code: "STUDY_LOCAL_ONLY" });
+        return;
+      }
+      if (route === "login") {
+        if (req.method !== "POST") {
+          json(res, 405, { code: "METHOD_NOT_ALLOWED" });
+          return;
+        }
+        const addr = req.socket.remoteAddress ?? "unknown";
+        // A locked address is refused before its body is read (and checked again after).
+        const locked = remoteAuth.lockout(addr);
+        if (locked) {
+          for (const [name, value] of Object.entries(locked.headers)) res.setHeader(name, value);
+          json(res, locked.status, locked.body);
+          return;
+        }
+        const body = await bodyOf(req);
+        const result = await remoteAuth.login({ addr, body });
+        for (const [name, value] of Object.entries(result.headers ?? {})) res.setHeader(name, value);
+        json(res, result.status, result.body);
+        return;
+      }
+      const session = remoteAuth.authenticate(req.headers.authorization);
+      if (!session) {
+        json(res, 401, { code: "UNAUTHORIZED" });
+        return;
+      }
+      if (route === "logout") {
+        if (req.method !== "POST") {
+          json(res, 405, { code: "METHOD_NOT_ALLOWED" });
+          return;
+        }
+        remoteAuth.logout(req.headers.authorization);
+        json(res, 200, { ok: true });
+        return;
+      }
+      // A logout, expiry or new password ends this request too (SSE included).
+      remoteAuth.attach(session, res);
+      await hostApi(req, res, url, pathname, { remote: true });
+    } catch (error) {
+      hostError(res, error);
+    }
+  };
+  try {
+    if (publicPort != null) {
+      await new Promise((resolve, reject) => {
+        publicServer.once("error", reject);
+        publicServer.listen(publicPort, publicListen, resolve);
+      });
+    }
+    if (remote) {
+      remoteAuth = createRemoteHostAuth({ appDir: remote.appDir, ...remote.authOptions });
+      // requestTimeout bounds receiving a request (headers and body), never a long response such as
+      // SSE: an unauthenticated client cannot hold a socket by never finishing its login body.
+      remoteServer = https.createServer({
+        ...remote.tlsOptions,
+        handshakeTimeout: 10_000,
+        requestTimeout: remote.requestTimeoutMs,
+        headersTimeout: Math.min(10_000, remote.requestTimeoutMs),
+        connectionsCheckingInterval: Math.min(1_000, remote.requestTimeoutMs),
+      }, remoteHandler);
+      remoteServer.maxConnections = 64;
+      remoteServer.timeout = 0;
+      const trackRemote = createSocketTracker(32, 64);
+      remoteServer.on("connection", (socket) => {
+        trackRemote(socket);
+      });
+      await new Promise((resolve, reject) => {
+        remoteServer.once("error", reject);
+        remoteServer.listen(remote.port, remote.listen, resolve);
+      });
+      remoteHosts = remoteHostForms(remote.names, remoteServer.address().port);
+      remoteSweep = setInterval(() => remoteAuth.sweep(), remote.sweepMs);
+      remoteSweep.unref?.();
+      remoteReloader = createTlsReloader({
+        certPath: remote.tlsCert,
+        keyPath: remote.tlsKey,
+        intervalMs: remote.tlsReloadMs,
+        initialIdentity: remote.tlsIdentity,
+        apply: (options) => remoteServer.setSecureContext(options),
+      });
+      remoteReloader.start();
+    }
+    stateChanged(manager.snapshot());
+    return {
+      stateChanged,
+      server,
+      origin,
+      publicPort: publicPort == null ? null : publicServer.address()?.port ?? publicPort,
+      publicOrigin: publicPort == null
+        ? null
+        : `${tls ? "https" : "http"}://127.0.0.1:${publicServer.address()?.port ?? publicPort}`,
+      remoteHostPort: remoteServer ? remoteServer.address().port : null,
+      remoteHostOrigins: remoteServer
+        ? remote.names.map((name) => remoteOrigin(name, remoteServer.address().port))
+        : [],
+      close: closeAll,
+    };
+  } catch (error) {
+    await closeAll();
+    throw error;
+  }
 }
 function publicReceipt(row) {
   return {

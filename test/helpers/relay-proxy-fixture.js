@@ -21,7 +21,7 @@ export const sha256 = (value) => createHash('sha256').update(value).digest('hex'
 // code has no such fallback; a loop without `captureRelayAccess` is refused there.
 const relayAccessModule = await import('../../tools/relay-access.js').catch(() => null);
 
-export async function fakeRelay() {
+export async function fakeRelay({ snapshotExtra = {} } = {}) {
   const seen = { connections: 0, requests: [], redirectTo: null };
   const streams = new Set();
   const server = http.createServer((req, res) => {
@@ -49,7 +49,7 @@ export async function fakeRelay() {
         return;
       }
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, view: { viewer: req.headers['x-seat'] } }));
+      res.end(JSON.stringify({ ok: true, view: { viewer: req.headers['x-seat'] }, ...(url.pathname === '/api/snapshot' ? snapshotExtra : {}) }));
     });
   });
   server.on('connection', () => { seen.connections += 1; });
@@ -143,7 +143,7 @@ export function makeLoop(session, patch = {}) {
   return loop;
 }
 
-export async function startProxyApp(t, { loop, relay, session, state = 'playing' }) {
+export async function startProxyApp(t, { loop, relay, session, state = 'playing', remoteHost = null }) {
   const roomStore = createOwnedTempDir('relay-proxy-room');
   const room = createRoomManager({ storeDir: roomStore });
   const ctx = { gameId: randomUUID(), epoch: session.gameEpoch, state };
@@ -160,7 +160,7 @@ export async function startProxyApp(t, { loop, relay, session, state = 'playing'
     session: { loop },
     room,
   };
-  const app = await startAppServer({ manager, token: HOST_TOKEN, storeDir: roomStore, port: 0, publicPort: 0 });
+  const app = await startAppServer({ manager, token: HOST_TOKEN, storeDir: roomStore, port: 0, publicPort: 0, remoteHost });
   registerOwnedServer(app.server, 'app-loopback');
   t.after(() => app.close());
   const hostHeaders = (extra = {}) => ({

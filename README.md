@@ -96,6 +96,10 @@ Spectators do not occupy engine seats and can see **all hole cards live**. Use s
 
 The default connection is HTTP. Public-host, port, and TLS configuration are covered in the [operations guide](docs/operations.ko.md#시작하기).
 
+### Host remotely from an always-on server
+
+Run the app on an always-on machine such as a Mac mini and host games from any device's browser with a **password login**. The remote host listener is opt-in and HTTPS-only; pairing it with a private network such as Tailscale is recommended. Setup and a launchd example are in the [operations guide](docs/operations.ko.md#상시-서버와-원격-호스트) (Korean).
+
 ## Play → review → practice
 
 1. **Play:** choose cash training or a tournament, set the pace, and record your thinking with an action note.
