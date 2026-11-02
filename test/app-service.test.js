@@ -153,3 +153,58 @@ test('CLI prefill opens tournament AI8 lobby without creating a game', {timeout:
  const {execFile}=await import('node:child_process');const {promisify}=await import('node:util');const {stopAppService}=await import('../tools/app-service.js');const root=createOwnedTempDir('lobby-prefill-cli');t.after(()=>stopAppService(root));const setupFile=path.join(root,'prefill.json');fs.writeFileSync(setupFile,JSON.stringify({mode:'tournament',aiCount:8,opponentRuntime:'llm'}));
  await promisify(execFile)(process.execPath,[path.resolve('tools/app-service.js'),root,'--player-runtime','codex','--setup-file',setupFile],{timeout:process.platform==='win32'?240000:20000});const app=await inspectAppService(root);const response=await fetch(`${app.origin}/api/app`,{headers:{authorization:`Bearer ${app.token}`}});const state=await response.json();assert.equal(state.gameId,null);assert.equal(state.defaultSetup.mode,'tournament');assert.equal(state.defaultSetup.aiCount,8);assert.equal(state.defaultSetup.opponentRuntime,'llm');
 });
+
+// #343: the app CLI is a one-shot process. When one of its fetches never settles, nothing but that
+// call's budget may keep it alive: it used to exit 13 with no message (the stop leaving the app
+// running, the user never told why). Each stalled call is cut at its budget, and the CLI ends with
+// its closed code (exit 1). Every moment is the CLI's own — the parent observes the exit late
+// while it registers the child (a synchronous identity probe, up to 15s on Windows).
+test("one-shot app CLI ends with its message, never exit 13, when a fetch never settles (#343)", { timeout: process.platform === "win32" ? 300000 : 60000 }, async (t) => {
+  const { execFile } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const { readOwnedLock } = await import("../engine/state.js");
+  const { registerOwnedProcess } = await import("./helpers/owned-fixtures.mjs");
+  const { writeStallingFetch, stallEnv, stalledCalls, stalledAborts, stalledExit, msBetween } = await import("./helpers/stalling-fetch.mjs");
+  const cli = fileURLToPath(new URL("../tools/app-service.js", import.meta.url));
+  // tools/app-service.js: inspect (/api/app) keeps its 10s; prefill and stop have the same.
+  const budgetMs = 10_000;
+  const slackMs = process.platform === "win32" ? 10_000 : 3_000;
+  const root = createOwnedTempDir("lobby-stalled-cli");
+  const app = await startAppService(root);
+  t.after(() => app.close());
+  const setupFile = path.join(root, "prefill.json");
+  fs.writeFileSync(setupFile, JSON.stringify({ mode: "tournament", aiCount: 2 }));
+  const runStalled = (route, args, expected) => new Promise((resolve) => {
+    const stall = writeStallingFetch();
+    const child = execFile(process.execPath, ["--require", stall.preload, cli, ...args], {
+      encoding: "utf8",
+      timeout: process.platform === "win32" ? 240000 : 40000,
+      env: { ...process.env, HOLDEM_PUBLIC_PORT: "0", ...stallEnv(stall, route) },
+    }, (error, stdout, stderr) => resolve({ route, expected, stall, code: error ? error.code : 0, signal: error?.signal ?? null, stdout, stderr }));
+    registerOwnedProcess(child, "app-cli-stalled");
+  });
+  // Independent: none of them reaches the app with anything that changes it.
+  const results = await Promise.all([
+    runStalled("/api/prefill", [root, "--player-runtime", "codex", "--setup-file", setupFile], /^PREFILL_FAILED$/m),
+    runStalled("/api/app", ["stop", root], /^The operation was aborted due to timeout$/m),
+    runStalled("/api/stop", ["stop", root], /^APP_STOP_FAILED$/m),
+  ]);
+  for (const result of results) {
+    const label = JSON.stringify({ route: result.route, code: result.code, signal: result.signal, stdout: result.stdout.slice(-200), stderr: result.stderr.slice(-300) });
+    assert.equal(result.code, 1, `the CLI ends with its message, not unsettled: ${label}`);
+    assert.match(result.stderr, result.expected, label);
+    assert.equal(result.stdout, "", label);
+    assert.equal(stalledCalls(result.stall).length, 1, label);
+    const aborts = stalledAborts(result.stall);
+    assert.equal(aborts.length, 1, `the stalled call was aborted: ${label}`);
+    const waitedMs = msBetween(aborts[0].calledAt, aborts[0].abortedAt);
+    assert.ok(waitedMs >= budgetMs - 100 && waitedMs <= budgetMs + slackMs, `${result.route} aborted ${waitedMs}ms after its call`);
+    const exitedAt = stalledExit(result.stall);
+    assert.ok(exitedAt !== null, `the CLI recorded its exit: ${label}`);
+    const heldMs = msBetween(aborts[0].abortedAt, exitedAt);
+    assert.ok(heldMs <= slackMs, `${result.route}: the CLI exited ${heldMs}ms after the abort`);
+  }
+  // A stop that never reached the app leaves it running.
+  assert.equal(readOwnedLock(root, "app.lock.d").status, "alive");
+  assert.equal((await inspectAppService(root)).instanceId, app.instanceId);
+});
