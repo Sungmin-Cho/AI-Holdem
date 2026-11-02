@@ -114,6 +114,53 @@ test("nothing is replaced unless every certificate, the one key and the pair che
   assert.equal(read(pem()), good);
 });
 
+test("only the checked blocks are installed: other PEM labels are refused, stray text is dropped, the key goes last", posixOnly, (t) => {
+  if (!openssl) return t.skip("openssl not installed");
+  const { out, serve, run, pem } = fixture(t);
+  serve(fixtureText("a.crt"), fixtureText("a.key"));
+  assert.equal(run().status, 0);
+  const good = read(pem());
+  // OpenSSL also loads these labels as a certificate, so one of them could become the served leaf.
+  const relabel = (label) => fixtureText("b.crt").replaceAll("CERTIFICATE-----", `${label}-----`);
+  for (const label of ["X509 CERTIFICATE", "TRUSTED CERTIFICATE"]) {
+    serve(relabel(label) + fixtureText("b.crt"), fixtureText("b.key"));
+    const result = run();
+    assert.equal(result.status, 1, label);
+    assert.match(result.stderr, /unexpected PEM block; nothing replaced/, label);
+    assert.equal(read(pem()), good, `${label}: the installed file is untouched`);
+    assert.deepEqual(fs.readdirSync(out), ["host.pem"], `${label}: no temporary file is left`);
+  }
+  // Text around the blocks is not copied, and a key printed first still ends up after the chain.
+  serve(`note before\n${fixtureText("b.key")}between\n`, `${fixtureText("b.crt")}trailing words\n`);
+  const result = run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(read(pem()), fixtureText("b.crt") + fixtureText("b.key"));
+  assert.equal(loads(pem()), true);
+});
+
+test("a directory in host.pem's place is refused, not filled", posixOnly, (t) => {
+  if (!openssl) return t.skip("openssl not installed");
+  const { dir, out, serve, run, pem } = fixture(t);
+  serve(fixtureText("a.crt"), fixtureText("a.key"));
+  // `mv` into a directory would move the new file inside it and report success.
+  fs.mkdirSync(pem(), { recursive: true });
+  let result = run();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /host\.pem is a directory; nothing replaced/);
+  assert.deepEqual(fs.readdirSync(pem()), []);
+  assert.deepEqual(fs.readdirSync(out), ["host.pem"], "no temporary file is left");
+  // The same through a symlink to a directory.
+  fs.rmdirSync(pem());
+  const elsewhere = path.join(dir, "elsewhere");
+  fs.mkdirSync(elsewhere);
+  fs.symlinkSync(elsewhere, pem());
+  result = run();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /is a directory; nothing replaced/);
+  assert.deepEqual(fs.readdirSync(elsewhere), []);
+  assert.equal(fs.lstatSync(pem()).isSymbolicLink(), true);
+});
+
 test("two runs at once each install a complete pair; the file never holds a mix", posixOnly, async (t) => {
   if (!openssl) return t.skip("openssl not installed");
   const { out, pairDir, serve, run, start, pem } = fixture(t);

@@ -361,6 +361,25 @@ test("one combined file serves as certificate and key, and its renewal is picked
   assert.equal(seen, b);
 });
 
+test("at start-up one combined file is read once per listener, so certificate and key come from the same bytes", async (t) => {
+  const dir = createOwnedTempDir("combined-start");
+  const pem = path.join(dir, "host.pem");
+  fs.writeFileSync(pem, Buffer.concat([fs.readFileSync(CERT_A.cert), fs.readFileSync(CERT_A.key)]), { mode: 0o600 });
+  const store = createOwnedTempDir("combined-start-store");
+  await setHostPassword(store, PASSWORD);
+  // A second read could see a renewal renamed in between: a new certificate with the old key.
+  const reads = t.mock.method(fs, "readFileSync");
+  const app = await startAppService(store, {
+    publicPort: 0, tlsCert: pem, tlsKey: pem,
+    remoteHost: remoteOptions({ tlsCert: pem, tlsKey: pem }),
+  });
+  const ofPem = reads.mock.calls.filter((call) => call.arguments[0] === pem).length;
+  reads.mock.restore();
+  t.after(() => app.close());
+  assert.equal(ofPem, 2, "one read for the remote listener and one for the participant listener");
+  assert.equal((await login(app.remoteHostPort)).status, 200);
+});
+
 test("a participant port on HTTPS also serves a renewed certificate without a restart", async (t) => {
   const dir = createOwnedTempDir("participant-renew");
   const cert = path.join(dir, "host.crt"), key = path.join(dir, "host.key");
