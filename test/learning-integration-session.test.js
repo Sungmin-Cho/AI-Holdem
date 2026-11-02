@@ -418,8 +418,8 @@ test('S8 full: package study commands require an explicit store and own service 
   assert.throws(() => process.kill(service.pid, 0), (error) => error.code === 'ESRCH');
 });
 
-// #343: `npm run study:stop` is a one-shot process. When its health check, its shutdown request or
-// the shutdown's answer never settles, nothing but that request's budget (HTTP_WAIT_MS, inside the
+// #343: `npm run study:stop` is a one-shot process. When its health check, its shutdown request,
+// the shutdown's answer or the cancel of an oversized one never settles, nothing but that request's budget (HTTP_WAIT_MS, inside the
 // call's CLIENT_WAIT_MS) may keep it alive: it used to exit 13 with no message, the service still
 // running. Every moment is the stopping process's own; npm loads the preload too, and records
 // nothing. The service runs in its own process, so this one blocking in fixture work starves
@@ -435,6 +435,8 @@ test('S8 full: package study:stop ends with a message, never exit 13, when a stu
     { name: 'health request', route: '/api/health' },
     { name: 'shutdown request', route: '/internal/shutdown' },
     { name: 'shutdown answer', route: '/internal/shutdown', stage: 'body' },
+    // Oversized, so refused; its cancel never settles, and the budget ends it.
+    { name: 'shutdown oversized answer', route: '/internal/shutdown', stage: 'oversize-stuck-cancel' },
   ].map((row) => ({ ...row, stall: writeStallingFetch() }));
   const runStalled = async (row) => {
     const env = { ...process.env, ...stallEnv(row.stall, row.route, row.stage),
@@ -473,6 +475,7 @@ test('S8 full: package study:stop ends with a message, never exit 13, when a stu
   assert.ok(stalledCalls(results[0].stall).length >= 2, 'a stalled health check is retried inside the client budget');
   assert.equal(stalledCalls(results[1].stall).length, 1);
   assert.equal(stalledCalls(results[2].stall).length, 1);
+  assert.equal(stalledCalls(results[3].stall).length, 1);
   // A stop that never reached the service leaves it running.
   assert.equal((await inspectStudyService(storeDir)).instanceId, service.instanceId);
 });

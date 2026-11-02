@@ -577,7 +577,8 @@ async function httpJson(value, route, { control = false, body, badToken = false,
       while (true) {
         const { done, value: bytes } = await call.settle(reader.read()); if (done) break;
         size += bytes.length;
-        if (size > MAX_DESCRIPTOR) { await call.settle(reader.cancel()); fail(); }
+        // Refused whatever the cancel does: it is cleanup, ended by the budget at the latest.
+        if (size > MAX_DESCRIPTOR) { await call.settle(reader.cancel()).catch(() => {}); fail(); }
         chunks.push(bytes);
       }
     } finally {

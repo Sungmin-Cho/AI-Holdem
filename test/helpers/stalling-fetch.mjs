@@ -8,10 +8,14 @@ import { createOwnedTempDir } from './owned-fixtures.mjs';
 // `node --require <preload>`, or with NODE_OPTIONS=--require=<preload> through npm, and set
 // stallEnv(): only the named route stalls; every other request is real.
 //
-// Stage `request` (the default) is a fetch that never settles; stage `body` answers 200 at once
-// with a body that never ends; stage `redirect` sends the request, for real, to the same path on
-// another origin (a listener whose answer misbehaves on a real socket). `after` lets that many
-// calls to the route through untouched first. The process writes down its own moments,
+// Stage `request` (the default) is a fetch that never settles. The others answer 200 at once:
+//   body                   with a body that never ends
+//   errored-body           with a body that has already failed (cancelling it rejects)
+//   stuck-cancel           with a body that never ends and whose cancel never settles
+//   oversize-stuck-cancel  with 8 KiB of body, then neither more nor a cancel that settles
+// Stage `redirect` sends the request, for real, to the same path on another origin (a listener
+// whose answer misbehaves on a real socket). `after` lets that many calls to the route through
+// untouched first. The process writes down its own moments,
 // synchronously, with the system monotonic clock — a parent that registers its child (a
 // synchronous identity probe, up to 15s on Windows) observes the exit late:
 //   calls  one line per intercepted call: the moment it was called
@@ -44,11 +48,13 @@ export function writeStallingFetch() {
     "    fs.appendFileSync(report, JSON.stringify({ calledAt, abortedAt: String(process.hrtime.bigint()) }) + '\\n');",
     '  }, { once: true });',
     "  if (stage === 'redirect') return realFetch(new URL(requested.pathname + requested.search, target), init);",
-    "  if (stage === 'body') {",
-    '    const endless = new ReadableStream({ pull: () => new Promise(() => {}) });',
-    "    return Promise.resolve(new Response(endless, { status: 200, headers: { 'content-type': 'application/json' } }));",
-    '  }',
-    '  return new Promise(() => {});',
+    '  const never = () => new Promise(() => {});',
+    "  const answer = (source) => Promise.resolve(new Response(new ReadableStream(source), { status: 200, headers: { 'content-type': 'application/json' } }));",
+    "  if (stage === 'body') return answer({ pull: never });",
+    "  if (stage === 'errored-body') return answer({ start: (controller) => controller.error(new TypeError('terminated')) });",
+    "  if (stage === 'stuck-cancel') return answer({ pull: never, cancel: never });",
+    "  if (stage === 'oversize-stuck-cancel') return answer({ start: (controller) => controller.enqueue(new Uint8Array(8192)), pull: never, cancel: never });",
+    '  return never();',
     '};',
     '',
   ].join('\n'));

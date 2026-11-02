@@ -167,15 +167,34 @@ test('CLI prefill opens tournament AI8 lobby without creating a game', {timeout:
 // The app runs in its own process: this test process blocks in synchronous fixture work (owned
 // directories, child identity probes — PowerShell on Windows), and an app inside it could not
 // answer the CLIs' real requests meanwhile. Every fixture is made before the first CLI starts.
+const CHILD_EXIT_MS = process.platform === "win32" ? 30000 : 10000;
+// Ends a child this test started, never waiting on it unbounded: a grace period (for a child
+// already told to stop), then SIGTERM, then SIGKILL, each waited on for CHILD_EXIT_MS.
+async function endChild(child, { grace = true } = {}) {
+  const waitExit = () => new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) return resolve(true);
+    const timer = setTimeout(() => resolve(false), CHILD_EXIT_MS);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+  for (const signal of grace ? [null, "SIGTERM", "SIGKILL"] : ["SIGTERM", "SIGKILL"]) {
+    if (signal) child.kill(signal);
+    if (await waitExit()) return;
+  }
+  assert.fail(`child ${child.pid} did not exit after SIGKILL`);
+}
+
 async function stalledCliFixture(t, prefix) {
   const cli = fileURLToPath(new URL("../tools/app-service.js", import.meta.url));
   const root = createOwnedTempDir(prefix);
   const serve = spawn(process.execPath, [cli, "serve", root, "--public-port", "0"], { stdio: "ignore" });
   registerOwnedProcess(serve, "app-serve-stalled-cli");
-  const exited = new Promise((resolve) => serve.once("exit", resolve));
+  // The real stop first (it releases the app's lock); whatever it found, the child must exit.
   t.after(async () => {
-    await stopAppService(root).catch(() => serve.kill());
-    await exited;
+    await stopAppService(root).catch(() => {});
+    await endChild(serve);
   });
   const deadline = Date.now() + (process.platform === "win32" ? 120000 : 30000);
   for (;;) {
@@ -240,11 +259,13 @@ test("one-shot app CLI ends with its message, never exit 13, when a fetch never 
   assert.equal((await inspectAppService(root)).instanceId, app.instanceId);
 });
 
-// An answer the CLI does not read (the inspect challenge, prefill, stop) is cancelled inside its
-// budget: its headers arrived but its body never ends here, on a real socket, and a body left open
-// past the released budget held the CLI. The listener runs in its own process for the same reason
-// the app does.
-test("one-shot app CLI does not wait on the body of an answer it does not read (#343)", { timeout: process.platform === "win32" ? 300000 : 60000 }, async (t) => {
+// An answer the CLI reads for its status alone (the inspect challenge, prefill, stop) has its body
+// cancelled inside the budget: a body left open past the released budget held the CLI. That
+// cleanup never changes the answer. Three accepted prefills: headers and a body that never ends,
+// on a real socket (a listener in its own process, for the same reason the app is); a body that
+// has already failed, whose cancel rejects; a body whose cancel never settles, ended by the budget.
+test("one-shot app CLI neither waits on nor fails over the body of an answer it does not read (#343)", { timeout: process.platform === "win32" ? 300000 : 60000 }, async (t) => {
+  const budgetMs = 10_000;
   const slackMs = process.platform === "win32" ? 10_000 : 3_000;
   const { cli, root, app } = await stalledCliFixture(t, "lobby-open-body-cli");
   const listener = spawn(process.execPath, ["-e", [
@@ -253,7 +274,7 @@ test("one-shot app CLI does not wait on the body of an answer it does not read (
     "server.listen(0, '127.0.0.1', () => process.stdout.write(server.address().port + '\\n'));",
   ].join("\n")], { stdio: ["ignore", "pipe", "ignore"] });
   registerOwnedProcess(listener, "open-body-listener");
-  t.after(() => listener.kill());
+  t.after(() => endChild(listener, { grace: false }));
   const port = await new Promise((resolve, reject) => {
     let out = "";
     listener.stdout.on("data", (chunk) => {
@@ -264,14 +285,31 @@ test("one-shot app CLI does not wait on the body of an answer it does not read (
   });
   const setupFile = path.join(root, "prefill.json");
   fs.writeFileSync(setupFile, JSON.stringify({ mode: "tournament", aiCount: 2 }));
-  const stall = writeStallingFetch();
-  const result = await runStalledCli(cli, stall.preload, [root, "--player-runtime", "codex", "--setup-file", setupFile],
-    stallEnv(stall, "/api/prefill", "redirect", { target: `http://127.0.0.1:${port}` }));
-  const label = JSON.stringify({ code: result.code, signal: result.signal, stdout: result.stdout.slice(-200), stderr: result.stderr.slice(-300) });
-  assert.equal(result.code, 0, `the accepted prefill returns, and the CLI exits: ${label}`);
-  assert.equal(result.stdout.trim(), app.url, label);
-  const [calledAt] = stalledCalls(stall);
-  const exitedAt = stalledExit(stall);
-  assert.ok(calledAt !== undefined && exitedAt !== null, label);
-  assert.ok(msBetween(calledAt, exitedAt) <= slackMs, `the CLI exited ${msBetween(calledAt, exitedAt)}ms after its prefill`);
+  const cases = [
+    { name: "open body", stage: "redirect", target: `http://127.0.0.1:${port}` },
+    { name: "failed body", stage: "errored-body" },
+    { name: "cancel that never settles", stage: "stuck-cancel", aborted: true },
+  ].map((row) => ({ ...row, stall: writeStallingFetch() }));
+  const results = await Promise.all(cases.map((row) => runStalledCli(cli, row.stall.preload,
+    [root, "--player-runtime", "codex", "--setup-file", setupFile],
+    stallEnv(row.stall, "/api/prefill", row.stage, { target: row.target }))
+    .then((result) => ({ ...row, ...result }))));
+  for (const result of results) {
+    const label = JSON.stringify({ case: result.name, code: result.code, signal: result.signal, stdout: result.stdout.slice(-200), stderr: result.stderr.slice(-300) });
+    assert.equal(result.code, 0, `the accepted prefill returns, and the CLI exits: ${label}`);
+    assert.equal(result.stdout.trim(), app.url, label);
+    const calls = stalledCalls(result.stall);
+    const aborts = stalledAborts(result.stall);
+    const exitedAt = stalledExit(result.stall);
+    assert.ok(calls.length === 1 && exitedAt !== null, label);
+    if (result.aborted) {
+      assert.equal(aborts.length, 1, `the budget ended the cancel: ${label}`);
+      const waitedMs = msBetween(aborts[0].calledAt, aborts[0].abortedAt);
+      assert.ok(waitedMs >= budgetMs - 100 && waitedMs <= budgetMs + slackMs, `${result.name}: aborted ${waitedMs}ms after the call`);
+      assert.ok(msBetween(aborts[0].abortedAt, exitedAt) <= slackMs, `${result.name}: exited ${msBetween(aborts[0].abortedAt, exitedAt)}ms after the abort`);
+    } else {
+      assert.equal(aborts.length, 0, label);
+      assert.ok(msBetween(calls[0], exitedAt) <= slackMs, `${result.name}: exited ${msBetween(calls[0], exitedAt)}ms after its prefill`);
+    }
+  }
 });
