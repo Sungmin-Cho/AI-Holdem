@@ -612,7 +612,8 @@ async function finBeforeRequestListener() {
 // #339: a call that never settles, whatever its signal does — the worst case on every version.
 // Only the named route stalls; every other request is real. Stage `request` (the default) is a
 // fetch that never settles; stage `body` answers 200 at once with a body that never ends. The
-// moment the caller's signal aborts is written down synchronously.
+// moment the caller's signal aborts, and the moment the process exits, are written down
+// synchronously by the process itself.
 function writeStallingFetch() {
   const dir = createOwnedTempDir('holdem-stall');
   const preload = path.join(dir, 'stall-fetch.cjs');
@@ -621,6 +622,8 @@ function writeStallingFetch() {
     'const route = process.env.HOLDEM_TEST_STALL_ROUTE;',
     "const stage = process.env.HOLDEM_TEST_STALL_STAGE ?? 'request';",
     'const report = process.env.HOLDEM_TEST_STALL_REPORT;',
+    'const exitReport = process.env.HOLDEM_TEST_STALL_EXIT_REPORT;',
+    "if (exitReport) process.on('exit', () => { fs.writeFileSync(exitReport, String(process.hrtime.bigint())); });",
     'const realFetch = globalThis.fetch;',
     'globalThis.fetch = (url, init = {}) => {',
     '  if (new URL(String(url)).pathname !== route) return realFetch(url, init);',
@@ -636,15 +639,14 @@ function writeStallingFetch() {
     '};',
     '',
   ].join('\n'));
-  return { preload, report: path.join(dir, 'abort.json') };
+  return { preload, report: path.join(dir, 'abort.json'), exitReport: path.join(dir, 'exit.txt') };
 }
 
 // A deadline that leaves the publisher time to start and take its lock on a slow runner.
 const deadlineIn = (ms) => process.hrtime.bigint() + BigInt(ms) * 1_000_000n;
 const msFrom = (deadline, at) => Number(BigInt(at) - deadline) / 1e6;
 
-// Runs the publisher once and keeps however it ended, and when: an exit with no reply is the
-// failure.
+// Runs the publisher once and keeps however it ended: an exit with no reply is the failure.
 async function runRaw(dir, args, { nodeArgs = [], env = null } = {}) {
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, [...nodeArgs, TOOL, ...args, '--game-dir', dir], {
@@ -652,12 +654,9 @@ async function runRaw(dir, args, { nodeArgs = [], env = null } = {}) {
       timeout: 30000,
       ...(env ? { env: { ...process.env, ...env } } : {}),
     });
-    return { code: 0, stdout, stderr, endedAt: process.hrtime.bigint() };
+    return { code: 0, stdout, stderr };
   } catch (error) {
-    return {
-      code: error.code, signal: error.signal, stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? ''),
-      endedAt: process.hrtime.bigint(),
-    };
+    return { code: error.code, signal: error.signal, stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? '') };
   }
 }
 
@@ -700,7 +699,8 @@ test('publish: 요청을 읽기 전에 끊는 relay에도 기록 identity를 실
 });
 
 // The POST keeps the budget the deadline leaves it, and nothing holds it, or the process, past
-// the deadline.
+// the deadline. Both moments are the publisher's own: the parent observes the exit late while it
+// registers the child (a synchronous process-identity probe, up to 15s on Windows).
 async function runStalledPost(stage) {
   const dir = tmpDir();
   const stall = writeStallingFetch();
@@ -708,13 +708,17 @@ async function runStalledPost(stage) {
   const deadline = deadlineIn(6000);
   const result = await runRaw(dir, ['--from', turnFile(dir, sampleTurn()), '--deadline-monotonic-ns', String(deadline)], {
     nodeArgs: ['--require', stall.preload],
-    env: { HOLDEM_TEST_STALL_ROUTE: '/api/publish', HOLDEM_TEST_STALL_STAGE: stage, HOLDEM_TEST_STALL_REPORT: stall.report },
+    env: {
+      HOLDEM_TEST_STALL_ROUTE: '/api/publish', HOLDEM_TEST_STALL_STAGE: stage,
+      HOLDEM_TEST_STALL_REPORT: stall.report, HOLDEM_TEST_STALL_EXIT_REPORT: stall.exitReport,
+    },
   });
   assert.ok(fs.existsSync(stall.report), `the stalled POST was aborted: ${endedAs(result)}`);
   const abortedMs = msFrom(deadline, JSON.parse(fs.readFileSync(stall.report, 'utf8')).abortedAt);
   assert.ok(abortedMs >= -1000 && abortedMs <= 2000, `aborted ${abortedMs}ms from the deadline`);
-  const endedMs = msFrom(deadline, result.endedAt);
-  assert.ok(endedMs <= 3000, `the publisher ended ${endedMs}ms after the deadline`);
+  assert.ok(fs.existsSync(stall.exitReport), `the publisher recorded its exit: ${endedAs(result)}`);
+  const exitedMs = msFrom(deadline, fs.readFileSync(stall.exitReport, 'utf8'));
+  assert.ok(exitedMs <= 3000, `the publisher exited ${exitedMs}ms after the deadline`);
   return { dir, result };
 }
 
@@ -741,7 +745,9 @@ test('publish --wait: 게시 뒤 정착하지 않는 대기도 대기 예산에�
   try {
     result = await runRaw(dir, ['--from', turnFile(dir, userTurn()), '--wait', '--wait-ms', '0'], {
       nodeArgs: ['--require', stall.preload],
-      env: { HOLDEM_TEST_STALL_ROUTE: '/api/wait-action', HOLDEM_TEST_STALL_REPORT: stall.report },
+      env: {
+        HOLDEM_TEST_STALL_ROUTE: '/api/wait-action', HOLDEM_TEST_STALL_REPORT: stall.report, HOLDEM_TEST_STALL_EXIT_REPORT: stall.exitReport,
+      },
     });
   } finally {
     await started.close();
