@@ -336,16 +336,44 @@ test("a reloader started from what the server loaded picks up a change made befo
 
 test("a renewal is detected by content even when the files' metadata does not change", () => {
   // Windows CopyFile keeps the source's modification time, and both test pairs have the same size:
-  // only the bytes tell the pairs apart.
-  const bytes = { "/c": fs.readFileSync(new URL("a.crt", FIXTURES)), "/k": fs.readFileSync(new URL("a.key", FIXTURES)) };
+  // only the bytes tell the pairs apart. The files on disk never change here; only what they read as.
+  const dir = createOwnedTempDir("host-auth-tls-bytes");
+  const pair = fixturePair(dir, "a");
+  const A = { [pair.cert]: fs.readFileSync(pair.cert), [pair.key]: fs.readFileSync(pair.key) };
+  const B = { [pair.cert]: fs.readFileSync(new URL("b.crt", FIXTURES)), [pair.key]: fs.readFileSync(new URL("b.key", FIXTURES)) };
+  let current = A;
   const applied = [];
-  const reloader = createTlsReloader({ certPath: "/c", keyPath: "/k", readFile: (file) => bytes[file], apply: (options) => applied.push(options), log: () => {} });
+  const reloader = createTlsReloader({ certPath: pair.cert, keyPath: pair.key, readFile: (file) => Buffer.from(current[file]), apply: (options) => applied.push(options), log: () => {} });
   assert.equal(reloader.check(), false);
-  bytes["/c"] = fs.readFileSync(new URL("b.crt", FIXTURES));
-  bytes["/k"] = fs.readFileSync(new URL("b.key", FIXTURES));
-  assert.equal(reloader.check(), true);
+  current = B;
+  assert.equal(reloader.check(), true, "new bytes behind unchanged metadata are a renewal");
   assert.equal(applied.length, 1);
-  assert.equal(reloader.check(), false);
+  assert.equal(reloader.check(), false, "the same bytes again (a fresh Buffer) are not re-applied");
+  current = A;
+  assert.equal(reloader.check(), true, "going back to the earlier pair is a change too");
+  assert.equal(applied.length, 2);
+});
+
+test("a failed read or apply keeps the current pair and retries the same renewal later", () => {
+  const dir = createOwnedTempDir("host-auth-tls-retry");
+  const pair = fixturePair(dir, "a");
+  const B = { [pair.cert]: fs.readFileSync(new URL("b.crt", FIXTURES)), [pair.key]: fs.readFileSync(new URL("b.key", FIXTURES)) };
+  let failRead = false, failApply = 1;
+  const applied = [];
+  const reloader = createTlsReloader({
+    certPath: pair.cert, keyPath: pair.key, log: () => {},
+    readFile: (file) => { if (failRead) throw Object.assign(new Error("busy"), { code: "EBUSY" }); return fs.readFileSync(file); },
+    apply: (options) => { if (failApply-- > 0) throw new Error("apply failed"); applied.push(options); },
+  });
+  fs.writeFileSync(pair.cert, B[pair.cert]);
+  fs.writeFileSync(pair.key, B[pair.key]);
+  failRead = true;
+  assert.equal(reloader.check(), false, "an unreadable pair changes nothing");
+  failRead = false;
+  assert.equal(reloader.check(), false, "an apply that throws is not recorded as applied");
+  assert.equal(applied.length, 0);
+  assert.equal(reloader.check(), true, "the same renewal is retried and applied");
+  assert.equal(applied[0].cert.toString(), B[pair.cert].toString());
 });
 
 test("a symlinked certificate path is followed: replacing its target is a change", { skip: process.platform === "win32" && "symlinks need privileges on Windows" }, () => {
