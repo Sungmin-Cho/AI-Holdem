@@ -15,7 +15,7 @@ import { createOwnedTempDir } from "./helpers/owned-fixtures.mjs";
 import { fakeRelay, makeLoop, makeSession, startProxyApp } from "./helpers/relay-proxy-fixture.js";
 import { parseServeArgs, setHostPassword, startAppService } from "../tools/app-service.js";
 import { canonicalRemoteName, remoteHostForms, remoteOrigin, remoteRouteOf } from "../tools/app-server.js";
-import { readHostCredential, verifyPassword } from "../tools/host-auth.js";
+import { createHostSessions, readHostCredential, verifyPassword } from "../tools/host-auth.js";
 
 const PASSWORD = "remote host password";
 const GAME = "00000000-0000-4000-8000-000000000000";
@@ -136,6 +136,9 @@ test("a listen failure closes every listener already opened", async (t) => {
   assert.equal(await settle(before), before, "the public listener failed: loopback is closed");
   await refused({ remoteHost: remoteOptions({ listen: "192.0.2.123" }) }, "EADDRNOTAVAIL");
   assert.equal(await settle(before), before, "an address that is not up yet (Tailscale late) leaves nothing open");
+  // A participant certificate and key that do not match are refused before any listener opens.
+  await refused({ publicPort: 0, tlsCert: CERT_A.cert, tlsKey: CERT_B.key }, "USAGE");
+  assert.equal(await settle(before), before, "a mismatched participant pair leaves nothing open");
   const app = await startAppService(store);
   await app.close();
 });
@@ -403,6 +406,38 @@ test("a remote host plays through the shared relay proxy, without the study link
   assert.equal(relay.openStreams(), 0);
 });
 
+test("an idle session's open stream ends on the sweep, with no further request", { timeout: 60000 }, async (t) => {
+  const credentials = createOwnedTempDir("remote-host-idle");
+  await setHostPassword(credentials, PASSWORD);
+  const relay = await fakeRelay();
+  t.after(() => relay.close());
+  const session = makeSession(createOwnedTempDir("remote-host-idle-session"), relay.port);
+  const h = await startProxyApp(t, { loop: makeLoop(session), relay, session, remoteHost: remoteOptions({
+    appDir: path.join(credentials, ".app"), sweepMs: 100,
+    authOptions: { failureDelayMs: 0, sessions: createHostSessions({ idleMs: 600 }) },
+  }) });
+  const port = h.app.remoteHostPort;
+  const { token } = (await login(port)).json;
+  const stream = await new Promise((resolve, reject) => {
+    const req = https.request({ host: "127.0.0.1", port, path: `/api/game/${h.ctx.gameId}/events?after=0`, servername: "localhost", ca: fs.readFileSync(CERT_A.cert),
+      headers: { ...bearer(token), "x-game-epoch": h.ctx.epoch, host: `localhost:${port}` }, agent: false }, (res) => {
+      let data = "";
+      res.on("data", (chunk) => { data += chunk; if (data.includes("hello")) resolve({ res, ended: new Promise((done) => res.on("close", done)) }); });
+    });
+    req.on("error", reject);
+    req.end();
+  });
+  const started = Date.now();
+  const ended = await Promise.race([stream.ended.then(() => true), new Promise((resolve) => setTimeout(resolve, 10_000, false))]);
+  if (!ended) stream.res.destroy();
+  assert.equal(ended, true, "the idle sweep closed the stream");
+  assert.ok(Date.now() - started >= 400, "not before the idle limit");
+  const deadline = Date.now() + 5000;
+  while (relay.openStreams() !== 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(relay.openStreams(), 0);
+  assert.equal((await request(port, { path: "/api/app", headers: bearer(token) })).status, 401);
+});
+
 test("serve reads the remote flags, exits when they fail, and host-password stores a private credential", { timeout: 90000 }, async (t) => {
   assert.throws(() => parseServeArgs(["--remote-host-name", "a"]), { code: "REMOTE_HOST_PORT_INVALID" });
   assert.deepEqual(parseServeArgs(["--player-runtime", "claude"]).remoteHost, null);
@@ -429,6 +464,8 @@ test("serve reads the remote flags, exits when they fail, and host-password stor
   const missing = spawnSync(process.execPath, serveArgs([]), { env, encoding: "utf8", timeout: 30000 });
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /REMOTE_HOST_LISTEN_REQUIRED/);
+  const mismatched = spawnSync(process.execPath, serveArgs(["--remote-host-listen", "127.0.0.1", "--tls-cert", CERT_A.cert, "--tls-key", CERT_B.key]), { env, encoding: "utf8", timeout: 30000 });
+  assert.equal(mismatched.status, 1, "a bad participant pair ends serve instead of leaving it half-open");
   // End to end through the CLI: serve prints the remote origin and the password logs in.
   const child = spawn(process.execPath, serveArgs(["--remote-host-listen", "127.0.0.1"]), { env, stdio: ["ignore", "pipe", "pipe"] });
   const exited = new Promise((resolve) => child.once("exit", resolve));

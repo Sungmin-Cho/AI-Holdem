@@ -13,6 +13,7 @@ import {
   createRemoteHostAuth,
   createTlsReloader,
   hashPassword,
+  tlsFileIdentity,
   hostCredentialPath,
   readHostCredential,
   validateHostCredential,
@@ -299,6 +300,55 @@ const fixturePair = (dir, name) => {
   fs.copyFileSync(new URL(`${name}.crt`, FIXTURES), cert);
   return { key, cert };
 };
+
+test("a password changed while a login is verifying issues no session", async () => {
+  const { appDir, auth } = await authFixture("host-auth-race");
+  const next = await hashPassword("changed during login");
+  const pending = auth.login({ addr: "a", body: { password: PASSWORD } });
+  // scrypt runs off the main thread: this write lands before the verification resolves.
+  writeHostCredential(appDir, next);
+  const result = await pending;
+  assert.equal(result.status, 409);
+  assert.deepEqual(result.body, { code: "LOGIN_RETRY" });
+  assert.equal(auth.sessions.size, 0);
+  // Removed or damaged while verifying: still no session.
+  for (const damage of [() => fs.unlinkSync(hostCredentialPath(appDir)), () => fs.writeFileSync(hostCredentialPath(appDir), "{}", { mode: 0o600 })]) {
+    writeHostCredential(appDir, next);
+    const racing = auth.login({ addr: "b", body: { password: "changed during login" } });
+    damage();
+    assert.notEqual((await racing).status, 200);
+    assert.equal(auth.sessions.size, 0);
+  }
+});
+
+test("a reloader started from the identity read before the files picks up a change made in between", () => {
+  const dir = createOwnedTempDir("host-auth-tls-race");
+  const pair = fixturePair(dir, "a");
+  const before = tlsFileIdentity(pair.cert, pair.key);
+  // The server read pair "a"; a renewal replaced both files before the reloader was created.
+  fs.copyFileSync(new URL("b.crt", FIXTURES), pair.cert);
+  fs.copyFileSync(new URL("b.key", FIXTURES), pair.key);
+  const applied = [];
+  const reloader = createTlsReloader({ certPath: pair.cert, keyPath: pair.key, initialIdentity: before, apply: (options) => applied.push(options), log: () => {} });
+  assert.equal(reloader.check(), true);
+  assert.equal(applied[0].cert.toString(), fs.readFileSync(new URL("b.crt", FIXTURES), "utf8"));
+});
+
+test("a symlinked certificate path is followed: replacing its target is a change", { skip: process.platform === "win32" && "symlinks need privileges on Windows" }, () => {
+  const dir = createOwnedTempDir("host-auth-tls-link");
+  const target = fixturePair(dir, "a");
+  const cert = path.join(dir, "live.crt"), key = path.join(dir, "live.key");
+  fs.symlinkSync(target.cert, cert);
+  fs.symlinkSync(target.key, key);
+  const applied = [];
+  const reloader = createTlsReloader({ certPath: cert, keyPath: key, apply: (options) => applied.push(options), log: () => {} });
+  assert.equal(reloader.check(), false);
+  // A renewal that rewrites the targets in place (the links themselves never change).
+  fs.writeFileSync(target.cert, fs.readFileSync(new URL("b.crt", FIXTURES)));
+  fs.writeFileSync(target.key, fs.readFileSync(new URL("b.key", FIXTURES)));
+  assert.equal(reloader.check(), true);
+  assert.equal(applied.length, 1);
+});
 
 test("the TLS reloader swaps a changed certificate pair and keeps the old one on a bad write", () => {
   const dir = createOwnedTempDir("host-auth-tls");

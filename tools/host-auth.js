@@ -7,7 +7,7 @@ import tls from "node:tls";
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import { readPrivateJson, writePrivateJson } from "./app-files.js";
 import { isPrivatePath } from "../shared/platform-files.js";
-import { lstatExact } from "../shared/exact-stat.js";
+import { lstatExact, statExact } from "../shared/exact-stat.js";
 
 export const HOST_AUTH_FILE = "host-auth.json";
 export const PASSWORD_MIN = 12;
@@ -363,12 +363,22 @@ export function createRemoteHostAuth({
  * restarting the service. A pair that does not load (a half-written renewal) keeps the old context
  * and is retried on the next check.
  */
-export function createTlsReloader({ certPath, keyPath, apply, intervalMs = 10 * 60 * 1000, readFile = fs.readFileSync, log = (line) => console.error(line) }) {
-  const identity = () => JSON.stringify([certPath, keyPath].map((file) => {
-    const st = lstatExact(file);
-    return [String(st.dev), String(st.ino), st.size, st.mtimeMs];
+/**
+ * What the certificate pair on disk is: the files the paths resolve to (a symlinked path is followed,
+ * so replacing its target counts as a change). Take it *before* reading the files: a change after
+ * that read then differs from it and is picked up by the next check.
+ */
+export function tlsFileIdentity(certPath, keyPath) {
+  return JSON.stringify([certPath, keyPath].map((file) => {
+    const st = statExact(file);
+    return [String(st.dev), String(st.ino), st.size, st.mtimeMs, st.ctimeMs];
   }));
-  let applied = identity();
+}
+
+export function createTlsReloader({ certPath, keyPath, apply, initialIdentity = null, intervalMs = 10 * 60 * 1000, readFile = fs.readFileSync, log = (line) => console.error(line) }) {
+  const identity = () => tlsFileIdentity(certPath, keyPath);
+  // The identity of what the server actually started with (taken before it read the files).
+  let applied = initialIdentity ?? identity();
   let timer = null;
   const check = () => {
     let next;

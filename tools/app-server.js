@@ -22,6 +22,7 @@ import {
   createRemoteHostAuth,
   createTlsReloader,
   readHostCredential,
+  tlsFileIdentity,
 } from "./host-auth.js";
 const PUBLIC = fileURLToPath(new URL("../server/public/", import.meta.url));
 const SHARED = fileURLToPath(new URL("../shared/", import.meta.url));
@@ -185,7 +186,7 @@ export function remoteHostForms(names, port) {
  * Validate the remote host listener before any listener starts: HTTPS only, at least one name the
  * Host header must match, and a password credential already set for this store.
  */
-export function prepareRemoteHost({ port, listen = null, names = [], tlsCert = null, tlsKey = null, appDir = null, authOptions = {}, requestTimeoutMs = 15_000, tlsReloadMs = 10 * 60 * 1000 }, storeDir) {
+export function prepareRemoteHost({ port, listen = null, names = [], tlsCert = null, tlsKey = null, appDir = null, authOptions = {}, requestTimeoutMs = 15_000, tlsReloadMs = 10 * 60 * 1000, sweepMs = 60_000 }, storeDir) {
   if (!Number.isSafeInteger(port) || port < 0 || port > 65535)
     remoteFailure("REMOTE_HOST_PORT_INVALID", "--remote-host-port는 0~65535 정수여야 합니다.");
   if (!Array.isArray(names) || names.length === 0)
@@ -204,8 +205,9 @@ export function prepareRemoteHost({ port, listen = null, names = [], tlsCert = n
     remoteFailure("REMOTE_HOST_LISTEN_REQUIRED", "--remote-host-listen 주소가 필요합니다(예: Tailscale IP).");
   if (!tlsCert || !tlsKey)
     remoteFailure("REMOTE_HOST_TLS_REQUIRED", "원격 호스트 리스너는 --remote-tls-cert와 --remote-tls-key가 필요합니다.");
-  let tlsOptions;
+  let tlsOptions, tlsIdentity;
   try {
+    tlsIdentity = tlsFileIdentity(tlsCert, tlsKey);
     tlsOptions = { cert: fs.readFileSync(tlsCert), key: fs.readFileSync(tlsKey) };
     tlsModule.createSecureContext(tlsOptions);
   } catch {
@@ -214,7 +216,7 @@ export function prepareRemoteHost({ port, listen = null, names = [], tlsCert = n
   const dir = appDir ?? path.join(storeDir, ".app");
   if (!readHostCredential(dir))
     remoteFailure("HOST_PASSWORD_NOT_SET", "원격 호스트 비밀번호가 없습니다. 먼저 `node tools/app-service.js host-password <store>`를 실행하세요.");
-  return { port, listen: listen.trim(), names: canonical, tlsCert, tlsKey, tlsOptions, appDir: dir, authOptions, requestTimeoutMs, tlsReloadMs };
+  return { port, listen: listen.trim(), names: canonical, tlsCert, tlsKey, tlsOptions, tlsIdentity, appDir: dir, authOptions, requestTimeoutMs, tlsReloadMs, sweepMs };
 }
 // The remote host listener serves exactly these host routes; everything else is decided before
 // authentication (participant and unknown routes 404, local-only ones refused), so a route added
@@ -294,6 +296,15 @@ export async function startAppServer({
   const tlsOptions = tls
     ? { cert: fs.readFileSync(tlsCert), key: fs.readFileSync(tlsKey) }
     : null;
+  // Check the participant pair before any listener opens: creating the HTTPS server later would
+  // throw after the loopback listener is already up.
+  if (tls) {
+    try {
+      tlsModule.createSecureContext(tlsOptions);
+    } catch {
+      usage("--tls-cert와 --tls-key를 읽지 못했거나 서로 맞지 않습니다.");
+    }
+  }
   const connections = new Map();
   const addrCounts = new Map();
   const sseByParticipant = new Map();
@@ -1163,12 +1174,13 @@ export async function startAppServer({
         remoteServer.listen(remote.port, remote.listen, resolve);
       });
       remoteHosts = remoteHostForms(remote.names, remoteServer.address().port);
-      remoteSweep = setInterval(() => remoteAuth.sweep(), 60_000);
+      remoteSweep = setInterval(() => remoteAuth.sweep(), remote.sweepMs);
       remoteSweep.unref?.();
       remoteReloader = createTlsReloader({
         certPath: remote.tlsCert,
         keyPath: remote.tlsKey,
         intervalMs: remote.tlsReloadMs,
+        initialIdentity: remote.tlsIdentity,
         apply: (options) => remoteServer.setSecureContext(options),
       });
       remoteReloader.start();
