@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import { createServer as createRawHttpServer } from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -553,17 +554,26 @@ test('publish --retry: 서버에 닿지 못했던 게시는 재시도로 이벤�
 // #319: a retry resends the recorded body; the body flags among its own arguments build nothing.
 test('publish --retry: 기록된 본문의 시계를 보내고 재시도 인자의 시계로 본문을 만들지 않는다', async () => {
   const dir = tmpDir();
-  fs.writeFileSync(path.join(dir, 'lock.json'), JSON.stringify({
-    serverPid: process.pid, port: await deadPort(), sessionToken: 'tok',
-  }));
   const file = turnFile(dir, sampleTurn());
-  await runFailing(dir, ['--from', file, '--level-clock', '60000|41000|2026-11-02T03:00:00.000Z|1|100/200']);
+  // The first POST reaches a port that drops the connection, held open so nothing else takes it.
+  const drop = registerOwnedServer(net.createServer((socket) => socket.destroy()), 'publish-drop');
+  await new Promise((resolve) => drop.listen(0, '127.0.0.1', resolve));
+  let failed;
+  try {
+    fs.writeFileSync(path.join(dir, 'lock.json'), JSON.stringify({
+      serverPid: process.pid, port: drop.address().port, sessionToken: 'tok',
+    }));
+    failed = await runFailing(dir, ['--from', file, '--level-clock', '60000|41000|2026-11-02T03:00:00.000Z|1|100/200']);
+  } finally {
+    await new Promise((resolve) => drop.close(resolve));
+  }
+  assert.equal(failed.json.code, 'PUBLISH_FAILED');
   const recorded = JSON.parse(fs.readFileSync(path.join(dir, '.publish-attempt.json'), 'utf8')).body.levelClock;
   const expected = { levelMs: 60000, remainingMs: 41000, at: '2026-11-02T03:00:00.000Z', running: true, nextBlinds: [100, 200] };
   assert.deepEqual(recorded, expected);
 
-  const lock = JSON.parse(fs.readFileSync(path.join(dir, 'lock.json'), 'utf8'));
-  const started = await startServer({ gameDir: dir, port: lock.port, token: 'tok' });
+  // The relay takes its own port and records it in lock.json; the same token keeps the game epoch.
+  const started = await startServer({ gameDir: dir, port: 0, token: 'tok' });
   try {
     // A different, valid clock among the retry's own arguments.
     await run(dir, ['--from', file, '--retry', '--level-clock', '120000|5000|2026-11-02T03:09:00.000Z|0|200/400']);
