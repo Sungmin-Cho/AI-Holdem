@@ -13,7 +13,7 @@ import { createBrowserWorkspace, runOwnedCommand, hashTree } from '../helpers/le
 
 export const requiredJourneyChecks = [
   'login-redirect', 'wrong-password', 'login-lobby', 'remote-play', 'study-link-hidden',
-  'expired-relogin', 'logout', 'participant-no-login', 'real-user-store-unchanged', 'owned-cleanup',
+  'expired-relogin', 'standalone-table-relogin', 'logout', 'participant-no-login', 'real-user-store-unchanged', 'owned-cleanup',
 ];
 const FIXTURES = fileURLToPath(new URL('../fixtures/remote-host-tls/', import.meta.url));
 const CERT = path.join(FIXTURES, 'a.crt'), KEY = path.join(FIXTURES, 'a.key');
@@ -88,14 +88,22 @@ export async function runRemoteHostJourney(outDir) {
     await wait(() => evaluate("!document.querySelector('#start').disabled"), 'start enabled');
     await browser(['click', '#start']);
     await wait(() => app.manager.snapshot().state === 'playing', 'game playing', 60000);
-    const handOf = () => JSON.parse(fs.readFileSync(path.join(app.manager.current.sessionDir, 'state.json'))).handNo;
-    const firstHand = handOf();
+    // The engine records a decision only for the host's own actions (AI-only hands record none).
+    const hostDecided = () => {
+      const dir = app.manager.current.sessionDir;
+      const read = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
+      const engine = read(path.join(dir, 'state.json'));
+      const records = [engine?.hand, engine?.lastHand];
+      try { for (const name of fs.readdirSync(path.join(dir, 'hands'))) records.push(read(path.join(dir, 'hands', name))); } catch { /* none yet */ }
+      return records.some((record) => Array.isArray(record?.decisions) && record.decisions.length > 0);
+    };
+    assert.equal(hostDecided(), false);
     await wait(async () => {
-      if (handOf() > firstHand) return true;
+      if (hostDecided()) return true;
       // With a check available the first fold press only arms it (#320): press again.
       await evaluate("(()=>{const d=document.querySelector('#table')?.contentDocument;const b=['#btn-check','#btn-call','#btn-fold'].map(id=>d?.querySelector(id)).find(n=>n&&!n.disabled&&!n.hidden);if(b){b.click();if(b.classList.contains('is-armed'))b.click();}})()");
       return false;
-    }, 'a remote host action advances the hand', 60000);
+    }, 'a remote host action reaches the engine', 60000);
     await browser(['screenshot', path.join(outDir, 'remote-table.png')]);
     checks.push('remote-play');
     assert.equal(await evaluate("document.querySelector('#table').contentDocument.querySelector('#study-open')?.hidden!==false"), true);
@@ -110,6 +118,17 @@ export async function runRemoteHostJourney(outDir) {
     await signIn(PASSWORD);
     await wait(inLobby, 'lobby after signing in again');
     checks.push('expired-relogin');
+
+    // A table opened on its own (no lobby around it) also returns to login when its session ends.
+    const { gameId, gameEpoch } = app.manager.snapshot();
+    await browser(['open', `${origin}/table?${new URLSearchParams({ appGame: gameId, epoch: gameEpoch })}`]);
+    await wait(() => evaluate("document.querySelector('#conn')?.classList.contains('on') || document.querySelector('#action-status')?.textContent.length>0"), 'standalone table connected');
+    const tableToken = await evaluate("sessionStorage.getItem('holdem-app-token')");
+    assert.equal(await hostRequest('/api/host/logout', { method: 'POST', token: tableToken }), 200);
+    await wait(() => atLogin('?expired=1'), 'standalone table returns to login');
+    await signIn(PASSWORD);
+    await wait(inLobby, 'lobby after the standalone table');
+    checks.push('standalone-table-relogin');
 
     await browser(['click', '#help-menu']);
     await browser(['click', '#logout']);

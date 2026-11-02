@@ -30,8 +30,9 @@ test("login errors explain every server refusal in Korean", () => {
 
 test("the login page is a CSP-clean form a password manager understands", async () => {
   const html = read("login.html");
-  assert.match(html, /<form id="login-form"/);
-  assert.match(html, /id="password"[^>]*type="password"[^>]*autocomplete="current-password"/);
+  assert.match(html, /<form id="login-form" class="login-form" method="post"/, "never a GET that puts a password in the URL");
+  assert.match(html, /id="password"[^>]*type="password"[^>]*autocomplete="current-password"[^>]*\bdisabled\b/);
+  assert.match(html, /id="login-submit"[^>]*type="submit" disabled>/, "nothing is submittable until login.js runs over HTTPS");
   assert.match(html, /autocomplete="username"/);
   assert.match(html, /id="login-error"[^>]*role="alert"/);
   assert.match(html, /<script type="module" src="\/login\.js"><\/script>/);
@@ -86,7 +87,8 @@ test("login navigation moves the whole tab and a restored page reloads", () => {
 
 test("the login script takes no password over plain HTTP", async () => {
   const elements = {};
-  const element = (id) => (elements[id] ??= { id, disabled: false, textContent: "", value: "", listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; }, setAttribute() {}, removeAttribute() {}, select() {} });
+  // The markup starts the password field and button disabled (see the login page test).
+  const element = (id) => (elements[id] ??= { id, disabled: id === "password" || id === "login-submit", textContent: "", value: "", listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; }, setAttribute() {}, removeAttribute() {}, select() {}, focus() {} });
   for (const [protocol, search] of [["http:", ""], ["https:", "?expired=1"]]) {
     for (const key of Object.keys(elements)) delete elements[key];
     globalThis.document = { getElementById: element };
@@ -104,6 +106,8 @@ test("the login script takes no password over plain HTTP", async () => {
       assert.equal(elements["login-form"].listeners.submit, undefined, "no submit handler on HTTP");
     } else {
       assert.equal(typeof elements["login-form"].listeners.submit, "function");
+      assert.equal(elements.password.disabled, false, "enabled only once the handler is installed over HTTPS");
+      assert.equal(elements["login-submit"].disabled, false);
       assert.equal(elements["login-note"].textContent, "로그인이 만료됐습니다. 다시 로그인하세요.");
     }
   }

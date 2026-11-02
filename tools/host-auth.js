@@ -290,13 +290,18 @@ export function createRemoteHostAuth({
     }
     return id;
   };
+  const lockout = (addr) => {
+    const gate = limiter.check(addr);
+    if (gate.ok) return null;
+    log(`[remote-host] login locked addr=${addr} scope=${gate.scope}`);
+    return { status: 429, body: { code: "LOGIN_RATE_LIMIT", retryAfterSec: gate.retryAfterSec }, headers: { "retry-after": String(gate.retryAfterSec) } };
+  };
   return {
+    /** The refusal for a locked address, or null — checked before a login body is read. */
+    lockout,
     async login({ addr, body }) {
-      const gate = limiter.check(addr);
-      if (!gate.ok) {
-        log(`[remote-host] login locked addr=${addr} scope=${gate.scope}`);
-        return { status: 429, body: { code: "LOGIN_RATE_LIMIT", retryAfterSec: gate.retryAfterSec }, headers: { "retry-after": String(gate.retryAfterSec) } };
-      }
+      const locked = lockout(addr);
+      if (locked) return locked;
       if (verifying) return { status: 429, body: { code: "LOGIN_BUSY", retryAfterSec: 1 }, headers: { "retry-after": "1" } };
       if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1
         || typeof body.password !== "string" || body.password.length < 1 || body.password.length > LOGIN_PASSWORD_MAX)

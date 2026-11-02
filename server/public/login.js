@@ -7,10 +7,9 @@ if (doc) {
   const form = $('login-form'), input = $('password'), submit = $('login-submit'), error = $('login-error');
   if (new URLSearchParams(location.search).get('expired') === '1')
     $('login-note').textContent = '로그인이 만료됐습니다. 다시 로그인하세요.';
-  // The server only serves this page over HTTPS; refuse to take a password anywhere else.
+  // The server only serves this page over HTTPS; refuse to take a password anywhere else. The
+  // form starts disabled in the markup and is enabled only after its handler is installed.
   if (location.protocol !== 'https:') {
-    input.disabled = true;
-    submit.disabled = true;
     error.textContent = '암호화되지 않은 주소에서는 로그인할 수 없습니다. 원격 호스트 HTTPS 주소로 접속하세요.';
   } else form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -42,4 +41,9 @@ if (doc) {
       submit.removeAttribute('aria-busy');
     }
   });
+  if (location.protocol === 'https:') {
+    input.disabled = false;
+    submit.disabled = false;
+    input.focus?.();
+  }
 }

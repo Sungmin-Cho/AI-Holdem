@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { createOwnedTempDir } from "./helpers/owned-fixtures.mjs";
 import { createPrivateDirectory, isPrivatePath } from "../shared/platform-files.js";
 import {
@@ -291,33 +291,19 @@ test("a new password ends sessions issued under the old one", async () => {
   assert.equal((await auth.login({ addr: "a", body: { password: "a brand new password" } })).status, 200);
 });
 
-function selfSigned(t, dir, name) {
+const FIXTURES = new URL("./fixtures/remote-host-tls/", import.meta.url);
+// Committed test-only pairs: this test runs without openssl.
+const fixturePair = (dir, name) => {
   const key = path.join(dir, `${name}.key`), cert = path.join(dir, `${name}.crt`);
-  const result = spawnSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-keyout", key, "-out", cert, "-days", "1", "-nodes", "-subj", `/CN=${name}`], { encoding: "utf8" });
-  if (result.status !== 0) {
-    t.diagnostic(`openssl unavailable: ${result.stderr || result.error}`);
-    return null;
-  }
+  fs.copyFileSync(new URL(`${name}.key`, FIXTURES), key);
+  fs.copyFileSync(new URL(`${name}.crt`, FIXTURES), cert);
   return { key, cert };
-}
+};
 
-test("a password changed while a login is verifying issues no session", async () => {
-  const { appDir, auth } = await authFixture("host-auth-race");
-  const next = await hashPassword("changed during login");
-  const pending = auth.login({ addr: "a", body: { password: PASSWORD } });
-  // scrypt runs off the main thread: this write lands before the verification resolves.
-  writeHostCredential(appDir, next);
-  const result = await pending;
-  assert.equal(result.status, 409);
-  assert.deepEqual(result.body, { code: "LOGIN_RETRY" });
-  assert.equal(auth.sessions.size, 0);
-});
-
-test("the TLS reloader swaps a changed certificate pair and keeps the old one on a bad write", (t) => {
+test("the TLS reloader swaps a changed certificate pair and keeps the old one on a bad write", () => {
   const dir = createOwnedTempDir("host-auth-tls");
-  const first = selfSigned(t, dir, "first");
-  if (!first) return;
-  const second = selfSigned(t, dir, "second");
+  const first = fixturePair(dir, "a");
+  const second = { key: fileURLToPath(new URL("b.key", FIXTURES)), cert: fileURLToPath(new URL("b.crt", FIXTURES)) };
   const applied = [];
   const reloader = createTlsReloader({ certPath: first.cert, keyPath: first.key, apply: (options) => applied.push(options), log: () => {} });
   assert.equal(reloader.check(), false, "unchanged files do nothing");

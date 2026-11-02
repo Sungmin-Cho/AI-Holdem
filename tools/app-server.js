@@ -17,6 +17,7 @@ import { HOST_ID } from "../shared/seat-roles.js";
 import { statExact } from "../shared/exact-stat.js";
 import { SPECTATOR_ID, viewerRole } from "../shared/viewer-access.js";
 import tlsModule from "node:tls";
+import net from "node:net";
 import {
   createRemoteHostAuth,
   createTlsReloader,
@@ -126,7 +127,11 @@ function serveAsset(res, rel, listener = "loopback") {
   }
   let content;
   try {
-    content = fs.readFileSync(path.join(shared ? SHARED : PUBLIC, name));
+    const dir = shared ? SHARED : PUBLIC;
+    // Exact names only: on a case-insensitive file system "/Login.html" would otherwise open
+    // login.html past the per-listener checks above.
+    if (!fs.readdirSync(dir).includes(name)) throw Object.assign(new Error(), { code: "ENOENT" });
+    content = fs.readFileSync(path.join(dir, name));
   } catch {
     json(res, 404, { code: "NOT_FOUND" });
     return;
@@ -142,16 +147,38 @@ const remoteFailure = (code, message) => {
   throw Object.assign(new Error(message), { code });
 };
 const HOSTNAME_RE = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
-const IPV6_RE = /^[0-9a-f:.]+$/;
-/** Host header spellings a browser can send for these names on this port (lower case). */
+/**
+ * The hostname a browser sends for this name — lower case, an IPv6 literal compressed and
+ * bracketed, a numeric IPv4 spelling normalized — or null when it is not a DNS name or an IP.
+ */
+export function canonicalRemoteName(raw) {
+  const text = String(raw ?? "").trim().replace(/^\[(.*)\]$/, "$1");
+  if (!text || !/^[A-Za-z0-9.:-]+$/.test(text)) return null;
+  // A colon is only an IPv6 literal here, never a port ("1:2" would parse as host 0.0.0.1).
+  if (text.includes(":") && !net.isIPv6(text)) return null;
+  let hostname;
+  try {
+    hostname = new URL(`https://${net.isIPv6(text) ? `[${text}]` : text}/`).hostname;
+  } catch {
+    return null;
+  }
+  const bare = hostname.replace(/^\[(.*)\]$/, "$1");
+  return net.isIPv6(bare) || net.isIPv4(hostname) || HOSTNAME_RE.test(hostname) ? hostname : null;
+}
+/** The canonical Host value (URL.host: the default :443 dropped) of a header, or null. */
+function canonicalHostHeader(value) {
+  const text = String(value ?? "");
+  if (!/^[A-Za-z0-9.:[\]-]+$/.test(text)) return null;
+  try {
+    return new URL(`https://${text}`).host;
+  } catch {
+    return null;
+  }
+}
+/** Canonical Host values a browser sends for these (already canonical) names on this port. */
 export function remoteHostForms(names, port) {
   const forms = new Set();
-  for (const raw of names) {
-    const name = String(raw).trim().toLowerCase().replace(/^\[(.*)\]$/, "$1");
-    const host = name.includes(":") ? `[${name}]` : name;
-    forms.add(`${host}:${port}`);
-    if (port === 443) forms.add(host);
-  }
+  for (const name of names) forms.add(new URL(`https://${name}:${port}`).host);
   return forms;
 }
 /**
@@ -163,13 +190,14 @@ export function prepareRemoteHost({ port, listen = null, names = [], tlsCert = n
     remoteFailure("REMOTE_HOST_PORT_INVALID", "--remote-host-port는 0~65535 정수여야 합니다.");
   if (!Array.isArray(names) || names.length === 0)
     remoteFailure("REMOTE_HOST_NAME_REQUIRED", "--remote-host-name이 하나 이상 필요합니다.");
+  const canonical = [];
   for (const raw of names) {
-    const name = String(raw).trim().toLowerCase().replace(/^\[(.*)\]$/, "$1");
-    if (!(HOSTNAME_RE.test(name) || (name.includes(":") && IPV6_RE.test(name))))
-      remoteFailure("REMOTE_HOST_NAME_INVALID", `원격 호스트 이름이 올바르지 않습니다: ${raw}`);
+    const name = canonicalRemoteName(raw);
+    if (!name) remoteFailure("REMOTE_HOST_NAME_INVALID", `원격 호스트 이름이 올바르지 않습니다: ${raw}`);
     // Pages tell the local lobby from a remote one by this exact hostname.
     if (name === "127.0.0.1")
       remoteFailure("REMOTE_HOST_NAME_INVALID", "127.0.0.1은 로컬 로비 주소라 원격 호스트 이름으로 쓸 수 없습니다.");
+    if (!canonical.includes(name)) canonical.push(name);
   }
   // No default: binding every interface is a choice the operator makes explicitly.
   if (typeof listen !== "string" || listen.trim() === "")
@@ -186,7 +214,7 @@ export function prepareRemoteHost({ port, listen = null, names = [], tlsCert = n
   const dir = appDir ?? path.join(storeDir, ".app");
   if (!readHostCredential(dir))
     remoteFailure("HOST_PASSWORD_NOT_SET", "원격 호스트 비밀번호가 없습니다. 먼저 `node tools/app-service.js host-password <store>`를 실행하세요.");
-  return { port, listen: listen.trim(), names: [...names], tlsCert, tlsKey, tlsOptions, appDir: dir, authOptions, requestTimeoutMs, tlsReloadMs };
+  return { port, listen: listen.trim(), names: canonical, tlsCert, tlsKey, tlsOptions, appDir: dir, authOptions, requestTimeoutMs, tlsReloadMs };
 }
 // The remote host listener serves exactly these host routes; everything else is decided before
 // authentication (participant and unknown routes 404, local-only ones refused), so a route added
@@ -206,18 +234,17 @@ export function remoteRouteOf(pathname) {
   if (pathname === "/api/study") return "study";
   return REMOTE_HOST_ROUTES.some((route) => route.test(pathname)) ? "host" : "not-found";
 }
-// URL drops the default :443 on both sides, so "name" and "name:443" compare equal.
+// Both sides are canonical URL.host values, so "name" and "name:443" compare equal.
 function sameRemoteOrigin(originHeader, host) {
   try {
     const origin = new URL(originHeader);
-    return origin.protocol === "https:" && origin.host === new URL(`https://${host}`).host;
+    return origin.protocol === "https:" && origin.host === host;
   } catch {
     return false;
   }
 }
 export function remoteOrigin(name, port) {
-  const host = [...remoteHostForms([name], port)][0];
-  return new URL(`https://${host}`).origin;
+  return new URL(`https://${name}:${port}`).origin;
 }
 function createSocketTracker(maxPerAddr, maxTotal) {
   const counts = new Map();
@@ -1010,30 +1037,30 @@ export async function startAppServer({
   publicServer.on("connection", (socket) => {
     if (!trackSocket(socket)) return;
   });
-  if (publicPort != null) {
-    try {
-      await new Promise((resolve, reject) => {
-        publicServer.once("error", reject);
-        publicServer.listen(publicPort, publicListen, resolve);
-      });
-    } catch (error) {
-      // The caller holds no handle yet: close the loopback listener here or a failed serve stays up.
-      server.closeAllConnections();
-      await new Promise((resolve) => server.close(resolve));
-      throw error;
-    }
-  }
-  // Remote host listener (opt-in): HTTPS, an allowlisted Host header, and a password session. It
-  // serves the host lobby and table, never the participant routes, and refuses the service token.
+  // Everything after the loopback listener opens is one startup: if any later step fails, close
+  // every listener and timer opened so far. The caller holds no handle yet, and an open listener
+  // would keep a failed serve alive instead of exiting for launchd to retry.
   let remoteServer = null,
     remoteAuth = null,
     remoteSweep = null,
     remoteReloader = null,
     remoteHosts = new Set();
+  const closeAll = async () => {
+    clearInterval(remoteSweep);
+    remoteReloader?.stop();
+    remoteAuth?.close();
+    for (const listener of [remoteServer, publicServer, server]) {
+      if (!listener?.listening) continue;
+      listener.closeAllConnections();
+      await new Promise((resolve) => listener.close(resolve));
+    }
+  };
+  // Remote host listener (opt-in): HTTPS, an allowlisted Host header, and a password session. It
+  // serves the host lobby and table, never the participant routes, and refuses the service token.
   const remoteHandler = async (req, res) => {
     try {
-      const host = String(req.headers.host ?? "").toLowerCase();
-      if (!remoteHosts.has(host)) {
+      const host = canonicalHostHeader(req.headers.host);
+      if (!host || !remoteHosts.has(host)) {
         json(res, 403, { code: "BAD_ORIGIN" });
         return;
       }
@@ -1072,8 +1099,16 @@ export async function startAppServer({
           json(res, 405, { code: "METHOD_NOT_ALLOWED" });
           return;
         }
+        const addr = req.socket.remoteAddress ?? "unknown";
+        // A locked address is refused before its body is read (and checked again after).
+        const locked = remoteAuth.lockout(addr);
+        if (locked) {
+          for (const [name, value] of Object.entries(locked.headers)) res.setHeader(name, value);
+          json(res, locked.status, locked.body);
+          return;
+        }
         const body = await bodyOf(req);
-        const result = await remoteAuth.login({ addr: req.socket.remoteAddress ?? "unknown", body });
+        const result = await remoteAuth.login({ addr, body });
         for (const [name, value] of Object.entries(result.headers ?? {})) res.setHeader(name, value);
         json(res, result.status, result.body);
         return;
@@ -1099,78 +1134,64 @@ export async function startAppServer({
       hostError(res, error);
     }
   };
-  if (remote) {
-    remoteAuth = createRemoteHostAuth({ appDir: remote.appDir, ...remote.authOptions });
-    // requestTimeout bounds receiving a request (headers and body), never a long response such as
-    // SSE: an unauthenticated client cannot hold a socket by never finishing its login body.
-    remoteServer = https.createServer({
-      ...remote.tlsOptions,
-      handshakeTimeout: 10_000,
-      requestTimeout: remote.requestTimeoutMs,
-      headersTimeout: Math.min(10_000, remote.requestTimeoutMs),
-      connectionsCheckingInterval: Math.min(1_000, remote.requestTimeoutMs),
-    }, remoteHandler);
-    remoteServer.maxConnections = 64;
-    remoteServer.timeout = 0;
-    const trackRemote = createSocketTracker(32, 64);
-    remoteServer.on("connection", (socket) => {
-      trackRemote(socket);
-    });
-    try {
+  try {
+    if (publicPort != null) {
+      await new Promise((resolve, reject) => {
+        publicServer.once("error", reject);
+        publicServer.listen(publicPort, publicListen, resolve);
+      });
+    }
+    if (remote) {
+      remoteAuth = createRemoteHostAuth({ appDir: remote.appDir, ...remote.authOptions });
+      // requestTimeout bounds receiving a request (headers and body), never a long response such as
+      // SSE: an unauthenticated client cannot hold a socket by never finishing its login body.
+      remoteServer = https.createServer({
+        ...remote.tlsOptions,
+        handshakeTimeout: 10_000,
+        requestTimeout: remote.requestTimeoutMs,
+        headersTimeout: Math.min(10_000, remote.requestTimeoutMs),
+        connectionsCheckingInterval: Math.min(1_000, remote.requestTimeoutMs),
+      }, remoteHandler);
+      remoteServer.maxConnections = 64;
+      remoteServer.timeout = 0;
+      const trackRemote = createSocketTracker(32, 64);
+      remoteServer.on("connection", (socket) => {
+        trackRemote(socket);
+      });
       await new Promise((resolve, reject) => {
         remoteServer.once("error", reject);
         remoteServer.listen(remote.port, remote.listen, resolve);
       });
-    } catch (error) {
-      // Nothing else holds these listeners yet; leaving them open would keep a failed serve alive.
-      if (publicPort != null) {
-        publicServer.closeAllConnections();
-        await new Promise((resolve) => publicServer.close(resolve));
-      }
-      server.closeAllConnections();
-      await new Promise((resolve) => server.close(resolve));
-      throw Object.assign(error, { code: error.code ?? "REMOTE_HOST_LISTEN_FAILED" });
+      remoteHosts = remoteHostForms(remote.names, remoteServer.address().port);
+      remoteSweep = setInterval(() => remoteAuth.sweep(), 60_000);
+      remoteSweep.unref?.();
+      remoteReloader = createTlsReloader({
+        certPath: remote.tlsCert,
+        keyPath: remote.tlsKey,
+        intervalMs: remote.tlsReloadMs,
+        apply: (options) => remoteServer.setSecureContext(options),
+      });
+      remoteReloader.start();
     }
-    remoteHosts = remoteHostForms(remote.names, remoteServer.address().port);
-    remoteSweep = setInterval(() => remoteAuth.sweep(), 60_000);
-    remoteSweep.unref?.();
-    remoteReloader = createTlsReloader({
-      certPath: remote.tlsCert,
-      keyPath: remote.tlsKey,
-      intervalMs: remote.tlsReloadMs,
-      apply: (options) => remoteServer.setSecureContext(options),
-    });
-    remoteReloader.start();
+    stateChanged(manager.snapshot());
+    return {
+      stateChanged,
+      server,
+      origin,
+      publicPort: publicPort == null ? null : publicServer.address()?.port ?? publicPort,
+      publicOrigin: publicPort == null
+        ? null
+        : `${tls ? "https" : "http"}://127.0.0.1:${publicServer.address()?.port ?? publicPort}`,
+      remoteHostPort: remoteServer ? remoteServer.address().port : null,
+      remoteHostOrigins: remoteServer
+        ? remote.names.map((name) => remoteOrigin(name, remoteServer.address().port))
+        : [],
+      close: closeAll,
+    };
+  } catch (error) {
+    await closeAll();
+    throw error;
   }
-  stateChanged(manager.snapshot());
-  return {
-    stateChanged,
-    server,
-    origin,
-    publicPort: publicPort == null ? null : publicServer.address()?.port ?? publicPort,
-    publicOrigin: publicPort == null
-      ? null
-      : `${tls ? "https" : "http"}://127.0.0.1:${publicServer.address()?.port ?? publicPort}`,
-    remoteHostPort: remoteServer ? remoteServer.address().port : null,
-    remoteHostOrigins: remoteServer
-      ? remote.names.map((name) => remoteOrigin(name, remoteServer.address().port))
-      : [],
-    close: async () => {
-      if (remoteServer) {
-        clearInterval(remoteSweep);
-        remoteReloader.stop();
-        remoteAuth.close();
-        remoteServer.closeAllConnections();
-        await new Promise((resolve) => remoteServer.close(resolve));
-      }
-      if (publicPort != null) {
-        publicServer.closeAllConnections();
-        await new Promise((resolve) => publicServer.close(resolve));
-      }
-      server.closeAllConnections();
-      await new Promise((resolve) => server.close(resolve));
-    },
-  };
 }
 function publicReceipt(row) {
   return {

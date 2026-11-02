@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { createOwnedTempDir } from "./helpers/owned-fixtures.mjs";
 import { fakeRelay, makeLoop, makeSession, startProxyApp } from "./helpers/relay-proxy-fixture.js";
 import { parseServeArgs, setHostPassword, startAppService } from "../tools/app-service.js";
-import { remoteHostForms, remoteOrigin, remoteRouteOf } from "../tools/app-server.js";
+import { canonicalRemoteName, remoteHostForms, remoteOrigin, remoteRouteOf } from "../tools/app-server.js";
 import { readHostCredential, verifyPassword } from "../tools/host-auth.js";
 
 const PASSWORD = "remote host password";
@@ -61,11 +61,17 @@ const login = async (port, password = PASSWORD) => request(port, { method: "POST
 const bearer = (token) => ({ authorization: `Bearer ${token}` });
 
 test("remote names normalize to the Host and Origin spellings a browser sends", () => {
-  assert.deepEqual([...remoteHostForms(["Mini.Tail1.ts.net"], 8898)], ["mini.tail1.ts.net:8898"]);
-  assert.deepEqual([...remoteHostForms(["mini"], 443)], ["mini:443", "mini"]);
-  assert.deepEqual([...remoteHostForms(["fd7a:115c::1", "[fd7a:115c::2]"], 8898)], ["[fd7a:115c::1]:8898", "[fd7a:115c::2]:8898"]);
+  for (const [raw, name] of [["Mini.Tail1.ts.net", "mini.tail1.ts.net"], ["fd7a:115c:a1e0:ab12:0:0:0:1", "[fd7a:115c:a1e0:ab12::1]"],
+    ["[FD7A::1]", "[fd7a::1]"], ["0:0:0:0:0:0:0:1", "[::1]"], ["100.64.0.1", "100.64.0.1"], ["localhost", "localhost"],
+    ["2130706433", "127.0.0.1"], [":::", null], ["1:2", null], ["mini:8898", null], ["bad name", null], ["a/b", null],
+    ["a..b", null], ["-x", null], ["", null], ["mini@evil", null]])
+    assert.equal(canonicalRemoteName(raw), name, raw);
+  const forms = (raw, port) => [...remoteHostForms(raw.map(canonicalRemoteName), port)];
+  assert.deepEqual(forms(["Mini.Tail1.ts.net"], 8898), ["mini.tail1.ts.net:8898"]);
+  assert.deepEqual(forms(["mini"], 443), ["mini"], "a browser omits the default port");
+  assert.deepEqual(forms(["fd7a:115c:0:0:0:0:0:1", "[fd7a:115c::2]"], 8898), ["[fd7a:115c::1]:8898", "[fd7a:115c::2]:8898"]);
   assert.equal(remoteOrigin("mini", 443), "https://mini");
-  assert.equal(remoteOrigin("FD7A::1", 8898), "https://[fd7a::1]:8898");
+  assert.equal(remoteOrigin(canonicalRemoteName("FD7A:0:0::1"), 8898), "https://[fd7a::1]:8898");
   for (const [route, kind] of [["/api/app", "host"], ["/api/room", "host"], ["/api/commands", "host"], ["/api/commands/r-1", "host"],
     ["/api/app/interrupt-decision", "host"], [`/api/game/${GAME}/events`, "host"], [`/api/game/${GAME}/reveal`, "host"],
     ["/api/host/login", "login"], ["/api/host/logout", "logout"], ["/api/stop", "forbidden"], ["/api/prefill", "forbidden"],
@@ -80,7 +86,8 @@ test("the remote host listener refuses to start without names, an address, TLS o
   const refuse = (remoteHost, code) => assert.rejects(startAppService(store, { remoteHost }), { code });
   await refuse(remoteOptions({ names: [] }), "REMOTE_HOST_NAME_REQUIRED");
   await refuse(remoteOptions({ names: ["bad name"] }), "REMOTE_HOST_NAME_INVALID");
-  await refuse(remoteOptions({ names: ["127.0.0.1"] }), "REMOTE_HOST_NAME_INVALID");
+  for (const name of ["127.0.0.1", "2130706433", ":::", "1:2", "mini:8898"])
+    await refuse(remoteOptions({ names: [name] }), "REMOTE_HOST_NAME_INVALID");
   await refuse(remoteOptions({ listen: null }), "REMOTE_HOST_LISTEN_REQUIRED");
   await refuse(remoteOptions({ listen: " " }), "REMOTE_HOST_LISTEN_REQUIRED");
   await refuse(remoteOptions({ tlsCert: null }), "REMOTE_HOST_TLS_REQUIRED");
@@ -131,6 +138,15 @@ test("a listen failure closes every listener already opened", async (t) => {
   assert.equal(await settle(before), before, "an address that is not up yet (Tailscale late) leaves nothing open");
   const app = await startAppService(store);
   await app.close();
+});
+
+test("an IPv6 name registered in full matches the compressed Host a browser sends", async (t) => {
+  const { port, app } = await boot(t, { remote: { names: ["0:0:0:0:0:0:0:1", "Localhost"] } });
+  assert.deepEqual(app.remoteHostOrigins, [`https://[::1]:${port}`, `https://localhost:${port}`]);
+  for (const host of [`[::1]:${port}`, `[0:0:0:0:0:0:0:1]:${port}`, `localhost:${port}`])
+    assert.equal((await request(port, { host })).status, 200, host);
+  for (const host of [`[::2]:${port}`, `localhost:${port}/x`, `localhost:${port}@evil`])
+    assert.equal((await request(port, { host })).status, 403, host);
 });
 
 test("only an allowlisted Host reaches the remote listener, and API calls must be same-origin", async (t) => {
@@ -204,12 +220,15 @@ test("each listener serves only its own pages: login on remote, lobby never on t
     assert.equal((await request(port, { path: target })).status, 200, `remote ${target}`);
   assert.equal((await request(port, { path: "/join" })).status, 404);
   assert.equal((await request(port, { path: "/.app/host-auth.json" })).status, 404);
-  for (const target of ["/login", "/login.html", "/login.js"])
+  for (const target of ["/login", "/login.html", "/login.js", "/Login.html", "/LOGIN.JS"])
     assert.equal((await fetch(`${app.origin}${target}`)).status, 404, `loopback ${target}`);
+  // Exact names only: a case-insensitive file system must not open a blocked page by an alias.
+  for (const target of ["/Login.html", "/Lobby.html", "/LOBBY.JS", "/Index.html"])
+    assert.equal((await request(port, { path: target })).status, 404, `remote ${target}`);
   assert.equal((await fetch(`${app.origin}/`)).status, 200);
   const participant = await startAppService(createOwnedTempDir("remote-host-public"), { publicPort: 0 });
   t.after(() => participant.close());
-  for (const target of ["/login.html", "/login.js", "/lobby.html"])
+  for (const target of ["/login.html", "/login.js", "/lobby.html", "/Login.html", "/LOGIN.html", "/Login.js", "/Lobby.html", "/shared/Pace.js"])
     assert.equal((await fetch(`${participant.publicOrigin}${target}`)).status, 404, `participant ${target}`);
   for (const target of ["/join", "/table", "/app.js", "/remote-host.js"])
     assert.equal((await fetch(`${participant.publicOrigin}${target}`)).status, 200, `participant ${target}`);
@@ -240,6 +259,24 @@ test("repeated wrong passwords lock that address with Retry-After", async (t) =>
   assert.equal(locked.json.code, "LOGIN_RATE_LIMIT");
   assert.ok(Number(locked.headers["retry-after"]) > 0);
   assert.equal(locked.headers["retry-after"], String(locked.json.retryAfterSec));
+});
+
+test("a locked address is refused before its login body is read", async (t) => {
+  const { port } = await boot(t);
+  for (let i = 0; i < 5; i += 1) assert.equal((await login(port, `wrong password ${i}`)).status, 401);
+  const started = Date.now();
+  const head = await new Promise((resolve, reject) => {
+    const socket = tls.connect({ host: "127.0.0.1", port, servername: "localhost", ca: fs.readFileSync(CERT_A.cert) }, () => {
+      socket.write(`POST /api/host/login HTTP/1.1\r\nHost: localhost:${port}\r\nContent-Type: application/json\r\nContent-Length: 200\r\n\r\n{"pass`);
+    });
+    let text = "";
+    socket.on("data", (chunk) => { text += chunk; if (text.includes("\r\n\r\n")) { resolve(text); socket.destroy(); } });
+    socket.on("error", reject);
+    setTimeout(() => { socket.destroy(); resolve("no answer"); }, 8000);
+  });
+  assert.match(head, /^HTTP\/1\.1 429/);
+  assert.match(head, /retry-after: \d+/i);
+  assert.ok(Date.now() - started < 5000, "answered without waiting for the body or the request timeout");
 });
 
 test("a login body that never finishes is cut off instead of holding the socket", async (t) => {
@@ -339,6 +376,31 @@ test("a remote host plays through the shared relay proxy, without the study link
   while (relay.openStreams() !== 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(relay.openStreams(), 0, "the upstream relay stream is released too");
   assert.equal((await request(port, { path: game("snapshot"), headers })).status, 401);
+  // A new password ends every older session's open stream at the next request any of them makes.
+  const tokens = [(await login(port)).json.token, (await login(port)).json.token];
+  const streams = [];
+  for (const token of tokens) {
+    streams.push(await new Promise((resolve, reject) => {
+      const req = https.request({ host: "127.0.0.1", port, path: game("events?after=0"), servername: "localhost", ca: fs.readFileSync(CERT_A.cert),
+        headers: { ...bearer(token), "x-game-epoch": h.ctx.epoch, host: `localhost:${port}` }, agent: false }, (res) => {
+        let data = "";
+        res.on("data", (chunk) => { data += chunk; if (data.includes("hello")) resolve({ res, ended: new Promise((done) => res.on("close", done)) }); });
+      });
+      req.on("error", reject);
+      req.end();
+    }));
+  }
+  assert.equal(relay.openStreams(), 2);
+  await setHostPassword(credentials, "a replacement password");
+  assert.equal((await request(port, { path: "/api/app", headers: bearer(tokens[0]) })).status, 401);
+  for (const [i, stream] of streams.entries()) {
+    const ended = await Promise.race([stream.ended.then(() => true), new Promise((resolve) => setTimeout(resolve, 5000, false))]);
+    if (!ended) stream.res.destroy();
+    assert.equal(ended, true, `stream ${i} closed`);
+  }
+  const until = Date.now() + 5000;
+  while (relay.openStreams() !== 0 && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(relay.openStreams(), 0);
 });
 
 test("serve reads the remote flags, exits when they fail, and host-password stores a private credential", { timeout: 90000 }, async (t) => {
