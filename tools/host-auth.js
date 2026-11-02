@@ -7,7 +7,7 @@ import tls from "node:tls";
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import { readPrivateJson, writePrivateJson } from "./app-files.js";
 import { isPrivatePath } from "../shared/platform-files.js";
-import { lstatExact, statExact } from "../shared/exact-stat.js";
+import { lstatExact } from "../shared/exact-stat.js";
 
 export const HOST_AUTH_FILE = "host-auth.json";
 export const PASSWORD_MIN = 12;
@@ -364,32 +364,39 @@ export function createRemoteHostAuth({
  * and is retried on the next check.
  */
 /**
- * What the certificate pair on disk is: the files the paths resolve to (a symlinked path is followed,
- * so replacing its target counts as a change). Take it *before* reading the files: a change after
- * that read then differs from it and is picked up by the next check.
+ * What a certificate pair is: a digest of its bytes. File metadata is not enough — a copy can keep
+ * the source's size and modification time (Windows CopyFile does), and a symlinked path's own stat
+ * says nothing of its target. Taken from the exact bytes a server loaded, it also leaves no window
+ * between reading the files and recording what was read.
  */
-export function tlsFileIdentity(certPath, keyPath) {
-  return JSON.stringify([certPath, keyPath].map((file) => {
-    const st = statExact(file);
-    return [String(st.dev), String(st.ino), st.size, st.mtimeMs, st.ctimeMs];
-  }));
+export function tlsContentIdentity(cert, key) {
+  const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  return `${digest(cert)}:${digest(key)}`;
 }
 
 export function createTlsReloader({ certPath, keyPath, apply, initialIdentity = null, intervalMs = 10 * 60 * 1000, readFile = fs.readFileSync, log = (line) => console.error(line) }) {
-  const identity = () => tlsFileIdentity(certPath, keyPath);
-  // The identity of what the server actually started with (taken before it read the files).
-  let applied = initialIdentity ?? identity();
+  const read = () => ({ cert: readFile(certPath), key: readFile(keyPath) });
+  // What the server actually started with: the digest of the bytes it loaded.
+  let applied = initialIdentity;
+  if (applied === null) {
+    try {
+      const options = read();
+      applied = tlsContentIdentity(options.cert, options.key);
+    } catch {
+      applied = "";
+    }
+  }
   let timer = null;
   const check = () => {
-    let next;
+    let options;
     try {
-      next = identity();
+      options = read();
     } catch {
       return false;
     }
+    const next = tlsContentIdentity(options.cert, options.key);
     if (next === applied) return false;
     try {
-      const options = { cert: readFile(certPath), key: readFile(keyPath) };
       tls.createSecureContext(options);
       apply(options);
       applied = next;

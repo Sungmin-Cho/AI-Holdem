@@ -13,7 +13,7 @@ import {
   createRemoteHostAuth,
   createTlsReloader,
   hashPassword,
-  tlsFileIdentity,
+  tlsContentIdentity,
   hostCredentialPath,
   readHostCredential,
   validateHostCredential,
@@ -321,10 +321,10 @@ test("a password changed while a login is verifying issues no session", async ()
   }
 });
 
-test("a reloader started from the identity read before the files picks up a change made in between", () => {
+test("a reloader started from what the server loaded picks up a change made before it was created", () => {
   const dir = createOwnedTempDir("host-auth-tls-race");
   const pair = fixturePair(dir, "a");
-  const before = tlsFileIdentity(pair.cert, pair.key);
+  const before = tlsContentIdentity(fs.readFileSync(pair.cert), fs.readFileSync(pair.key));
   // The server read pair "a"; a renewal replaced both files before the reloader was created.
   fs.copyFileSync(new URL("b.crt", FIXTURES), pair.cert);
   fs.copyFileSync(new URL("b.key", FIXTURES), pair.key);
@@ -332,6 +332,20 @@ test("a reloader started from the identity read before the files picks up a chan
   const reloader = createTlsReloader({ certPath: pair.cert, keyPath: pair.key, initialIdentity: before, apply: (options) => applied.push(options), log: () => {} });
   assert.equal(reloader.check(), true);
   assert.equal(applied[0].cert.toString(), fs.readFileSync(new URL("b.crt", FIXTURES), "utf8"));
+});
+
+test("a renewal is detected by content even when the files' metadata does not change", () => {
+  // Windows CopyFile keeps the source's modification time, and both test pairs have the same size:
+  // only the bytes tell the pairs apart.
+  const bytes = { "/c": fs.readFileSync(new URL("a.crt", FIXTURES)), "/k": fs.readFileSync(new URL("a.key", FIXTURES)) };
+  const applied = [];
+  const reloader = createTlsReloader({ certPath: "/c", keyPath: "/k", readFile: (file) => bytes[file], apply: (options) => applied.push(options), log: () => {} });
+  assert.equal(reloader.check(), false);
+  bytes["/c"] = fs.readFileSync(new URL("b.crt", FIXTURES));
+  bytes["/k"] = fs.readFileSync(new URL("b.key", FIXTURES));
+  assert.equal(reloader.check(), true);
+  assert.equal(applied.length, 1);
+  assert.equal(reloader.check(), false);
 });
 
 test("a symlinked certificate path is followed: replacing its target is a change", { skip: process.platform === "win32" && "symlinks need privileges on Windows" }, () => {

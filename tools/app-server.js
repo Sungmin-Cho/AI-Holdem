@@ -22,7 +22,7 @@ import {
   createRemoteHostAuth,
   createTlsReloader,
   readHostCredential,
-  tlsFileIdentity,
+  tlsContentIdentity,
 } from "./host-auth.js";
 const PUBLIC = fileURLToPath(new URL("../server/public/", import.meta.url));
 const SHARED = fileURLToPath(new URL("../shared/", import.meta.url));
@@ -207,9 +207,9 @@ export function prepareRemoteHost({ port, listen = null, names = [], tlsCert = n
     remoteFailure("REMOTE_HOST_TLS_REQUIRED", "원격 호스트 리스너는 --remote-tls-cert와 --remote-tls-key가 필요합니다.");
   let tlsOptions, tlsIdentity;
   try {
-    tlsIdentity = tlsFileIdentity(tlsCert, tlsKey);
     tlsOptions = { cert: fs.readFileSync(tlsCert), key: fs.readFileSync(tlsKey) };
     tlsModule.createSecureContext(tlsOptions);
+    tlsIdentity = tlsContentIdentity(tlsOptions.cert, tlsOptions.key);
   } catch {
     remoteFailure("REMOTE_HOST_TLS_INVALID", "원격 호스트 인증서·키를 읽지 못했거나 서로 맞지 않습니다.");
   }
