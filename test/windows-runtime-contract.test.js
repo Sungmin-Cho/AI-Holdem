@@ -482,12 +482,13 @@ if (process.platform === 'win32') {
 }
 
 import * as study from '../tools/study-service.js';
+import { boundedNetworkCall } from '../tools/bounded-network-call.js';
+// #343: a study request's budget is a boundedNetworkCall (one ref'd timer), no longer AbortSignal.timeout.
 test('HTTP timeout floors fractional remaining and intersects both deadlines', () => {
- const nativeTimeout=AbortSignal.timeout.bind(AbortSignal);
  files.withPlatformDeadline(450.8,()=>{
   const milliseconds=study.studyHttpTimeout(500.9,8000);
   assert.equal(milliseconds,450);
-  assert.doesNotThrow(()=>nativeTimeout(milliseconds));
+  assert.doesNotThrow(()=>boundedNetworkCall(milliseconds).release());
  },{now:()=>0.25});
  files.withPlatformDeadline(9000,()=>{
   assert.equal(study.studyHttpTimeout(200.9,8000),200);
@@ -501,9 +502,13 @@ test('real study ensure inspect stop accept fractional remaining below HTTP cap'
  let handle;
  try {
   handle=await ensureStudyService(dir,{onChild:child=>registerOwnedProcess(child,'fractional study service')});
-  const nativeTimeout=AbortSignal.timeout.bind(AbortSignal);
+  // Each request's budget is the delay of boundedNetworkCall's own timer; every other timer passes.
+  const nativeSetTimeout=globalThis.setTimeout;
   const timers=[];
-  t.mock.method(AbortSignal,'timeout',(milliseconds)=>{timers.push(milliseconds); if(!Number.isInteger(milliseconds)) t.diagnostic(`noninteger HTTP timer: ${milliseconds}`); return nativeTimeout(milliseconds);});
+  t.mock.method(globalThis,'setTimeout',(callback,milliseconds,...rest)=>{
+   if(callback?.name==='expireNetworkBudget'){timers.push(milliseconds); if(!Number.isInteger(milliseconds)) t.diagnostic(`noninteger HTTP timer: ${milliseconds}`);}
+   return nativeSetTimeout(callback,milliseconds,...rest);
+  });
   const outer = process.platform === 'win32' ? CLIENT_WAIT_MS : 5000;
   const bounded=client=>{
    let reads=0;

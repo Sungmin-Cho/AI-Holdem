@@ -25,7 +25,8 @@ export function boundedNetworkCall(budgetMs) {
   let expire;
   const expired = new Promise((_, reject) => { expire = reject; });
   expired.catch(() => {});
-  const timer = setTimeout(() => {
+  // Named so a test can tell this budget's timer from every other one.
+  const timer = setTimeout(function expireNetworkBudget() {
     const reason = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
     controller.abort(reason);
     expire(reason);
