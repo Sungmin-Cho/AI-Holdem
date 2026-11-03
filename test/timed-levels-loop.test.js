@@ -135,19 +135,23 @@ async function transportFailingPublisher(t, {beforeRequest = false} = {}) {
 // lands inside a loop step (a policy decision's engine call, a new hand) ends run() with STOPPING
 // by design, and these tests await run() as a clean end. `stop()` ends the driver first, so the
 // loop comes to that turn and waits there (a game that ended has none); without it within
-// `waitMs` the loop is still stopped, for cleanup, and the stop fails as not clean.
-function userTurnDriver(root, loop, {stopAtHand = Infinity, control = {holdUser: false}} = {}) {
+// `waitMs` the loop is still stopped, for cleanup, and the stop fails as not clean. `onTick(snap)`
+// sees each snapshot the driver reads, before it acts on it; `stoppedOn()` is the snapshot the
+// auto-stop was requested on.
+function userTurnDriver(root, loop, {stopAtHand = Infinity, control = {holdUser: false}, onTick = null} = {}) {
   const sent = new Set();
   const openUserTurn = (snap) => snap?.view?.toAct === 'user' && Boolean(snap.view.legal?.decisionId)
     && !sent.has(snap.view.legal.decisionId);
   let posting = false;
   let stopping = false;
+  let stoppedOn = null;
   const timer = setInterval(async () => {
     if (posting || stopping) return;
     posting = true;
     try {
       const snap = readJson(root, 'ui-snapshot.json');
-      if (snap.view?.handNo >= stopAtHand && openUserTurn(snap)) { stopping = true; await loop.requestStop(); return; }
+      onTick?.(snap);
+      if (snap.view?.handNo >= stopAtHand && openUserTurn(snap)) { stopping = true; stoppedOn = snap; await loop.requestStop(); return; }
       const legal = snap.view?.legal;
       if (openUserTurn(snap) && loop.playState !== 'paused' && !control.holdUser) {
         const lock = readJson(root, 'lock.json');
@@ -171,7 +175,7 @@ function userTurnDriver(root, loop, {stopAtHand = Infinity, control = {holdUser:
     await loop.requestStop().catch(() => {});
     throw new Error(`the loop reached no open user turn to stop at within ${waitMs}ms`);
   };
-  return {clear, stop};
+  return {clear, stop, stoppedOn: () => stoppedOn};
 }
 
 // A timed tournament against one policy AI. Each publish moves the play clock
@@ -179,7 +183,7 @@ function userTurnDriver(root, loop, {stopAtHand = Infinity, control = {holdUser:
 // `engineHook(args, root)` sees every engine CLI call first (a promise holds it); `userOnButton`
 // deals hand 1 with the user on the button.
 async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand = 6, failOnce = null, transportFailOnce = false,
-  engineHook = null, userOnButton = false} = {}) {
+  engineHook = null, userOnButton = false, onDriverTick = null} = {}) {
   const root = createOwnedTempDir('holdem-timed-loop');
   const clock = {play: 1000.25};
   const control = {holdUser: false};
@@ -231,10 +235,10 @@ async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand =
     state.button = (userIdx + state.seats.length - 1) % state.seats.length;
     fs.writeFileSync(path.join(root, 'state.json'), JSON.stringify(state));
   }
-  const driver = userTurnDriver(root, loop, {stopAtHand, control});
+  const driver = userTurnDriver(root, loop, {stopAtHand, control, onTick: onDriverTick});
   t.after(async () => { driver.clear(); await loop.requestStop().catch(() => {}); });
   const stop = () => driver.stop();
-  return {root, loop, clock, control, publishes, attempts, injected, recovery, transport, stop};
+  return {root, loop, clock, control, publishes, attempts, injected, recovery, transport, stop, stoppedOn: driver.stoppedOn};
 }
 
 test('CLI and setup carry the level minutes to a tournament', () => {
@@ -287,21 +291,36 @@ test('a timed tournament rises one level per hand after each level\'s play time'
 
 // #319: a stop inside an AI step ends run() with STOPPING by design, so the fixture must never
 // stop there. Heads-up, the button acts first preflop: with the user on the button in hand 1 the
-// AI opens hand 6, the stop hand, and every policy decision of that hand is held 500 ms in its
-// engine call. The fixture must let that decision through and stop on the user's turn after it.
-// A driver that stopped on the hand number alone stopped either before the AI's decision (no
-// hold seen) or inside the hold (run() rejected with STOPPING).
+// AI opens hand 6, the stop hand. Each policy decision of that hand is held in its engine call
+// until a driver tick has read the snapshot of that AI turn (a handshake, bounded at 5 s), so the
+// driver always looks at the stop hand while the AI's step is open. A driver that stopped on the
+// hand number alone stops on that tick, inside the step (run() rejects with STOPPING), or before
+// the step began; this one lets it through and stops on the user's turn after it.
 test('#319 the fixture stops on the user\'s open turn, never inside an AI step of the stop hand', {timeout: 120000}, async (t) => {
   const held = [];
-  const f = await timedFixture(t, {userOnButton: true, engineHook: (args, root) => {
-    if (args[0] !== 'decision-peek') return undefined;
-    const handNo = peekJson(root, 'state.json')?.handNo;
-    if (!(handNo >= 6)) return undefined;
-    held.push(handNo);
-    return new Promise((resolve) => setTimeout(resolve, 500));
-  }});
+  let seen = null;
+  const f = await timedFixture(t, {
+    userOnButton: true,
+    onDriverTick: (snap) => {
+      if (seen && snap?.view?.handNo >= 6 && snap.view.toAct && snap.view.toAct !== 'user') seen();
+    },
+    engineHook: (args, root) => {
+      if (args[0] !== 'decision-peek') return undefined;
+      const handNo = peekJson(root, 'state.json')?.handNo;
+      if (!(handNo >= 6)) return undefined;
+      return new Promise((resolve) => {
+        const release = (observed) => { seen = null; held.push({handNo, observed}); resolve(); };
+        const timer = setTimeout(() => release(false), 5_000);
+        seen = () => { clearTimeout(timer); release(true); };
+      });
+    },
+  });
   await f.loop.run();
-  assert.ok(held.includes(6), `the fixture stopped before the AI's decision in the stop hand: held ${JSON.stringify(held)}`);
+  assert.ok(held.some((hold) => hold.handNo === 6 && hold.observed),
+    `a driver tick read the AI's open turn in the stop hand while its step was held: ${JSON.stringify(held)}`);
+  const stoppedOn = f.stoppedOn();
+  assert.equal(stoppedOn?.view?.toAct, 'user', `the stop was requested on ${JSON.stringify(stoppedOn?.view?.toAct)}`);
+  assert.ok(stoppedOn.view.handNo >= 6, JSON.stringify(stoppedOn.view.handNo));
   assert.ok(handLevels(f.root).length >= 5, JSON.stringify(handLevels(f.root)));
 });
 
