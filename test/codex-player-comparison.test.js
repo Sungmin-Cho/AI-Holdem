@@ -1036,7 +1036,8 @@ test('#297 실행: 그룹을 벗어난 후손이 stdio를 쥐면 종료 미확�
     const sample = report.variants[1].samples[0];
     assert.deepEqual([sample.status, sample.errorCode, sample.errorPhase], ['termination_unconfirmed', 'CHILD_CLOSE_UNCONFIRMED', 'warmup']);
     assert.deepEqual(sample.errorDetails, { purpose: 'create', signal: 'SIGKILL', waitBudgetMs: 1000, waitedMs: sample.errorDetails.waitedMs, closeConfirmed: false });
-    assert.ok(sample.errorDetails.waitedMs >= 1000);
+    // 대기는 1000ms 타이머다. 타이머는 ms로 내린 단조 시계로 만료되고 waitedMs는 반올림한 값이라 999로 읽힐 수 있다(#319).
+    assert.ok(sample.errorDetails.waitedMs >= 999, `waited ${sample.errorDetails.waitedMs}ms against a 1000ms budget`);
     const solCreate = f.calls().find((call) => modelOf(call.argv) === SOL && call.stdin.includes('비교용'));
     assert.ok(solCreate.readyAt <= f.killAt[0], '보유자를 만든 뒤에 신호가 갔다');
 

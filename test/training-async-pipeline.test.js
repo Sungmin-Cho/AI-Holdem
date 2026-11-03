@@ -8,6 +8,7 @@ import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import { loadPreflopDataset } from '../tools/preflop-dataset.js';
 import { validateExplanation } from '../training/explain.js';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -200,8 +201,10 @@ function makeEvaluate({ delayMs = 0, failTimes = 0, gate = null, calls } = {}) {
     }
     return handleOf(() => {
       const state = readJson(path.join(sessionDir, 'state.json'));
+      // As tools/evaluate-cli.js answers (#319): a hand it cannot read fails; a hand the user
+      // never acted in (a walk) is ok with nothing to evaluate, so its pipeline settles.
+      if (!handRecord(sessionDir, handNo)) return { ok: false, code: 'HAND_NOT_FOUND' };
       const snaps = userDecisions(sessionDir, handNo);
-      if (!snaps.length) return { ok: false, code: 'NO_DECISION' };
       return {
         ok: true,
         evaluations: snaps.map((snap) => cannedEvaluation(snap.decisionId, gameEpochOf(state.sessionToken))),
@@ -264,6 +267,29 @@ function envelopeFromPublishArgs(args) {
     return null;
   }
 }
+
+// #319: `makeEvaluate` stands in for tools/evaluate-cli.js, so it must answer what the CLI
+// answers. A hand the user never acted in (the AI folded its small blind: a walk) is no
+// failure there — the CLI answers ok with no evaluations, the pipeline comes back ok, and the
+// hand leaves the deferred record. Answered as a failure, a walk that a stop had recorded
+// (its evaluation still running) stayed on the record after the restart, and the "#303 one
+// hand" wait for an empty record ran out.
+test('#319 the test evaluator answers a hand without a user decision as tools/evaluate-cli.js does', async () => {
+  const gameDir = tmpGame();
+  const handNo = 1;
+  // Only the fields both evaluators read: the session token and the hand's decision snapshots.
+  fs.writeFileSync(path.join(gameDir, 'state.json'), JSON.stringify({
+    sessionToken: 'tok-319-walk',
+    lastHand: { handNo, decisions: [{ actorId: 'ai-1', decisionId: 'd-ai-1', street: 'preflop' }] },
+  }));
+  const stdout = execFileSync(process.execPath, [
+    path.join(ROOT, 'tools', 'evaluate-cli.js'), 'evaluate', '--game-dir', gameDir, '--hand', String(handNo),
+  ], { encoding: 'utf8' });
+  const cli = JSON.parse(stdout.trim());
+  assert.deepEqual([cli.ok, cli.evaluations], [true, []], stdout);
+  const fixture = await makeEvaluate()(gameDir, handNo).promise;
+  assert.deepEqual([fixture.ok, fixture.evaluations], [cli.ok, cli.evaluations], JSON.stringify(fixture));
+});
 
 test('turn loop does not wait on training; machine UI arrives before explanation', { timeout: 120_000 }, async (t) => {
   const gameDir = tmpGame();

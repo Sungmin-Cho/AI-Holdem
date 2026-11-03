@@ -3982,7 +3982,9 @@ test('#333 probe(claude): 진행 신호가 기준 안에 오면 느린 최종 �
   assert.equal(call.code, null);
   // 시각의 절대값은 spawn 전 준비(cwd 등)를 포함하므로 단언하지 않는다(r2) — 관측 여부와 동작만 본다.
   assert.ok(call.bootMs !== null && call.firstProgressMs !== null && call.bootMs <= call.firstProgressMs, 'init과 진행 신호가 관측됐다');
-  assert.ok(call.elapsedMs >= 300, `elapsed ${call.elapsedMs}ms — 게이트(100ms)가 지난 뒤에 끝났다`);
+  // 최종 응답은 300ms 타이머다. 타이머는 ms로 내린 단조 시계로 만료되고 elapsedMs는 Date.now 차이라, 같은 300ms가
+  // 299로 읽힐 수 있다(#319, CI 299ms). 단언은 의도대로 "게이트(100ms)가 지난 뒤에 끝났다"만 본다.
+  assert.ok(call.elapsedMs > 100, `elapsed ${call.elapsedMs}ms — 게이트(100ms)가 지난 뒤에 끝났다`);
 });
 
 test('#333 probe(claude): 진행 신호 뒤의 TIMEOUT은 재시도하지 않는다', async () => {
