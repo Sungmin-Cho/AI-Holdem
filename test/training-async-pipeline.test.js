@@ -201,8 +201,10 @@ function makeEvaluate({ delayMs = 0, failTimes = 0, gate = null, calls } = {}) {
     }
     return handleOf(() => {
       const state = readJson(path.join(sessionDir, 'state.json'));
+      // As tools/evaluate-cli.js answers (#319): a hand it cannot read fails; a hand the user
+      // never acted in (a walk) is ok with nothing to evaluate, so its pipeline settles.
+      if (!handRecord(sessionDir, handNo)) return { ok: false, code: 'HAND_NOT_FOUND' };
       const snaps = userDecisions(sessionDir, handNo);
-      if (!snaps.length) return { ok: false, code: 'NO_DECISION' };
       return {
         ok: true,
         evaluations: snaps.map((snap) => cannedEvaluation(snap.decisionId, gameEpochOf(state.sessionToken))),

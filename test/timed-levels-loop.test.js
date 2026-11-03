@@ -179,14 +179,19 @@ async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand =
   let posting = false;
   const sent = new Set();
   let stopping = false;
+  // #319: the fixture stops only on the user's own open turn, where the loop waits on the user.
+  // A stop that lands inside a loop step (a policy decision, a new hand) ends run() with
+  // STOPPING by design, and these tests await run() as a clean end.
+  const openUserTurn = (snap) => snap?.view?.toAct === 'user' && Boolean(snap.view.legal?.decisionId)
+    && !sent.has(snap.view.legal.decisionId);
   const timer = setInterval(async () => {
     if (posting) return;
     posting = true;
     try {
       const snap = readJson(root, 'ui-snapshot.json');
-      if (!stopping && snap.view?.handNo >= stopAtHand) { stopping = true; await loop.requestStop(); return; }
+      if (!stopping && snap.view?.handNo >= stopAtHand && openUserTurn(snap)) { stopping = true; await loop.requestStop(); return; }
       const legal = snap.view?.legal;
-      if (snap.view?.toAct === 'user' && legal?.decisionId && !sent.has(legal.decisionId) && loop.playState !== 'paused' && !control.holdUser) {
+      if (openUserTurn(snap) && loop.playState !== 'paused' && !control.holdUser) {
         const lock = readJson(root, 'lock.json');
         const response = await fetch(`http://127.0.0.1:${lock.port}/api/action`, {method: 'POST', headers: {'content-type': 'application/json'},
           body: JSON.stringify({token: lock.sessionToken, decisionId: legal.decisionId, requestId: randomUUID(), action: legal.canCheck ? 'check' : 'fold'})});
@@ -195,7 +200,16 @@ async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand =
     } catch { /* the relay may be between states */ } finally { posting = false; }
   }, 20);
   t.after(async () => { clearInterval(timer); await loop.requestStop().catch(() => {}); });
-  return {root, loop, clock, control, publishes, attempts, injected, recovery, transport, stop: () => { clearInterval(timer); return loop.requestStop(); }};
+  // With the driver gone the user no longer acts, so the loop comes to the user's open turn and
+  // waits there; a game that ended has none and is stopped as it is.
+  const stop = async () => {
+    clearInterval(timer);
+    for (let i = 0; i < 500 && !openUserTurn(peekJson(root, 'ui-snapshot.json')) && !peekJson(root, 'ui-snapshot.json')?.view?.gameOver; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return loop.requestStop();
+  };
+  return {root, loop, clock, control, publishes, attempts, injected, recovery, transport, stop};
 }
 
 test('CLI and setup carry the level minutes to a tournament', () => {
