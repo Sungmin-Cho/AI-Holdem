@@ -130,9 +130,56 @@ async function transportFailingPublisher(t, {beforeRequest = false} = {}) {
   };
 }
 
+// #319: plays the user's turns (check, else fold) and stops the loop only on the user's own open
+// turn — a decision the driver has not answered — where the loop waits on the user. A stop that
+// lands inside a loop step (a policy decision's engine call, a new hand) ends run() with STOPPING
+// by design, and these tests await run() as a clean end. `stop()` ends the driver first, so the
+// loop comes to that turn and waits there (a game that ended has none); without it within
+// `waitMs` the loop is still stopped, for cleanup, and the stop fails as not clean.
+function userTurnDriver(root, loop, {stopAtHand = Infinity, control = {holdUser: false}} = {}) {
+  const sent = new Set();
+  const openUserTurn = (snap) => snap?.view?.toAct === 'user' && Boolean(snap.view.legal?.decisionId)
+    && !sent.has(snap.view.legal.decisionId);
+  let posting = false;
+  let stopping = false;
+  const timer = setInterval(async () => {
+    if (posting || stopping) return;
+    posting = true;
+    try {
+      const snap = readJson(root, 'ui-snapshot.json');
+      if (snap.view?.handNo >= stopAtHand && openUserTurn(snap)) { stopping = true; await loop.requestStop(); return; }
+      const legal = snap.view?.legal;
+      if (openUserTurn(snap) && loop.playState !== 'paused' && !control.holdUser) {
+        const lock = readJson(root, 'lock.json');
+        const response = await fetch(`http://127.0.0.1:${lock.port}/api/action`, {method: 'POST', headers: {'content-type': 'application/json'},
+          body: JSON.stringify({token: lock.sessionToken, decisionId: legal.decisionId, requestId: randomUUID(), action: legal.canCheck ? 'check' : 'fold'})});
+        if (response.ok) sent.add(legal.decisionId);
+      }
+    } catch { /* the relay may be between states */ } finally { posting = false; }
+  }, 20);
+  const clear = () => clearInterval(timer);
+  const stop = async ({waitMs = 5_000} = {}) => {
+    clear();
+    stopping = true;
+    const ready = () => {
+      const snap = peekJson(root, 'ui-snapshot.json');
+      return openUserTurn(snap) || snap?.view?.gameOver === true;
+    };
+    const deadline = Date.now() + waitMs;
+    while (!ready() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    if (ready()) return loop.requestStop();
+    await loop.requestStop().catch(() => {});
+    throw new Error(`the loop reached no open user turn to stop at within ${waitMs}ms`);
+  };
+  return {clear, stop};
+}
+
 // A timed tournament against one policy AI. Each publish moves the play clock
 // by `stepMs` (fractional on purpose: outside values must stay whole ms).
-async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand = 6, failOnce = null, transportFailOnce = false} = {}) {
+// `engineHook(args, root)` sees every engine CLI call first (a promise holds it); `userOnButton`
+// deals hand 1 with the user on the button.
+async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand = 6, failOnce = null, transportFailOnce = false,
+  engineHook = null, userOnButton = false} = {}) {
   const root = createOwnedTempDir('holdem-timed-loop');
   const clock = {play: 1000.25};
   const control = {holdUser: false};
@@ -146,6 +193,7 @@ async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand =
     port: 0, waitMs: 0, opponentRuntime: 'policy', pace: 'instant', resultHoldSec: 0,
     ...(managed ? {controlProtocolVersion: 1, playClockCheckpointMs: 10} : {}),
     ...(transport ? {publishCliPath: transport.shim} : {}),
+    ...(engineHook ? {onEngineInvoke: (args) => engineHook(args, root)} : {}),
     // Closed fields of the publish recovery records only, for failure messages.
     log: (record) => {
       if (RECOVERY_EVENTS.has(record.event)) recovery.push(Object.fromEntries(RECOVERY_FIELDS.filter((key) => key in record).map((key) => [key, record[key]])));
@@ -176,39 +224,16 @@ async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand =
     },
   }});
   await loop.bootstrap({ai: 1, mode: 'tournament', stack: 20000, levelMinutes: 1, opponentRuntime: 'policy'});
-  let posting = false;
-  const sent = new Set();
-  let stopping = false;
-  // #319: the fixture stops only on the user's own open turn, where the loop waits on the user.
-  // A stop that lands inside a loop step (a policy decision, a new hand) ends run() with
-  // STOPPING by design, and these tests await run() as a clean end.
-  const openUserTurn = (snap) => snap?.view?.toAct === 'user' && Boolean(snap.view.legal?.decisionId)
-    && !sent.has(snap.view.legal.decisionId);
-  const timer = setInterval(async () => {
-    if (posting) return;
-    posting = true;
-    try {
-      const snap = readJson(root, 'ui-snapshot.json');
-      if (!stopping && snap.view?.handNo >= stopAtHand && openUserTurn(snap)) { stopping = true; await loop.requestStop(); return; }
-      const legal = snap.view?.legal;
-      if (openUserTurn(snap) && loop.playState !== 'paused' && !control.holdUser) {
-        const lock = readJson(root, 'lock.json');
-        const response = await fetch(`http://127.0.0.1:${lock.port}/api/action`, {method: 'POST', headers: {'content-type': 'application/json'},
-          body: JSON.stringify({token: lock.sessionToken, decisionId: legal.decisionId, requestId: randomUUID(), action: legal.canCheck ? 'check' : 'fold'})});
-        if (response.ok) sent.add(legal.decisionId);
-      }
-    } catch { /* the relay may be between states */ } finally { posting = false; }
-  }, 20);
-  t.after(async () => { clearInterval(timer); await loop.requestStop().catch(() => {}); });
-  // With the driver gone the user no longer acts, so the loop comes to the user's open turn and
-  // waits there; a game that ended has none and is stopped as it is.
-  const stop = async () => {
-    clearInterval(timer);
-    for (let i = 0; i < 500 && !openUserTurn(peekJson(root, 'ui-snapshot.json')) && !peekJson(root, 'ui-snapshot.json')?.view?.gameOver; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    return loop.requestStop();
-  };
+  if (userOnButton) {
+    // The next deal moves the button one seat on: put it on the seat before the user's.
+    const state = readJson(root, 'state.json');
+    const userIdx = state.seats.findIndex((seat) => seat.playerId === 'user');
+    state.button = (userIdx + state.seats.length - 1) % state.seats.length;
+    fs.writeFileSync(path.join(root, 'state.json'), JSON.stringify(state));
+  }
+  const driver = userTurnDriver(root, loop, {stopAtHand, control});
+  t.after(async () => { driver.clear(); await loop.requestStop().catch(() => {}); });
+  const stop = () => driver.stop();
   return {root, loop, clock, control, publishes, attempts, injected, recovery, transport, stop};
 }
 
@@ -258,6 +283,26 @@ test('a timed tournament rises one level per hand after each level\'s play time'
   if (snap.view && !snap.view.gameOver) {
     assert.deepEqual(snap.levelClock.nextBlinds, blindsForLevel(engine.level + 1, engine.config.blinds0));
   }
+});
+
+// #319: a stop inside an AI step ends run() with STOPPING by design, so the fixture must never
+// stop there. Heads-up, the button acts first preflop: with the user on the button in hand 1 the
+// AI opens hand 6, the stop hand, and every policy decision of that hand is held 500 ms in its
+// engine call. The fixture must let that decision through and stop on the user's turn after it.
+// A driver that stopped on the hand number alone stopped either before the AI's decision (no
+// hold seen) or inside the hold (run() rejected with STOPPING).
+test('#319 the fixture stops on the user\'s open turn, never inside an AI step of the stop hand', {timeout: 120000}, async (t) => {
+  const held = [];
+  const f = await timedFixture(t, {userOnButton: true, engineHook: (args, root) => {
+    if (args[0] !== 'decision-peek') return undefined;
+    const handNo = peekJson(root, 'state.json')?.handNo;
+    if (!(handNo >= 6)) return undefined;
+    held.push(handNo);
+    return new Promise((resolve) => setTimeout(resolve, 500));
+  }});
+  await f.loop.run();
+  assert.ok(held.includes(6), `the fixture stopped before the AI's decision in the stop hand: held ${JSON.stringify(held)}`);
+  assert.ok(handLevels(f.root).length >= 5, JSON.stringify(handLevels(f.root)));
 });
 
 // #319: a real transport failure on a clock-carrying publish sends the loop down its automatic
@@ -387,24 +432,8 @@ test('a resumed timed game restores its play time and never runs the clock back'
     onPublishInvoke: () => { playStart.now += 500; },
   }});
   await resumed.resume();
-  let posting = false;
-  const sent = new Set();
-  const timer = setInterval(async () => {
-    if (posting) return;
-    posting = true;
-    try {
-      const snap = readJson(f.root, 'ui-snapshot.json');
-      if (snap.view?.handNo >= 5) { clearInterval(timer); await resumed.requestStop(); return; }
-      const legal = snap.view?.legal;
-      if (snap.view?.toAct === 'user' && legal?.decisionId && !sent.has(legal.decisionId)) {
-        const lock = readJson(f.root, 'lock.json');
-        const response = await fetch(`http://127.0.0.1:${lock.port}/api/action`, {method: 'POST', headers: {'content-type': 'application/json'},
-          body: JSON.stringify({token: lock.sessionToken, decisionId: legal.decisionId, requestId: randomUUID(), action: legal.canCheck ? 'check' : 'fold'})});
-        if (response.ok) sent.add(legal.decisionId);
-      }
-    } catch { /* between states */ } finally { posting = false; }
-  }, 20);
-  t.after(() => clearInterval(timer));
+  const driver = userTurnDriver(f.root, resumed, {stopAtHand: 5});
+  t.after(() => driver.clear());
   await resumed.run();
   const after = readJson(f.root, 'state.json').levelClock;
   assert.ok(after.playMs >= saved, JSON.stringify({saved, after}));
