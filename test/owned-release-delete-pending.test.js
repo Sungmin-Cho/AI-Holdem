@@ -1041,8 +1041,9 @@ function lockListings(t) {
   const seen = [];
   const hooks = { onListing: null };
   t.mock.method(fs, 'readdirSync', (target, ...rest) => {
+    const names = original(target, ...rest);
     if (path.basename(String(target)) === 'study.lock.d') { seen.push(String(target)); hooks.onListing?.(); }
-    return original(target, ...rest);
+    return names;
   });
   return { seen, hooks };
 }
@@ -1107,6 +1108,17 @@ test('#319 F4: a pid file with a name outside its lock is refused once the recla
   assert.equal(seen.length, 2, 'once with the reclaim\'s name; the read again finds none and stops');
 });
 
+test('#319 F4: a second name beside the pid file that is not a reclaim\'s is refused at once', { timeout: STOP_BUDGET }, async (t) => {
+  const { first, api, pidFile } = await stoppedWithDeadLock(t);
+  const other = path.join(lockPath(first.storeDir), 'pid.other');
+  fs.linkSync(pidFile, other);
+  t.after(() => fs.rmSync(other, { force: true }));
+  const { seen } = lockListings(t);
+  const error = await api.inspectStudyService(first.storeDir).then(() => null, (failure) => failure);
+  assert.match(String(error?.message), /^STUDY_DESCRIPTOR_CORRUPT read:before:nlink$/);
+  assert.equal(seen.length, 1, 'looked once and found no reclaim');
+});
+
 test('#319 F4: only a refusal marked as a pinned reclaim is read again on any platform', async () => {
   const { isPendingReadFailure } = await service();
   const failure = (fields) => Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT read:before:nlink'), { code: 'STUDY_DESCRIPTOR_CORRUPT', ...fields });
@@ -1115,6 +1127,10 @@ test('#319 F4: only a refusal marked as a pinned reclaim is read again on any pl
     assert.equal(isPendingReadFailure(failure({}), platform), false, platform);
   }
   assert.equal(isPendingReadFailure(Object.assign(new Error('x'), { code: 'STUDY_IDENTITY_MISMATCH', reclaimPending: true }), 'linux'), false);
+  const api = await service();
+  for (const reclaimHoldMs of [-1, 1.5, 5001]) {
+    await assert.rejects(api.ensureStudyService(createOwnedTempDir('holdem-reclaim-hold'), { testOptions: { reclaimHoldMs } }), TypeError);
+  }
 });
 
 test('#306: a batch proof that fails leaves no proved set for the next transaction of its scope', async () => {

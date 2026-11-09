@@ -7,7 +7,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, ownedProcessStartTime, parseOwnedLockIdentity, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
+import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, ownedProcessStartTime, parseOwnedLockIdentity, isReclaimAsideName, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
 import { startDrillServer } from './drill-server.js';
 import { lstatExact, fstatExact, plainIdOf } from '../shared/exact-stat.js';
 import { boundedNetworkCall } from './bounded-network-call.js';
@@ -60,11 +60,12 @@ const plainId = plainIdOf;
 const trainingIdentity = (ctx) => createHash('sha256').update(JSON.stringify([
   ctx.training, plainId(ctx.trainingStat?.dev), plainId(ctx.trainingStat?.ino),
 ])).digest('hex');
-function fail(code = 'STUDY_DESCRIPTOR_CORRUPT', detail, fsCode) {
+function fail(code = 'STUDY_DESCRIPTOR_CORRUPT', detail, fsCode, fields) {
   // The code is the contract; the detail only ever reaches logs and stderr.
   // formatStudyError renders from the code alone, so no path reaches a viewer.
   const error = new Error(detail ? `${code} ${detail}` : code); error.code = code;
   if (fsCode) error.fsCode = fsCode;
+  if (fields) Object.assign(error, fields);
   throw error;
 }
 // A file call that answered anything but ENOENT fails the same way, and keeps its errno. A
@@ -393,8 +394,8 @@ function unsafeFile(stat, privateMode, file) {
 function safeFile(stat, privateMode, file) {
   return unsafeFile(stat, privateMode, file) === null;
 }
-function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized = false } = {}) {
-  if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => readPrivate(ctx, file, maxBytes, { privateMode, allowOversized }));
+function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized = false, reclaimInProgress } = {}) {
+  if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => readPrivate(ctx, file, maxBytes, { privateMode, allowOversized, reclaimInProgress }));
   assertContext(ctx);
   const before = statOrNull(file);
   if (!before) return null;
@@ -402,7 +403,8 @@ function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized =
   const refusalOf = (stat) => unsafeFile(stat, privateMode, file) ?? (!allowOversized && stat.size > maxBytes ? 'size' : null);
   const refuse = (stage, refusal) => {
     if (missing()) return null;
-    fail('STUDY_DESCRIPTOR_CORRUPT', `read:${stage}:${refusal}`);
+    fail('STUDY_DESCRIPTOR_CORRUPT', `read:${stage}:${refusal}`, undefined,
+      refusal === 'nlink' && reclaimInProgress?.() ? { reclaimPending: true } : undefined);
   };
   const early = refusalOf(before);
   if (early) return refuse('before', early);
@@ -462,6 +464,14 @@ function vanishedPath(file, before, { directory: asDir = false } = {}) {
   if (asDir ? !after.isDirectory() : !after.isFile()) return true;
   return Boolean(before && !sameInode(before, after));
 }
+// #319 F4: a reclaim hard-links a dead owner's pid file inside the lock directory before it removes
+// the file (engine/state.js detachStalePidFile), so for that moment the file has two names and the
+// link count refuses it. Only the presence of such a name is read here: it makes the refusal a read
+// to judge again (`readSettled`), never a file to accept. A listing that fails is not evidence.
+function hasReclaimAside(lockDir) {
+  try { return fs.readdirSync(lockDir).some(isReclaimAsideName); }
+  catch { return false; }
+}
 function readLock(ctx, parent = false) {
   if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => readLock(ctx, parent));
   assertContext(ctx);
@@ -479,7 +489,7 @@ function readLock(ctx, parent = false) {
     throw error;
   }
   const exact = exactInode(file);
-  const pidFile = readPrivate(ctx, path.join(file, 'pid'), 256, { privateMode: false });
+  const pidFile = readPrivate(ctx, path.join(file, 'pid'), 256, { privateMode: false, reclaimInProgress: () => hasReclaimAside(file) });
   let after;
   try { after = directory(file); }
   catch (error) {
@@ -715,9 +725,12 @@ function optionsForChild(options) {
 // budget's whole milliseconds are gone). Any other failure of a read again is thrown at once.
 // Nothing is decided from a failed read, so no pending name is taken for alive, dead or absent. The
 // bound is a wait policy, not a promise that a release ends inside it.
+// #319 F4: a lock's pid file refused for a second name while a reclaim's aside sits beside it is the
+// same kind of moment, on every platform: read again under the same bound, then refused as before.
 const PENDING_READ_WAIT_MS = 2 * DELETE_PENDING_WAIT_MS;
 export function isPendingReadFailure(error, platform = process.platform) {
-  return platform === 'win32' && error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && error.fsCode === 'EPERM';
+  if (error?.code !== 'STUDY_DESCRIPTOR_CORRUPT') return false;
+  return error.reclaimPending === true || (platform === 'win32' && error.fsCode === 'EPERM');
 }
 export async function readSettled(read, deadline, { platform = process.platform } = {}) {
   let bound = null;
