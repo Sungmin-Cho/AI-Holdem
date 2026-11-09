@@ -1032,6 +1032,91 @@ test('#306: only a Windows EPERM read failure of a study lock is read again', as
   assert.equal(isPendingReadFailure(Object.assign(new Error('x'), { code: 'STUDY_IDENTITY_MISMATCH', fsCode: 'EPERM' }), 'win32'), false);
 });
 
+// #319 F4: a reclaim pins the dead owner's pid file with a hard link in the lock's own directory
+// (engine/state.js detachStalePidFile), so for those moments the file has two names. A client that
+// polls the lock while its service child reclaims it met that as `read:*:nlink` and refused the
+// store. The read is judged again instead; nothing is ever accepted with a second name.
+function lockListings(t) {
+  const original = fs.readdirSync.bind(fs);
+  const seen = [];
+  const hooks = { onListing: null };
+  t.mock.method(fs, 'readdirSync', (target, ...rest) => {
+    if (path.basename(String(target)) === 'study.lock.d') { seen.push(String(target)); hooks.onListing?.(); }
+    return original(target, ...rest);
+  });
+  return { seen, hooks };
+}
+
+async function stoppedWithDeadLock(t) {
+  const first = await launch(t);
+  const api = await service();
+  await api.stopStudyService(first.storeDir, { expectedInstanceId: first.handle.instanceId });
+  await deadOwnedLock(path.join(first.storeDir, '.training'), 'study.lock.d');
+  return { first, api, pidFile: path.join(lockPath(first.storeDir), 'pid') };
+}
+
+test('#319 F4: an ensure whose service child has pinned a dead owner\'s pid file waits for the reclaim and gets that service', { timeout: STOP_BUDGET }, async (t) => {
+  const { first, api, pidFile } = await stoppedWithDeadLock(t);
+  const { seen } = lockListings(t);
+  let pinned = false;
+  const watch = setInterval(() => {
+    try { pinned ||= fs.lstatSync(pidFile).nlink === 2; } catch { /* not there, or pending */ }
+  }, 5);
+  t.after(() => clearInterval(watch));
+  // Longer than a client's poll, its ACL proof included, and well inside the read bound.
+  const reclaimHoldMs = WIN32 ? 2000 : 400;
+  const children = [];
+  // One call, made directly: the launch helper would retry a failed ensure.
+  const handle = await api.ensureStudyService(first.storeDir, {
+    testOptions: { reclaimHoldMs },
+    onChild(child) { child.ref(); children.push(registerOwnedProcess(child, 'study service')); },
+  });
+  t.after(() => api.stopStudyService(first.storeDir, { expectedInstanceId: handle.instanceId }).catch(() => {}));
+  assert.equal(pinned, true, 'the reclaim really gave the pid file a second name');
+  assert.ok(seen.length >= 1, 'the client met the pinned file and looked for its reclaimer');
+  assert.equal(children.length, 1, 'one service child');
+  assert.notEqual(handle.instanceId, first.handle.instanceId);
+  assert.equal((await api.inspectStudyService(first.storeDir)).instanceId, handle.instanceId);
+});
+
+test('#319 F4: a pin that outlasts the read bound is refused by the same check, and nothing is removed', { timeout: STOP_BUDGET }, async (t) => {
+  const { first, api, pidFile } = await stoppedWithDeadLock(t);
+  const aside = path.join(lockPath(first.storeDir), `pid.reclaim.${process.pid}.abcd1234`);
+  fs.linkSync(pidFile, aside);
+  t.after(() => fs.rmSync(aside, { force: true }));
+  const { seen } = lockListings(t);
+  const error = await api.inspectStudyService(first.storeDir).then(() => null, (failure) => failure);
+  assert.equal(error?.code, 'STUDY_DESCRIPTOR_CORRUPT', String(error?.stack ?? error));
+  assert.match(error.message, /^STUDY_DESCRIPTOR_CORRUPT read:before:nlink$/);
+  assert.ok(seen.length >= 2, `the read was tried again before it was refused: ${seen.length}`);
+  assert.equal(fs.lstatSync(pidFile).nlink, 2, 'a reader changes nothing');
+});
+
+test('#319 F4: a pid file with a name outside its lock is refused once the reclaim\'s name has gone', { timeout: STOP_BUDGET }, async (t) => {
+  const { first, api, pidFile } = await stoppedWithDeadLock(t);
+  const aside = path.join(lockPath(first.storeDir), `pid.reclaim.${process.pid}.abcd1234`);
+  const foreign = path.join(first.storeDir, 'pid-second-name');
+  fs.linkSync(pidFile, aside);
+  fs.linkSync(pidFile, foreign);
+  t.after(() => { fs.rmSync(aside, { force: true }); fs.rmSync(foreign, { force: true }); });
+  const { seen, hooks } = lockListings(t);
+  hooks.onListing = () => { hooks.onListing = null; fs.unlinkSync(aside); };
+  const error = await api.inspectStudyService(first.storeDir).then(() => null, (failure) => failure);
+  assert.equal(error?.code, 'STUDY_DESCRIPTOR_CORRUPT', String(error?.stack ?? error));
+  assert.match(error.message, /^STUDY_DESCRIPTOR_CORRUPT read:before:nlink$/);
+  assert.equal(seen.length, 2, 'once with the reclaim\'s name; the read again finds none and stops');
+});
+
+test('#319 F4: only a refusal marked as a pinned reclaim is read again on any platform', async () => {
+  const { isPendingReadFailure } = await service();
+  const failure = (fields) => Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT read:before:nlink'), { code: 'STUDY_DESCRIPTOR_CORRUPT', ...fields });
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    assert.equal(isPendingReadFailure(failure({ reclaimPending: true }), platform), true, platform);
+    assert.equal(isPendingReadFailure(failure({}), platform), false, platform);
+  }
+  assert.equal(isPendingReadFailure(Object.assign(new Error('x'), { code: 'STUDY_IDENTITY_MISMATCH', reclaimPending: true }), 'linux'), false);
+});
+
 test('#306: a batch proof that fails leaves no proved set for the next transaction of its scope', async () => {
   const { withClientAclScope, aclTransaction } = await service();
   const root = createOwnedTempDir('holdem-306-batch-proof');
