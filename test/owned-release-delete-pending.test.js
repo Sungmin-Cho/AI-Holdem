@@ -1039,10 +1039,12 @@ test('#306: only a Windows EPERM read failure of a study lock is read again', as
 function lockListings(t) {
   const original = fs.readdirSync.bind(fs);
   const seen = [];
-  const hooks = { onListing: null };
+  const hooks = { beforeListing: null, onListing: null };
   t.mock.method(fs, 'readdirSync', (target, ...rest) => {
+    const lock = path.basename(String(target)) === 'study.lock.d';
+    if (lock) { seen.push(String(target)); hooks.beforeListing?.(); }
     const names = original(target, ...rest);
-    if (path.basename(String(target)) === 'study.lock.d') { seen.push(String(target)); hooks.onListing?.(); }
+    if (lock) hooks.onListing?.();
     return names;
   });
   return { seen, hooks };
@@ -1058,23 +1060,24 @@ async function stoppedWithDeadLock(t) {
 
 test('#319 F4: an ensure whose service child has pinned a dead owner\'s pid file waits for the reclaim and gets that service', { timeout: STOP_BUDGET }, async (t) => {
   const { first, api, pidFile } = await stoppedWithDeadLock(t);
-  const { seen } = lockListings(t);
-  let pinned = false;
-  const watch = setInterval(() => {
-    try { pinned ||= fs.lstatSync(pidFile).nlink === 2; } catch { /* not there, or pending */ }
-  }, 5);
-  t.after(() => clearInterval(watch));
-  // Longer than a client's poll, its ACL proof included, and well inside the read bound.
-  const reclaimHoldMs = WIN32 ? 2000 : 400;
+  // The child holds its reclaim until the client has met the pin: no timing on either side.
+  const release = path.join(createOwnedTempDir('holdem-reclaim-hold'), 'release');
+  t.after(() => fs.writeFileSync(release, ''));
+  const { hooks } = lockListings(t);
+  let linksWhenMet = null;
+  hooks.onListing = () => {
+    hooks.onListing = null;
+    linksWhenMet = fs.lstatSync(pidFile).nlink;
+    fs.writeFileSync(release, '');
+  };
   const children = [];
   // One call, made directly: the launch helper would retry a failed ensure.
   const handle = await api.ensureStudyService(first.storeDir, {
-    testOptions: { reclaimHoldMs },
+    testOptions: { reclaimHoldFile: release },
     onChild(child) { child.ref(); children.push(registerOwnedProcess(child, 'study service')); },
   });
   t.after(() => api.stopStudyService(first.storeDir, { expectedInstanceId: handle.instanceId }).catch(() => {}));
-  assert.equal(pinned, true, 'the reclaim really gave the pid file a second name');
-  assert.ok(seen.length >= 1, 'the client met the pinned file and looked for its reclaimer');
+  assert.equal(linksWhenMet, 2, 'the client met the file while the reclaim gave it a second name');
   assert.equal(children.length, 1, 'one service child');
   assert.notEqual(handle.instanceId, first.handle.instanceId);
   assert.equal((await api.inspectStudyService(first.storeDir)).instanceId, handle.instanceId);
@@ -1119,6 +1122,77 @@ test('#319 F4: a second name beside the pid file that is not a reclaim\'s is ref
   assert.equal(seen.length, 1, 'looked once and found no reclaim');
 });
 
+// A second name that appears while the read is under way is refused at a later stage of it.
+for (const stage of ['opened', 'after']) {
+  test(`#319 F4: a reclaim that pins the file during the read (${stage}) is read again`, { timeout: STOP_BUDGET }, async (t) => {
+    const { first, api, pidFile } = await stoppedWithDeadLock(t);
+    const aside = path.join(lockPath(first.storeDir), `pid.reclaim.${process.pid}.abcd1234`);
+    t.after(() => fs.rmSync(aside, { force: true }));
+    const pin = () => { if (!fs.existsSync(aside)) fs.linkSync(pidFile, aside); };
+    let pinOnce = pin;
+    const original = { open: fs.openSync.bind(fs), read: fs.readSync.bind(fs) };
+    let pidFd = null;
+    t.mock.method(fs, 'openSync', (file, ...rest) => {
+      const isPid = path.basename(String(file)) === 'pid' && path.basename(path.dirname(String(file))) === 'study.lock.d';
+      if (isPid && stage === 'opened') { pinOnce?.(); pinOnce = null; }
+      const fd = original.open(file, ...rest);
+      if (isPid) pidFd = fd;
+      return fd;
+    });
+    t.mock.method(fs, 'readSync', (fd, ...rest) => {
+      const read = original.read(fd, ...rest);
+      if (stage === 'after' && fd === pidFd) { pinOnce?.(); pinOnce = null; }
+      return read;
+    });
+    const { seen, hooks } = lockListings(t);
+    hooks.onListing = () => { hooks.onListing = null; fs.unlinkSync(aside); };
+    assert.deepEqual(await api.inspectStudyService(first.storeDir), { status: 'stopped' });
+    assert.equal(pinOnce, null, 'the file was pinned during the read');
+    assert.equal(seen.length, 1, 'the refusal looked for the reclaim once');
+  });
+}
+
+test('#319 F4: a reclaim that ends just before the listing is not taken for a foreign name', { timeout: STOP_BUDGET }, async (t) => {
+  for (const [label, finish] of [
+    ['the aside dropped, the file kept', (dir, aside) => { fs.unlinkSync(aside); }],
+    ['the file, the aside and the directory removed', (dir, aside) => { fs.unlinkSync(path.join(dir, 'pid')); fs.unlinkSync(aside); fs.rmdirSync(dir); }],
+  ]) {
+    const { first, api, pidFile } = await stoppedWithDeadLock(t);
+    const dir = lockPath(first.storeDir);
+    const aside = path.join(dir, `pid.reclaim.${process.pid}.abcd1234`);
+    fs.linkSync(pidFile, aside);
+    t.after(() => fs.rmSync(aside, { force: true }));
+    const { seen, hooks } = lockListings(t);
+    hooks.beforeListing = () => { hooks.beforeListing = null; finish(dir, aside); };
+    assert.deepEqual(await api.inspectStudyService(first.storeDir), { status: 'stopped' }, label);
+    assert.ok(seen.length >= 1, label);
+    fs.readdirSync.mock.restore();
+  }
+});
+
+test('#319 F4: a listing that fails is no evidence of a reclaim', { timeout: STOP_BUDGET }, async (t) => {
+  const { first, api, pidFile } = await stoppedWithDeadLock(t);
+  const aside = path.join(lockPath(first.storeDir), `pid.reclaim.${process.pid}.abcd1234`);
+  fs.linkSync(pidFile, aside);
+  t.after(() => fs.rmSync(aside, { force: true }));
+  const { seen, hooks } = lockListings(t);
+  hooks.beforeListing = () => { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); };
+  const error = await api.inspectStudyService(first.storeDir).then(() => null, (failure) => failure);
+  assert.match(String(error?.message), /^STUDY_DESCRIPTOR_CORRUPT read:before:nlink$/);
+  assert.equal(seen.length, 1, 'refused without a read again');
+});
+
+test('#319 F4: a descriptor with a second name is refused at once; only the lock read looks for a reclaim', { timeout: STOP_BUDGET }, async (t) => {
+  const { storeDir, api } = await launch(t);
+  const second = path.join(storeDir, 'descriptor-second-name');
+  fs.linkSync(descriptorPath(storeDir), second);
+  t.after(() => fs.rmSync(second, { force: true }));
+  const { seen } = lockListings(t);
+  const error = await api.inspectStudyService(storeDir).then(() => null, (failure) => failure);
+  assert.match(String(error?.message), /^STUDY_DESCRIPTOR_CORRUPT read:before:nlink$/);
+  assert.equal(seen.length, 0);
+});
+
 test('#319 F4: only a refusal marked as a pinned reclaim is read again on any platform', async () => {
   const { isPendingReadFailure } = await service();
   const failure = (fields) => Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT read:before:nlink'), { code: 'STUDY_DESCRIPTOR_CORRUPT', ...fields });
@@ -1127,9 +1201,16 @@ test('#319 F4: only a refusal marked as a pinned reclaim is read again on any pl
     assert.equal(isPendingReadFailure(failure({}), platform), false, platform);
   }
   assert.equal(isPendingReadFailure(Object.assign(new Error('x'), { code: 'STUDY_IDENTITY_MISMATCH', reclaimPending: true }), 'linux'), false);
-  const api = await service();
-  for (const reclaimHoldMs of [-1, 1.5, 5001]) {
-    await assert.rejects(api.ensureStudyService(createOwnedTempDir('holdem-reclaim-hold'), { testOptions: { reclaimHoldMs } }), TypeError);
+  const { readSettled, ensureStudyService } = await service();
+  const pinned = () => Object.assign(new Error('STUDY_DESCRIPTOR_CORRUPT read:before:nlink'), { code: 'STUDY_DESCRIPTOR_CORRUPT', reclaimPending: true });
+  let reads = 0;
+  assert.equal(await readSettled(() => { reads += 1; if (reads < 3) throw pinned(); return 'read'; }, platformNow() + 10_000, { platform: 'linux' }), 'read');
+  assert.equal(reads, 3);
+  reads = 0;
+  await assert.rejects(readSettled(() => { reads += 1; throw pinned(); }, platformNow() + 80, { platform: 'linux' }), { reclaimPending: true });
+  assert.ok(reads >= 2, 'read again until the call\'s deadline, then refused');
+  for (const reclaimHoldFile of ['relative/path', 5, '']) {
+    await assert.rejects(ensureStudyService(createOwnedTempDir('holdem-reclaim-hold'), { testOptions: { reclaimHoldFile } }), TypeError);
   }
 });
 

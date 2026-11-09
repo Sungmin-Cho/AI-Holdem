@@ -403,8 +403,16 @@ function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized =
   const refusalOf = (stat) => unsafeFile(stat, privateMode, file) ?? (!allowOversized && stat.size > maxBytes ? 'size' : null);
   const refuse = (stage, refusal) => {
     if (missing()) return null;
-    fail('STUDY_DESCRIPTOR_CORRUPT', `read:${stage}:${refusal}`, undefined,
-      refusal === 'nlink' && reclaimInProgress?.() ? { reclaimPending: true } : undefined);
+    let reclaimPending = false;
+    if (refusal === 'nlink' && reclaimInProgress) {
+      reclaimPending = reclaimInProgress();
+      if (!reclaimPending) {
+        // The listing can land just after the reclaim ended: the file is gone, or has one name again.
+        if (missing()) return null;
+        reclaimPending = statOrNull(file)?.nlink === 1;
+      }
+    }
+    fail('STUDY_DESCRIPTOR_CORRUPT', `read:${stage}:${refusal}`, undefined, reclaimPending ? { reclaimPending } : undefined);
   };
   const early = refusalOf(before);
   if (early) return refuse('before', early);
@@ -695,20 +703,20 @@ function optionsForChild(options) {
   if (options.port !== undefined && options.port !== 0) throw new TypeError('study port must be 0');
   const testOptions = options.testOptions ?? {};
   if (!testOptions || typeof testOptions !== 'object' || Array.isArray(testOptions)
-    || Object.keys(testOptions).some((key) => !['idleTimeoutMs','checkpointMs','publishDelayMs','reclaimHoldMs'].includes(key))) throw new TypeError('invalid study test options');
+    || Object.keys(testOptions).some((key) => !['idleTimeoutMs','checkpointMs','publishDelayMs','reclaimHoldFile'].includes(key))) throw new TypeError('invalid study test options');
   const idleTimeoutMs = testOptions.idleTimeoutMs ?? 10 * 60 * 1000;
   const checkpointMs = testOptions.checkpointMs ?? 1000;
   // #256 test seam: hold the first descriptor publish, so a client provably meets the new
   // owner's lock while the previous owner's descriptor is still on disk.
   const publishDelayMs = testOptions.publishDelayMs ?? 0;
-  // #319 F4 test seam: hold the service child's reclaim of a dead owner's lock while its hard link
-  // pins the pid file, so a client provably meets a file with two names.
-  const reclaimHoldMs = testOptions.reclaimHoldMs ?? 0;
+  // #319 F4 test seam: the service child's reclaim of a dead owner's lock waits, with its hard link
+  // pinning the pid file, until this file exists, so a client provably meets a file with two names.
+  const { reclaimHoldFile } = testOptions;
   if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 100 || idleTimeoutMs > 600000
     || !Number.isSafeInteger(checkpointMs) || checkpointMs < 25 || checkpointMs > 1000
     || !Number.isSafeInteger(publishDelayMs) || publishDelayMs < 0 || publishDelayMs > 5000
-    || !Number.isSafeInteger(reclaimHoldMs) || reclaimHoldMs < 0 || reclaimHoldMs > 5000) throw new TypeError('invalid study lifetime');
-  return { idleTimeoutMs, checkpointMs, ...(publishDelayMs && { publishDelayMs }), ...(reclaimHoldMs && { reclaimHoldMs }) };
+    || (reclaimHoldFile !== undefined && (typeof reclaimHoldFile !== 'string' || !path.isAbsolute(reclaimHoldFile)))) throw new TypeError('invalid study lifetime');
+  return { idleTimeoutMs, checkpointMs, ...(publishDelayMs && { publishDelayMs }), ...(reclaimHoldFile && { reclaimHoldFile }) };
 }
 
 // #306: on Windows a name deleted while another process reads it stays pending — before libuv 1.49
@@ -1051,6 +1059,11 @@ function publish(ctx, own, value) {
     markAclDirty();
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
+// The reclaimHoldFile seam: bounded, so a test that died leaves no child waiting for ever.
+function holdUntilFile(file) {
+  const end = Date.now() + 60_000;
+  while (!fs.existsSync(file) && Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+}
 async function runService(storeDir, config, expectedStore, expectedTraining) {
   setProofPhase('runService');
   let ctx;
@@ -1061,8 +1074,8 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
   } finally { setProofPhase(null); }
   // runService is child-only; do not change the caller umask or existing modes.
   process.umask(0o077);
-  const own = acquireOwnedLock(ctx.training, LOCK, config.reclaimHoldMs ? {
-    hooks: { afterLink() { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, config.reclaimHoldMs); } },
+  const own = acquireOwnedLock(ctx.training, LOCK, config.reclaimHoldFile ? {
+    hooks: { afterLink() { holdUntilFile(config.reclaimHoldFile); } },
   } : undefined);
   let server, timer, value, stopping = false, instanceId;
   const parents = new Map();
