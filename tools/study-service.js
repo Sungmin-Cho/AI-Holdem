@@ -408,8 +408,10 @@ function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized =
       reclaimPending = reclaimInProgress();
       if (!reclaimPending) {
         // The listing can land just after the reclaim ended: the file is gone, or has one name again.
-        if (missing()) return null;
-        reclaimPending = statOrNull(file)?.nlink === 1;
+        // One stat answers both, so nothing can change between the two questions.
+        const now = statOrNull(file);
+        if (vanishedStat(now, before)) return null;
+        reclaimPending = now.nlink === 1;
       }
     }
     fail('STUDY_DESCRIPTOR_CORRUPT', `read:${stage}:${refusal}`, undefined, reclaimPending ? { reclaimPending } : undefined);
@@ -466,11 +468,13 @@ function identityStatus(pid, startTime, evidence = null) {
   platformTimeout(WAIT_MS);
   return status;
 }
-function vanishedPath(file, before, { directory: asDir = false } = {}) {
-  const after = statOrNull(file);
+function vanishedStat(after, before, { directory: asDir = false } = {}) {
   if (!after || after.isSymbolicLink()) return true;
   if (asDir ? !after.isDirectory() : !after.isFile()) return true;
   return Boolean(before && !sameInode(before, after));
+}
+function vanishedPath(file, before, options) {
+  return vanishedStat(statOrNull(file), before, options);
 }
 // #319 F4: a reclaim hard-links a dead owner's pid file inside the lock directory before it removes
 // the file (engine/state.js detachStalePidFile), so for that moment the file has two names and the

@@ -1170,6 +1170,19 @@ test('#319 F4: a reclaim that ends just before the listing is not taken for a fo
   }
 });
 
+test('#319 F4: a file that goes while the listing runs is absent, not refused', { timeout: STOP_BUDGET }, async (t) => {
+  const { first, api, pidFile } = await stoppedWithDeadLock(t);
+  const dir = lockPath(first.storeDir);
+  const aside = path.join(dir, `pid.reclaim.${process.pid}.abcd1234`);
+  fs.linkSync(pidFile, aside);
+  t.after(() => fs.rmSync(aside, { force: true }));
+  // The reader lists once with the aside gone; the file and directory go right after that listing.
+  const { hooks } = lockListings(t);
+  hooks.beforeListing = () => { hooks.beforeListing = null; fs.unlinkSync(aside); };
+  hooks.onListing = () => { hooks.onListing = null; fs.unlinkSync(pidFile); fs.rmdirSync(dir); };
+  assert.deepEqual(await api.inspectStudyService(first.storeDir), { status: 'stopped' });
+});
+
 test('#319 F4: a listing that fails is no evidence of a reclaim', { timeout: STOP_BUDGET }, async (t) => {
   const { first, api, pidFile } = await stoppedWithDeadLock(t);
   const aside = path.join(lockPath(first.storeDir), `pid.reclaim.${process.pid}.abcd1234`);
@@ -1206,9 +1219,15 @@ test('#319 F4: only a refusal marked as a pinned reclaim is read again on any pl
   let reads = 0;
   assert.equal(await readSettled(() => { reads += 1; if (reads < 3) throw pinned(); return 'read'; }, platformNow() + 10_000, { platform: 'linux' }), 'read');
   assert.equal(reads, 3);
-  reads = 0;
-  await assert.rejects(readSettled(() => { reads += 1; throw pinned(); }, platformNow() + 80, { platform: 'linux' }), { reclaimPending: true });
-  assert.ok(reads >= 2, 'read again until the call\'s deadline, then refused');
+  // The clock moves only inside a read, so a slow runner's timers cannot change the count.
+  const starts = [];
+  let clock = 0;
+  await assert.rejects(withPlatformDeadline(10_000, () => readSettled(() => {
+    starts.push(platformNow());
+    clock += 40;
+    throw pinned();
+  }, 120, { platform: 'linux' }), { now: () => clock }), { reclaimPending: true });
+  assert.deepEqual(starts, [0, 40, 80], 'read again up to the call\'s deadline and none past it');
   for (const reclaimHoldFile of ['relative/path', 5, '']) {
     await assert.rejects(ensureStudyService(createOwnedTempDir('holdem-reclaim-hold'), { testOptions: { reclaimHoldFile } }), TypeError);
   }
