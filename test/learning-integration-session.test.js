@@ -315,7 +315,14 @@ test('S8 full: default 20-hand production session records support then study rem
       return receipt.requestId === nextStop.requestId && receipt.phase === 'consumed';
     });
     await loop.requestStop();
-    await within(recovering, scaled(8000), 'default20 delivered-action recovery stop');
+    // The receipt turns consumed while the action's publish is still in flight, so the stop can land
+    // before it settles. A publish that then fails is not recovered during a stop (STOPPING, #274), and
+    // run() ends that way by design; the delivered action is what this test is about. (#319)
+    const stopEnded = await within(recovering.then(() => null, (error) => {
+      if (error.code !== 'STOPPING') throw error;
+      return error;
+    }), scaled(8000), 'default20 delivered-action recovery stop');
+    if (stopEnded) diagnostic('recovery-stop-met-publish', stopEnded);
     assert.equal(recoveredUserApplies.length, 1, 'resume applies the delivered action exactly once');
     const recoveredState = JSON.parse(fs.readFileSync(nextStateFile));
     const applied = [recoveredState.hand, recoveredState.lastHand].filter(Boolean)
