@@ -7,7 +7,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, ownedProcessStartTime, parseOwnedLockIdentity, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
+import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, ownedProcessStartTime, parseOwnedLockIdentity, isReclaimAsideName, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
 import { startDrillServer } from './drill-server.js';
 import { lstatExact, fstatExact, plainIdOf } from '../shared/exact-stat.js';
 import { boundedNetworkCall } from './bounded-network-call.js';
@@ -60,11 +60,12 @@ const plainId = plainIdOf;
 const trainingIdentity = (ctx) => createHash('sha256').update(JSON.stringify([
   ctx.training, plainId(ctx.trainingStat?.dev), plainId(ctx.trainingStat?.ino),
 ])).digest('hex');
-function fail(code = 'STUDY_DESCRIPTOR_CORRUPT', detail, fsCode) {
+function fail(code = 'STUDY_DESCRIPTOR_CORRUPT', detail, fsCode, fields) {
   // The code is the contract; the detail only ever reaches logs and stderr.
   // formatStudyError renders from the code alone, so no path reaches a viewer.
   const error = new Error(detail ? `${code} ${detail}` : code); error.code = code;
   if (fsCode) error.fsCode = fsCode;
+  if (fields) Object.assign(error, fields);
   throw error;
 }
 // A file call that answered anything but ENOENT fails the same way, and keeps its errno. A
@@ -393,8 +394,8 @@ function unsafeFile(stat, privateMode, file) {
 function safeFile(stat, privateMode, file) {
   return unsafeFile(stat, privateMode, file) === null;
 }
-function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized = false } = {}) {
-  if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => readPrivate(ctx, file, maxBytes, { privateMode, allowOversized }));
+function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized = false, reclaimInProgress } = {}) {
+  if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => readPrivate(ctx, file, maxBytes, { privateMode, allowOversized, reclaimInProgress }));
   assertContext(ctx);
   const before = statOrNull(file);
   if (!before) return null;
@@ -402,7 +403,18 @@ function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized =
   const refusalOf = (stat) => unsafeFile(stat, privateMode, file) ?? (!allowOversized && stat.size > maxBytes ? 'size' : null);
   const refuse = (stage, refusal) => {
     if (missing()) return null;
-    fail('STUDY_DESCRIPTOR_CORRUPT', `read:${stage}:${refusal}`);
+    let reclaimPending = false;
+    if (refusal === 'nlink' && reclaimInProgress) {
+      reclaimPending = reclaimInProgress();
+      if (!reclaimPending) {
+        // The listing can land just after the reclaim ended: the file is gone, or has one name again.
+        // One stat answers both, so nothing can change between the two questions.
+        const now = statOrNull(file);
+        if (vanishedStat(now, before)) return null;
+        reclaimPending = now.nlink === 1;
+      }
+    }
+    fail('STUDY_DESCRIPTOR_CORRUPT', `read:${stage}:${refusal}`, undefined, reclaimPending ? { reclaimPending } : undefined);
   };
   const early = refusalOf(before);
   if (early) return refuse('before', early);
@@ -456,11 +468,21 @@ function identityStatus(pid, startTime, evidence = null) {
   platformTimeout(WAIT_MS);
   return status;
 }
-function vanishedPath(file, before, { directory: asDir = false } = {}) {
-  const after = statOrNull(file);
+function vanishedStat(after, before, { directory: asDir = false } = {}) {
   if (!after || after.isSymbolicLink()) return true;
   if (asDir ? !after.isDirectory() : !after.isFile()) return true;
   return Boolean(before && !sameInode(before, after));
+}
+function vanishedPath(file, before, options) {
+  return vanishedStat(statOrNull(file), before, options);
+}
+// #319 F4: a reclaim hard-links a dead owner's pid file inside the lock directory before it removes
+// the file (engine/state.js detachStalePidFile), so for that moment the file has two names and the
+// link count refuses it. Only the presence of such a name is read here: it makes the refusal a read
+// to judge again (`readSettled`), never a file to accept. A listing that fails is not evidence.
+function hasReclaimAside(lockDir) {
+  try { return fs.readdirSync(lockDir).some(isReclaimAsideName); }
+  catch { return false; }
 }
 function readLock(ctx, parent = false) {
   if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => readLock(ctx, parent));
@@ -479,7 +501,7 @@ function readLock(ctx, parent = false) {
     throw error;
   }
   const exact = exactInode(file);
-  const pidFile = readPrivate(ctx, path.join(file, 'pid'), 256, { privateMode: false });
+  const pidFile = readPrivate(ctx, path.join(file, 'pid'), 256, { privateMode: false, reclaimInProgress: () => hasReclaimAside(file) });
   let after;
   try { after = directory(file); }
   catch (error) {
@@ -685,16 +707,20 @@ function optionsForChild(options) {
   if (options.port !== undefined && options.port !== 0) throw new TypeError('study port must be 0');
   const testOptions = options.testOptions ?? {};
   if (!testOptions || typeof testOptions !== 'object' || Array.isArray(testOptions)
-    || Object.keys(testOptions).some((key) => !['idleTimeoutMs','checkpointMs','publishDelayMs'].includes(key))) throw new TypeError('invalid study test options');
+    || Object.keys(testOptions).some((key) => !['idleTimeoutMs','checkpointMs','publishDelayMs','reclaimHoldFile'].includes(key))) throw new TypeError('invalid study test options');
   const idleTimeoutMs = testOptions.idleTimeoutMs ?? 10 * 60 * 1000;
   const checkpointMs = testOptions.checkpointMs ?? 1000;
   // #256 test seam: hold the first descriptor publish, so a client provably meets the new
   // owner's lock while the previous owner's descriptor is still on disk.
   const publishDelayMs = testOptions.publishDelayMs ?? 0;
+  // #319 F4 test seam: the service child's reclaim of a dead owner's lock waits, with its hard link
+  // pinning the pid file, until this file exists, so a client provably meets a file with two names.
+  const { reclaimHoldFile } = testOptions;
   if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 100 || idleTimeoutMs > 600000
     || !Number.isSafeInteger(checkpointMs) || checkpointMs < 25 || checkpointMs > 1000
-    || !Number.isSafeInteger(publishDelayMs) || publishDelayMs < 0 || publishDelayMs > 5000) throw new TypeError('invalid study lifetime');
-  return publishDelayMs === 0 ? { idleTimeoutMs, checkpointMs } : { idleTimeoutMs, checkpointMs, publishDelayMs };
+    || !Number.isSafeInteger(publishDelayMs) || publishDelayMs < 0 || publishDelayMs > 5000
+    || (reclaimHoldFile !== undefined && (typeof reclaimHoldFile !== 'string' || !path.isAbsolute(reclaimHoldFile)))) throw new TypeError('invalid study lifetime');
+  return { idleTimeoutMs, checkpointMs, ...(publishDelayMs && { publishDelayMs }), ...(reclaimHoldFile && { reclaimHoldFile }) };
 }
 
 // #306: on Windows a name deleted while another process reads it stays pending — before libuv 1.49
@@ -711,9 +737,12 @@ function optionsForChild(options) {
 // budget's whole milliseconds are gone). Any other failure of a read again is thrown at once.
 // Nothing is decided from a failed read, so no pending name is taken for alive, dead or absent. The
 // bound is a wait policy, not a promise that a release ends inside it.
+// #319 F4: a lock's pid file refused for a second name while a reclaim's aside sits beside it is the
+// same kind of moment, on every platform: read again under the same bound, then refused as before.
 const PENDING_READ_WAIT_MS = 2 * DELETE_PENDING_WAIT_MS;
 export function isPendingReadFailure(error, platform = process.platform) {
-  return platform === 'win32' && error?.code === 'STUDY_DESCRIPTOR_CORRUPT' && error.fsCode === 'EPERM';
+  if (error?.code !== 'STUDY_DESCRIPTOR_CORRUPT') return false;
+  return error.reclaimPending === true || (platform === 'win32' && error.fsCode === 'EPERM');
 }
 export async function readSettled(read, deadline, { platform = process.platform } = {}) {
   let bound = null;
@@ -1034,6 +1063,11 @@ function publish(ctx, own, value) {
     markAclDirty();
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
+// The reclaimHoldFile seam: bounded, so a test that died leaves no child waiting for ever.
+function holdUntilFile(file) {
+  const end = Date.now() + 60_000;
+  while (!fs.existsSync(file) && Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+}
 async function runService(storeDir, config, expectedStore, expectedTraining) {
   setProofPhase('runService');
   let ctx;
@@ -1044,7 +1078,9 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
   } finally { setProofPhase(null); }
   // runService is child-only; do not change the caller umask or existing modes.
   process.umask(0o077);
-  const own = acquireOwnedLock(ctx.training, LOCK);
+  const own = acquireOwnedLock(ctx.training, LOCK, config.reclaimHoldFile ? {
+    hooks: { afterLink() { holdUntilFile(config.reclaimHoldFile); } },
+  } : undefined);
   let server, timer, value, stopping = false, instanceId;
   const parents = new Map();
   let lastActivity = Date.now();

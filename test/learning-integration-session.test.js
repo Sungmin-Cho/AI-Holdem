@@ -285,6 +285,7 @@ test('S8 full: default 20-hand production session records support then study rem
     checkpoint = 'delivered-action-recovery';
     diagnostic('recovery-start');
     const recoveredUserApplies = [];
+    const publishRecovery = [];
     // Windows may still report the just-stopped server PID as alive while
     // startTimeOf is null (probe lag / PID reuse), which resume treats as
     // SERVER_IDENTITY_UNAVAILABLE. Wait until the pid is gone or identifiable.
@@ -296,6 +297,11 @@ test('S8 full: default 20-hand production session records support then study rem
     const makeRecoveryLoop = () => createGameLoop({ gameDir: nextGameDir, lockDir: storeDir,
       resolver: async () => ({ player: null, upper: null, notices: [] }),
       opts: { port: 0, waitMs: 40, storeDir, trainingEnabled: true,
+        // Closed fields only: a refusal logs publish-refused, a transport failure stopped here logs nothing.
+        log(record) {
+          if (!['publish-refused', 'publish-recovery', 'server-recovery-verified', 'server-recovered'].includes(record.event)) return;
+          publishRecovery.push(Object.fromEntries(['event', 'code', 'mode', 'httpStatus', 'serverCode'].filter((key) => key in record).map((key) => [key, record[key]])));
+        },
         onEngineInvoke(args) { if (args[0] === 'step' && args[1] === 'user') recoveredUserApplies.push(args); } } });
     loop = makeRecoveryLoop();
     try {
@@ -315,7 +321,17 @@ test('S8 full: default 20-hand production session records support then study rem
       return receipt.requestId === nextStop.requestId && receipt.phase === 'consumed';
     });
     await loop.requestStop();
-    await within(recovering, scaled(8000), 'default20 delivered-action recovery stop');
+    // The receipt turns consumed while the action's publish is still in flight, so the stop can land
+    // before it settles. A publish that then fails is not recovered during a stop (STOPPING, #274), and
+    // run() ends that way by design; the delivered action is what this test is about. (#319)
+    const stopEnded = await within(recovering.then(() => null, (error) => {
+      if (error.code !== 'STOPPING') throw error;
+      return error;
+    }), scaled(8000), 'default20 delivered-action recovery stop');
+    if (stopEnded) {
+      diagnostic('recovery-stop-met-publish', stopEnded);
+      console.log(`S8_DEFAULT20_PUBLISH_RECOVERY ${JSON.stringify(publishRecovery)}`);
+    }
     assert.equal(recoveredUserApplies.length, 1, 'resume applies the delivered action exactly once');
     const recoveredState = JSON.parse(fs.readFileSync(nextStateFile));
     const applied = [recoveredState.hand, recoveredState.lastHand].filter(Boolean)

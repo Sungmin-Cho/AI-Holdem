@@ -480,7 +480,10 @@ test('REQ-002: summary preserves the profile reader preflop-only learning bounda
 });
 
 test('REQ-010: non-UTC parent and service preserve the existing process identity format', async (t) => {
-  if (skipOnWin32(t, '150ms idle and 50ms checkpoint are below the per-checkpoint proof cost on win32')) return;
+  if (skipOnWin32(t, '50ms checkpoint is below the per-checkpoint proof cost on win32')) return;
+  // The idle window has to outlive the service's start and the client's first request. At 150 ms a
+  // late client met a service already stopped as idle: the CI signature (#320, Linux CI keeps no child
+  // log, so reproduced rather than recorded). The wait proves a live parent holds it past the window.
   const storeDir = createOwnedTempDir('holdem-study-parent-timezone');
   const serviceHref = new URL('../tools/study-service.js', import.meta.url).href;
   const stateHref = new URL('../engine/state.js', import.meta.url).href;
@@ -490,10 +493,10 @@ test('REQ-010: non-UTC parent and service preserve the existing process identity
      const parent=acquireOwnedLock(process.argv[1],'loop.lock.d');let owned,handle;
      try {
        handle=await ensureStudyService(process.argv[1],{parentIdentity:{pid:parent.pid,startTime:parent.startTime},
-         testOptions:{idleTimeoutMs:150,checkpointMs:50},onChild(child){owned=child;child.ref();}});
-       await new Promise(resolve=>setTimeout(resolve,350));
+         testOptions:{idleTimeoutMs:1500,checkpointMs:50},onChild(child){owned=child;child.ref();}});
+       await new Promise(resolve=>setTimeout(resolve,1800));
        const stopped=await stopStudyService(process.argv[1],{expectedInstanceId:handle.instanceId});
-       process.stdout.write(JSON.stringify({stopped:stopped.stopped}));
+       process.stdout.write(JSON.stringify({stopped:stopped.stopped,alreadyStopped:stopped.alreadyStopped===true}));
      } finally {
        releaseOwnedLock(parent);
        if(owned && owned.exitCode===null && owned.signalCode===null) {
@@ -507,7 +510,7 @@ test('REQ-010: non-UTC parent and service preserve the existing process identity
     child.on('close', (code) => resolve({ code, output, error }));
   });
   assert.equal(result.code, 0, `study child must preserve its parent timezone identity\n${result.error}`);
-  assert.deepEqual(JSON.parse(result.output), { stopped: true });
+  assert.deepEqual(JSON.parse(result.output), { stopped: true, alreadyStopped: false }, 'the live parent held the service past its idle window');
   assert.equal(fs.existsSync(descriptorPath(storeDir)), false);
 });
 

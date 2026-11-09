@@ -261,6 +261,8 @@ function unlinkStalePidFileLegacy(dir, expectedPidFile, hooks) {
 
 // 회수자가 stale pid 파일에 붙이는 하드링크 aside. 고유 이름이라 우리만 만들고 우리만 지운다.
 const RECLAIM_ASIDE = /^pid\.reclaim\.(\d+)\.[0-9a-f]{8}$/;
+// A reader that finds a lock's pid file with two names asks this: is the other one a reclaim's?
+export const isReclaimAsideName = (name) => RECLAIM_ASIDE.test(name);
 const LINK_UNSUPPORTED = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'EMLINK']);
 
 function asideNameFor() {
