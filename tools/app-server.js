@@ -490,20 +490,24 @@ export async function startAppServer({
   // last finished result is kept, so a scan that ends after its request answered still reaches the
   // next request; it is reused for `progressFreshMs` while the current game and its state are the same.
   // A scan started under another game or state answers as pending, so the lobby asks again and the
-  // next request reads the current one. Closing the server drops this route's share of its scan.
+  // next request reads the current one; so does a scan this route only joined (another caller of the
+  // reader — the game loop — started it, possibly before the hands just played), and its result is
+  // not reused. Closing the server drops this route's share of its scan.
   // Not listed for the remote host and not on the participant listener.
   const progressWork = { running: null, last: null, closed: false };
   const progressKey = () => { const view = manager.snapshot(); return `${view.gameId ?? ''}:${view.state ?? ''}`; };
   function startProgressScan(key) {
+    const reader = playReport ?? playReportReader(storeDir);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), progressWorkMs);
     timer.unref?.();
-    const work = { key, controller, timer, promise: null };
+    const work = { key, inherited: reader.scanning?.() === true, controller, timer, promise: null };
     work.promise = (async () => {
-      const { report } = await (playReport ?? playReportReader(storeDir)).read({ signal: controller.signal });
+      const { report } = await reader.read({ signal: controller.signal });
       const progress = trainingProgressOf(report);
       if (!progress) throw Object.assign(new Error('PROGRESS_UNAVAILABLE'), { code: 'PROGRESS_UNAVAILABLE' });
-      progressWork.last = { progress, key, at: Date.now() };
+      // A joined scan's result is shown but never matches a key, so the next request reads afresh.
+      progressWork.last = { progress, key: work.inherited ? null : key, at: Date.now() };
       return progress;
     })();
     progressWork.running = work;
@@ -522,7 +526,7 @@ export async function startAppServer({
     try {
       const done = await Promise.race([work.promise.then((progress) => ({ progress })),
         new Promise((resolve) => { timer = setTimeout(resolve, progressWaitMs, null); })]);
-      if (done && work.key === key) json(res, 200, { ok: true, progress: done.progress });
+      if (done && work.key === key && !work.inherited) json(res, 200, { ok: true, progress: done.progress });
       else json(res, 200, { ok: true, progress: progressWork.last?.progress ?? null, pending: true });
     } catch {
       json(res, 503, { code: 'PROGRESS_UNAVAILABLE' });

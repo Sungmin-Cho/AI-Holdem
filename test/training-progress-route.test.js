@@ -10,6 +10,7 @@ import { newDeck } from '../engine/cards.js';
 import { ensureSessionStore } from '../engine/session-catalog.js';
 import { remoteRouteOf, startAppServer } from '../tools/app-server.js';
 import { setHostPassword } from '../tools/app-service.js';
+import { createPlayReportReader } from '../tools/play-report-store.js';
 import { buildPlayReport, emptyGameSummary, playReportView } from '../training/play-report.js';
 import { createOwnedTempDir } from './helpers/owned-fixtures.mjs';
 import { createReplayGame } from './helpers/replay-library-fixture.mjs';
@@ -48,14 +49,16 @@ async function server(t, { reader = null, snapshot = { gameId: null, state: 'lob
   const store = createOwnedTempDir('training-progress');
   ensureSessionStore(store);
   const view = { ...snapshot };
-  const manager = { current: null, snapshot: () => view };
+  // Each request reads the snapshot once for its key: the count tells a test the request has arrived.
+  let snapshots = 0;
+  const manager = { current: null, snapshot: () => { snapshots += 1; return view; } };
   const app = await startAppServer({ manager, token: 'host', storeDir: store, publicPort: 0, ...(reader ? { playReport: reader } : {}), ...options });
   t.after(() => app.close());
   const get = async (headers = {}) => {
     const response = await fetch(app.origin + ROUTE, { headers: { authorization: 'Bearer host', connection: 'close', ...headers } });
     return { status: response.status, body: await response.json() };
   };
-  return { app, store, view, get };
+  return { app, store, view, get, snapshots: () => snapshots };
 }
 const settle = () => new Promise((resolve) => { setImmediate(resolve); });
 const until = async (predicate) => {
@@ -164,18 +167,20 @@ test('a finished result is reused only briefly and only for the same game state;
 
 test('a scan started under another game state answers as pending, so the current state is read next', async (t) => {
   const reader = heldReader();
-  const { get, view } = await server(t, { reader, progressWaitMs: 5000 });
+  const { get, view, snapshots } = await server(t, { reader, progressWaitMs: 5000 });
   const before = get();
   await until(() => reader.scans.length === 1);
   // The game finishes while the scan is still reading: a request now joins the running scan.
   Object.assign(view, { gameId: '00000000-0000-4000-8000-000000000002', state: 'completed' });
+  const seen = snapshots();
   const after = get();
-  await settle();
-  assert.equal(reader.scans.length, 1, 'no overlapping scan');
+  await until(() => snapshots() > seen);
+  assert.equal(reader.scans.length, 1, 'the second request joined the running scan: no overlapping scan');
   reader.scans[0].finish(80);
   const line = '비교 가능한 핸드 80 / 200 (6인 · 100BB · 정책 v3)';
   assert.deepEqual((await before).body, { ok: true, progress: { hands: 80, target: 200, line } }, 'the request it was started for');
   assert.deepEqual((await after).body, { ok: true, progress: { hands: 80, target: 200, line }, pending: true }, 'read under the old state');
+  assert.equal(reader.scans.length, 1, 'answered from the joined scan, not from a scan of its own');
   // The lobby asks again: that request reads the current state.
   const again = get();
   await until(() => reader.scans.length === 2);
@@ -264,4 +269,60 @@ test('recorded games are counted as the play report counts them, and a participa
   assert.deepEqual(answerB, answerA);
   // The same count is what the study room's report shows.
   assert.equal(playReportView(presetReport(3)).progress, answerA.body.progress.line);
+});
+
+// The store's own reader, with a scan another consumer (the game loop's boot) started and holds at a
+// gate after its first hand: games added after it listed the store are not in it.
+function gatedReader(store) {
+  let release;
+  let arrived;
+  const entered = new Promise((resolve) => { arrived = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  let reduced = 0;
+  const reader = createPlayReportReader(store, { yieldTurn: async () => { reduced += 1; if (reduced === 1) { arrived(); await gate; } } });
+  return { reader, entered, release };
+}
+
+test('a scan the game loop started is joined but not trusted: the next request reads the store again', async (t) => {
+  const store = createOwnedTempDir('training-progress-joined');
+  ensureSessionStore(store);
+  presetGame(store, 3);
+  const held = gatedReader(store);
+  t.after(() => held.release());
+  const boot = held.reader.read();                     // the loop's read, without a signal
+  await held.entered;
+  presetGame(store, 2);                                // hands finished after that scan listed the store
+  let snapshots = 0;
+  const app = await startAppServer({ manager: { current: null, snapshot: () => { snapshots += 1; return { gameId: null, state: 'lobby' }; } },
+    token: 'host', storeDir: store, publicPort: 0, playReport: held.reader, progressWaitMs: 60_000 });
+  t.after(() => app.close());
+  const ask = async () => (await fetch(app.origin + ROUTE, { headers: { authorization: 'Bearer host', connection: 'close' } })).json();
+  assert.equal(held.reader.scanning(), true);
+  const seen = snapshots;
+  const joined = ask();
+  // The route reads its key and joins the reader in one turn: once the key is read, it has joined.
+  await until(() => snapshots > seen);
+  held.release();
+  assert.deepEqual(await joined, { ok: true, progress: { hands: 3, target: 200, line: '비교 가능한 핸드 3 / 200 (6인 · 100BB · 정책 v3)' }, pending: true },
+    'the joined scan had not seen the newer game');
+  assert.equal((await boot).report.scope.heroHands, 3);
+  // The lobby asks again: the route reads for itself and finds both games.
+  assert.deepEqual(await ask(), { ok: true, progress: { hands: 5, target: 200, line: '비교 가능한 핸드 5 / 200 (6인 · 100BB · 정책 v3)' } });
+});
+
+test('closing the server while it waits on the loop\'s scan leaves that scan to the loop', async (t) => {
+  const store = createOwnedTempDir('training-progress-close');
+  ensureSessionStore(store);
+  presetGame(store, 3);
+  const held = gatedReader(store);
+  t.after(() => held.release());
+  const boot = held.reader.read();
+  await held.entered;
+  const app = await startAppServer({ manager: { current: null, snapshot: () => ({ gameId: null, state: 'lobby' }) }, token: 'host',
+    storeDir: store, publicPort: 0, playReport: held.reader, progressWaitMs: 20 });
+  const answer = await (await fetch(app.origin + ROUTE, { headers: { authorization: 'Bearer host', connection: 'close' } })).json();
+  assert.deepEqual(answer, { ok: true, progress: null, pending: true });
+  await app.close();
+  held.release();
+  assert.equal((await boot).report.scope.heroHands, 3, 'the loop still gets its whole report');
 });
