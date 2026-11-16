@@ -316,7 +316,8 @@ test('the opponent identity of a policy game is proved by the policy named on ea
 test('an empty or missing store gives an empty report', async () => {
   const empty = await createPlayReportReader(makeStore()).read();
   assert.equal(empty.report.scope.heroHands, 0);
-  assert.deepEqual(empty.view, { focus: [], sections: [] });
+  // No hand yet: only the training preset population's progress line, at zero (#351).
+  assert.deepEqual(empty.view, { focus: [], sections: [], progress: '비교 가능한 핸드 0 / 200 (6인 · 100BB · 정책 v3)' });
   const missing = await createPlayReportReader(path.join(makeStore(), 'absent')).read();
   assert.equal(missing.report.scope.totalGames, 0);
 });

@@ -307,3 +307,5 @@
 .report-rows { display: grid; grid-template-columns: minmax(96px, 34%) 1fr; gap: var(--sp-1) var(--sp-3); margin: var(--sp-2) 0 0; font-size: var(--fs-13); }
 .report-rows dt { color: var(--c-text-2); }
 .report-rows dd { margin: 0; overflow-wrap: anywhere; }
+/* #351: the comparable-hand progress line under the play report's scope. */
+.report-progress { color: var(--c-text); font-weight: 600; }

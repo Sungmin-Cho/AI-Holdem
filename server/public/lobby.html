@@ -39,6 +39,17 @@
             <p class="ui-muted">모드와 AI 플레이어 수를 선택하세요. 실제 금전을 사용하지 않는 연습 게임입니다.</p>
             <p class="lobby-first"><button type="button" id="open-rules" class="ui-btn ui-btn--quiet">처음이신가요? 규칙 둘러보기</button></p>
           </div>
+          <section class="lobby-section training-preset" aria-labelledby="training-preset-title">
+            <div class="training-preset__row">
+              <div class="training-preset__text">
+                <h2 id="training-preset-title" class="ui-label">훈련 세션</h2>
+                <p id="training-preset-desc" class="ui-help">캐시 트레이닝 · 로컬 정책 · 6인 · 100BB · 빠름 · 50핸드로 맞춥니다. 혼자 같은 조건으로 둔 핸드가 쌓여 200핸드부터 학습실 플레이 리포트에 100핸드당 결과가 나옵니다. 핸드 수일 뿐 실력 지표가 아닙니다.</p>
+              </div>
+              <button type="button" id="training-preset" class="ui-btn ui-btn--secondary" aria-pressed="false" aria-describedby="training-preset-desc">훈련 세션으로 맞추기</button>
+            </div>
+            <p id="training-preset-room" class="ui-help" hidden>친구와 함께 플레이 세션을 닫으면 고를 수 있습니다.</p>
+            <p id="training-progress" class="ui-caption training-progress" hidden></p>
+          </section>
           <fieldset class="lobby-section">
             <legend class="ui-label">게임 방식</legend>
             <div class="choice-grid">

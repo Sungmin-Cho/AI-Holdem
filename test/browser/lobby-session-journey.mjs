@@ -19,6 +19,7 @@ export const requiredJourneyChecks = [
   "missing-module-visible-error",
   "bare-lobby-no-init",
   "help-menu-focus-return",
+  "training-preset-selection",
   "mode-ai-selection",
   "deal-bias-selection-restart",
   "pause-resume",
@@ -153,6 +154,38 @@ export async function runLobbyJourney(outDir) {
     const lobbyTargets = await evaluate("[...document.querySelectorAll('#setup button, #setup select, #setup input, #setup summary, .app-header button')].filter(n=>n.getClientRects().length&&getComputedStyle(n).visibility!=='hidden'&&!n.closest('[hidden]')).filter(n=>n.type!=='radio'&&n.type!=='checkbox').map(n=>({id:n.id||n.name||n.className,h:Math.round(n.getBoundingClientRect().height)})).filter(t=>t.h<44)");
     assert.deepEqual(lobbyTargets, [], "every lobby control is a 44px target on a phone");
     await browser(["set", "viewport", "1280", "900"]);
+    // #351: the training preset. From a form that differs from it (chip stack, another hand count and
+    // pace) one click sets the comparable configuration, and changing a field releases it. The progress
+    // line counts this fresh store's comparable hands: none yet. Then the form goes back to exactly the
+    // state the rest of this journey was written for (prefill pace: instant, 20 hands, BB stack).
+    const FORM_STATE = `JSON.stringify(Object.fromEntries([...['cashStackUnit','stackBb','hands','pace','aiCount','opponentRuntime','showdownPolicy','replayReveal','dealBias']
+      .map((name) => [name, document.querySelector('[name=' + name + ']').value]), ['mode', document.querySelector('[name=mode]:checked').value],
+      ['mirrorSelf', document.querySelector('[name=mirrorSelf]').checked], ['exploitSelf', document.querySelector('[name=exploitSelf]').checked]]))`;
+    const pressed = () => evaluate("document.querySelector('#training-preset').getAttribute('aria-pressed')");
+    const initialForm = JSON.parse(await evaluate(FORM_STATE));
+    assert.equal(initialForm.pace, "instant", "fixture: the prefill pace this journey relies on");
+    await wait(() => evaluate("!document.querySelector('#training-progress').hidden"));
+    assert.equal(await evaluate("document.querySelector('#training-progress').textContent"), "비교 가능한 핸드 0 / 200 (6인 · 100BB · 정책 v3)");
+    await evaluate("document.querySelector('.lobby-details').open = true");
+    await browser(["select", "[name=cashStackUnit]", "chips"]);
+    await browser(["fill", 'input[name="hands"]', "30"]);
+    await browser(["select", "[name=pace]", "slow"]);
+    assert.equal(await pressed(), "false");
+    await click("#training-preset");
+    assert.deepEqual(JSON.parse(await evaluate(FORM_STATE)), { cashStackUnit: "bb", stackBb: "100", hands: "50", pace: "fast", aiCount: "5",
+      opponentRuntime: "policy", showdownPolicy: "open", replayReveal: "all", dealBias: "off", mode: "cash-training", mirrorSelf: false, exploitSelf: false });
+    assert.equal(await pressed(), "true");
+    assert.equal(await evaluate("document.querySelector('#cash-chip-field').hidden && !document.querySelector('#cash-bb-field').hidden"), true);
+    assert.match(await evaluate("document.querySelector('#setup-summary').textContent"), /50핸드/);
+    await browser(["screenshot", path.join(outDir, "lobby-training-preset.png")]);
+    await browser(["fill", 'input[name="hands"]', "40"]);
+    await wait(async () => (await pressed()) === "false");
+    await browser(["select", "[name=pace]", initialForm.pace]);
+    await browser(["fill", 'input[name="hands"]', initialForm.hands]);
+    await browser(["select", "[name=cashStackUnit]", initialForm.cashStackUnit]);
+    await evaluate("document.querySelector('.lobby-details').open = false");
+    assert.deepEqual(JSON.parse(await evaluate(FORM_STATE)), initialForm);
+    check("training-preset-selection");
     assert.equal(await evaluate("document.querySelector('[name=dealBias]').value"), "off");
     await browser(["select", "[name=dealBias]", "strong"]);
     await click("#start");
