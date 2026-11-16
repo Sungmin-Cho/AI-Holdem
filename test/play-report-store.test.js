@@ -115,11 +115,14 @@ function gated(store, at) {
   return { reader, entered, release, reduced: () => reduced };
 }
 
-test('callers of one scan wait on their own terms: a deadline holds, and the scan outlives it for the others', async () => {
+test('callers of one scan wait on their own terms: a deadline holds, and the scan outlives it for the others', async (t) => {
   const store = makeStore();
   createReplayGame(store, { aiCount: 2, hands: 3 });
   createReplayGame(store, { aiCount: 2, hands: 3 });
   const held = gated(store, 2);
+  const pair = gated(store, 1);
+  // A failed assertion must not leave a scan suspended at its gate.
+  t.after(() => { held.release(); pair.release(); });
   const boot = held.reader.read();                              // no signal: like the loop's boot scan
   const deadline = new AbortController();
   const review = held.reader.read({ signal: deadline.signal }); // joins the same scan with a deadline
@@ -130,11 +133,11 @@ test('callers of one scan wait on their own terms: a deadline holds, and the sca
   held.release();
   assert.equal((await boot).report.scope.heroHands, 6, 'the caller without a deadline still gets the whole report');
   // Two callers with deadlines: the scan stops only when the last one leaves.
-  const pair = gated(store, 1);
   const a = new AbortController();
   const b = new AbortController();
   const first = pair.reader.read({ signal: a.signal });
   const other = pair.reader.read({ signal: b.signal });
+  first.catch(() => {});
   await pair.entered;
   a.abort();
   await assert.rejects(first, { code: PLAY_REPORT_ABORTED });
@@ -145,24 +148,31 @@ test('callers of one scan wait on their own terms: a deadline holds, and the sca
   assert.equal((await pair.reader.read()).report.scope.heroHands, 6);
 });
 
-test('a read started right after the last caller left gets its own scan and a whole report', async () => {
+test('a read started right after the last caller left gets its own scan, and the old scan unwinding undoes nothing', async (t) => {
   const store = makeStore();
   createReplayGame(store, { aiCount: 2, hands: 3 });
   createReplayGame(store, { aiCount: 2, hands: 3 });
   const held = gated(store, 2);
+  t.after(() => held.release());
   const gone = new AbortController();
   const abandoned = held.reader.read({ signal: gone.signal });
   await held.entered;
   gone.abort();
   await assert.rejects(abandoned, { code: PLAY_REPORT_ABORTED });
-  // The old scan is still held at its gate; the new read must not join it.
-  const replacement = held.reader.read();
-  held.release();                                             // the old scan unwinds and stops
-  const out = await replacement;
+  // The old scan stays held at its gate while the new read runs to its end: it must not join it.
+  const out = await held.reader.read();
   assert.equal(out.report.scope.heroHands, 6);
   assert.equal(out.report.scope.truncated, false);
+  assert.equal(held.reader.cachedGames(), 2);
+  // Now the old scan unwinds (it sees its abort at the next hand) with both games cached.
+  held.release();
+  for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => { setImmediate(resolve); });
+  assert.equal(held.reduced(), 8, 'the old scan reduced nothing after its gate: two hands of its own, six of the new scan');
   assert.equal(held.reader.cachedGames(), 2, 'the unwinding scan did not undo what the new one cached');
-  assert.equal((await held.reader.read()).report.scope.heroHands, 6);
+  const { reader: fresh } = tracked(store);
+  // What the cache holds is what a reader that never saw the old scan computes.
+  const timeless = (report) => ({ ...report, generatedAt: null });
+  assert.deepEqual(timeless((await held.reader.read()).report), timeless((await fresh.read()).report));
 });
 
 test('giving up while a game is being read stops the hand reads', async () => {

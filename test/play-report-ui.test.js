@@ -46,6 +46,10 @@ test('no hands yet, partial reads and text bounds', () => {
   assert.equal(onlyBiased.scope.biasedHands, 12);
   assert.deepEqual(formatPlayReport({ ok: true, report: onlyBiased, view: playReportView(onlyBiased) }), { empty: true, retry: false, focus: [], sections: [],
     scope: '끝난 12핸드가 모두 유리한 딜이라 리포트에서 뺐습니다. 유리한 딜을 끈 게임의 핸드가 쌓이면 여기에 보입니다.' });
+  // Unread records take precedence over the favourable-deal explanation, and offer another read.
+  const both = buildPlayReport([biased], { truncated: true, unreadable: { games: 1, hands: 0 } });
+  assert.deepEqual(formatPlayReport({ ok: true, report: both, view: playReportView(both) }), { empty: true, retry: true, focus: [], sections: [],
+    scope: '플레이 기록을 리포트에 담지 못했습니다 · 읽지 못한 기록: 게임 1 · 핸드 0 · 기록이 많아 일부만 읽었습니다 · 유리한 딜 12핸드 제외' });
   // Beside ordinary games the excluded hands of such a game are still counted.
   const mixed = response();
   const withBiased = buildPlayReport([biased, ...[emptyGameSummary({ gameId: 'g' })].map((game) => { game.hands = 5; game.heroHands = 5; return game; })]);
