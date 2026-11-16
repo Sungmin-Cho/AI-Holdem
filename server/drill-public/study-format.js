@@ -615,16 +615,19 @@ export function formatPlayReport(response) {
   // No hand in the report: either none is finished yet, or none could be read. The
   // second is not an empty store, and reading again may get further.
   const unread = count(scope.unreadableGames) || count(scope.unreadableHands) || scope.truncated === true;
+  // The comparable-hand progress line (#351); a service started before it sends none.
+  const progress = text(response.view.progress, 200);
   if (hands === 0) {
     const scopeText = unread ? ['플레이 기록을 리포트에 담지 못했습니다', ...partial].join(' · ')
       : count(scope.biasedHands) ? `끝난 ${count(scope.biasedHands)}핸드가 모두 유리한 딜이라 리포트에서 뺐습니다. 유리한 딜을 끈 게임의 핸드가 쌓이면 여기에 보입니다.`
         : '끝난 핸드가 쌓이면 여기에 플레이 리포트가 보입니다.';
-    return { empty: true, retry: Boolean(unread), focus: [], sections: [], scope: scopeText };
+    return { empty: true, retry: Boolean(unread), focus: [], sections: [], scope: scopeText, progress };
   }
   return {
     empty: false,
     retry: false,
     scope: [`최근 ${count(scope.games)}게임에서 내가 받은 ${hands}핸드 기준(전체 ${count(scope.totalGames)}게임)`, ...partial].join(' · '),
+    progress,
     focus: response.view.focus.slice(0, 3).map((item) => ({ title: text(item?.title, 80), detail: text(item?.detail, 600) })).filter((item) => item.title),
     sections: response.view.sections.slice(0, 8).map((section) => ({
       title: text(section?.title, 40), note: text(section?.note, 400),

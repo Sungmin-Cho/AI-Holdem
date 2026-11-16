@@ -413,6 +413,7 @@ function paintShell() {
   paintInvite();
   if (!document.body.classList.contains("has-game")) paintContext(null);
   else paintContext(shellBridge.context);
+  watchTrainingProgress();
 }
 function paintBoot() {
   const boot = snapshot.state === "starting" ? snapshot.boot : null;
@@ -845,7 +846,78 @@ function setupFromForm() {
   for (const k of ["mirrorSelf", "exploitSelf"]) setup[k] = data.has(k);
   return setup;
 }
+// Training preset (#351): one click fills existing fields so the game lands in the play report's
+// comparable population (training/play-report.js yardstickKey): solo cash training against the local
+// policy, six-handed at 100BB, no favourable deal and no derived seats, 50 hands at the fast pace.
+// Nothing is stored and no server default changes. "Applied" is computed from the very setup the
+// start button would send, so the two cannot differ; an open session room makes that setup name
+// totalSeats (others may sit down), so the preset is then neither offered nor shown as applied.
+const TRAINING_PRESET = Object.freeze({ mode: "cash-training", opponentRuntime: "policy", aiCount: 5, stackBb: 100, hands: 50,
+  pace: "fast", showdownPolicy: "open", replayReveal: "all", dealBias: "off", mirrorSelf: false, exploitSelf: false });
+function presetMatches() {
+  if (roomIsLive()) return false;
+  const setup = setupFromForm();
+  return !Object.hasOwn(setup, "stack") && !Object.hasOwn(setup, "totalSeats")
+    && Object.entries(TRAINING_PRESET).every(([key, value]) => setup[key] === value);
+}
+function applyTrainingPreset() {
+  if (roomIsLive()) return;
+  for (const radio of form.elements.namedItem("mode")) radio.checked = radio.value === TRAINING_PRESET.mode;
+  // A chip stack would replace stackBb in the request.
+  form.elements.cashStackUnit.value = "bb";
+  for (const key of ["opponentRuntime", "aiCount", "stackBb", "hands", "pace", "showdownPolicy", "replayReveal", "dealBias"])
+    form.elements[key].value = String(TRAINING_PRESET[key]);
+  for (const key of ["mirrorSelf", "exploitSelf"]) form.elements[key].checked = TRAINING_PRESET[key];
+  form.onchange();
+}
+function paintPreset() {
+  const live = roomIsLive();
+  const applied = presetMatches();
+  const button = $("training-preset");
+  button.disabled = live;
+  button.setAttribute("aria-pressed", String(applied));
+  button.textContent = applied ? "훈련 세션 설정 적용됨" : "훈련 세션으로 맞추기";
+  $("training-preset-room").hidden = !live;
+}
+// Comparable-hand progress (#351), from the app's host-only GET /api/training-progress. Asked when the
+// setup screen comes into view (not on every poll or render), one chain at a time; a pending answer
+// (the scan is still running) is asked again a few times while the screen stays. A remote host page
+// does not ask (the route is loopback-only); any failure, an older app service's 404 or an odd answer
+// leaves no line.
+const PROGRESS_RETRY_MS = 5000;
+const PROGRESS_TRIES = 6;
+let progressSeq = 0;
+let progressTries = 0;
+let progressTimer = null;
+let setupShown = false;
+function watchTrainingProgress() {
+  const shown = !$("setup").hidden;
+  if (shown && !setupShown) {
+    progressTries = 0;
+    void askTrainingProgress();
+  }
+  setupShown = shown;
+}
+async function askTrainingProgress() {
+  clearTimeout(progressTimer);
+  progressTimer = null;
+  const seq = ++progressSeq;
+  if (remoteHost) { paintTrainingProgress(null); return; }
+  progressTries += 1;
+  let answer = null;
+  try { answer = await api("/api/training-progress", { timeoutMs: 10000 }); } catch { answer = null; }
+  if (seq !== progressSeq) return;
+  paintTrainingProgress(answer?.progress ?? null);
+  if (answer?.pending === true && progressTries < PROGRESS_TRIES && !$("setup").hidden)
+    progressTimer = setTimeout(() => void askTrainingProgress(), PROGRESS_RETRY_MS);
+}
+function paintTrainingProgress(progress) {
+  const line = typeof progress?.line === "string" ? progress.line.slice(0, 200) : "";
+  $("training-progress").textContent = line;
+  $("training-progress").hidden = !line;
+}
 function updateSetupSummary() {
+  paintPreset();
   $('llm-settings').hidden=form.elements.opponentRuntime.value==='policy';
   $('opponent-help').textContent=OPPONENT_HELP[form.elements.opponentRuntime.value] ?? '';
   const roomSeats=roomIsLive() ? Number($('total-seats')?.value || 6) : null;
@@ -909,6 +981,7 @@ function markFieldError(error) {
   return inputs[0];
 }
 form.addEventListener('input',updateSetupSummary);
+$("training-preset").onclick = applyTrainingPreset;
 form.onsubmit = (e) => {
   e.preventDefault();
   const setup=setupFromForm();

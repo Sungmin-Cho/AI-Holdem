@@ -13,6 +13,8 @@ import { createSessionSummaryCache } from "./session-summary.js";
 import { RelayDenied } from "./relay-access.js";
 import { readHud, readReport, readReveal } from "./host-insights.js";
 import { readSpotChart } from "./drill-cli.js";
+import { playReportReader } from "./play-report-store.js";
+import { trainingProgressOf } from "../training/play-report.js";
 import { rankPlayers } from "../server/public/final-summary.js";
 import { HOST_ID } from "../shared/seat-roles.js";
 import { statExact } from "../shared/exact-stat.js";
@@ -286,6 +288,10 @@ export async function startAppServer({
   summaryCache = createSessionSummaryCache(),
   remoteHost = null,
   tlsReloadMs = 10 * 60 * 1000,
+  playReport = null,
+  progressWaitMs = 2500,
+  progressWorkMs = 60_000,
+  progressFreshMs = 15_000,
 }) {
   if ((tlsCert && !tlsKey) || (!tlsCert && tlsKey)) {
     usage("--tls-cert와 --tls-key는 함께 필요합니다.");
@@ -475,6 +481,50 @@ export async function startAppServer({
     // the answers are not sent.
     if(!currentGame()) {json(res,409,{code:'STALE_GAME'});return;}
     json(res,200,{ok:true,items:served});
+  }
+  // Host-only comparable-hand progress for the lobby's training preset (#351): the play report's
+  // preset-population count (training/play-report.js trainingProgressOf), read through the same
+  // per-process reader the game loop uses. One scan at a time is this route's own: it may run for
+  // `progressWorkMs` (its share is dropped then; a scan another caller still waits on goes on, and
+  // finished games stay cached for the next one), while a request waits only `progressWaitMs`. The
+  // last finished result is kept, so a scan that ends after its request answered still reaches the
+  // next request; it is reused for `progressFreshMs` while the current game and its state are the same.
+  // Not listed for the remote host and not on the participant listener.
+  const progressWork = { running: null, last: null };
+  const progressKey = () => { const view = manager.snapshot(); return `${view.gameId ?? ''}:${view.state ?? ''}`; };
+  function startProgressScan() {
+    const key = progressKey();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), progressWorkMs);
+    timer.unref?.();
+    const run = (async () => {
+      const { report } = await (playReport ?? playReportReader(storeDir)).read({ signal: controller.signal });
+      const progress = trainingProgressOf(report);
+      if (!progress) throw Object.assign(new Error('PROGRESS_UNAVAILABLE'), { code: 'PROGRESS_UNAVAILABLE' });
+      progressWork.last = { progress, key, at: Date.now() };
+      return progress;
+    })();
+    progressWork.running = run;
+    run.catch(() => {}).finally(() => { clearTimeout(timer); if (progressWork.running === run) progressWork.running = null; });
+    return run;
+  }
+  async function serveTrainingProgress(req, res) {
+    if (req.method !== 'GET') { json(res, 405, { code: 'METHOD_NOT_ALLOWED' }); return; }
+    const last = progressWork.last;
+    const fresh = last && last.key === progressKey() && Date.now() - last.at < progressFreshMs;
+    const run = progressWork.running ?? (fresh ? null : startProgressScan());
+    if (!run) { json(res, 200, { ok: true, progress: last.progress }); return; }
+    let timer;
+    try {
+      const done = await Promise.race([run.then((progress) => ({ progress })),
+        new Promise((resolve) => { timer = setTimeout(resolve, progressWaitMs, null); })]);
+      if (done) json(res, 200, { ok: true, progress: done.progress });
+      else json(res, 200, { ok: true, progress: progressWork.last?.progress ?? null, pending: true });
+    } catch {
+      json(res, 503, { code: 'PROGRESS_UNAVAILABLE' });
+    } finally {
+      clearTimeout(timer);
+    }
   }
   const committedCache = new Map();
   const readCommitFile = name => {
@@ -762,6 +812,13 @@ export async function startAppServer({
     if (req.method === "POST" && pathname === "/api/study") {
       const service = await ensureStudyService(storeDir);
       json(res, 200, { url: service.studyUrl });
+      return;
+    }
+    if (pathname === "/api/training-progress") {
+      // Loopback only: remoteRouteOf already answers 404 there; this keeps the reader out of reach
+      // even if the remote allow-list ever changed.
+      if (remote) { json(res, 404, { code: "NOT_FOUND" }); return; }
+      await serveTrainingProgress(req, res);
       return;
     }
     if (req.method === "POST" && pathname === "/api/stop") {

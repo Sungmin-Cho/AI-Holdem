@@ -12,6 +12,7 @@
 import { closureOf, handFacts } from '../shared/decision-facts.js';
 import { cardInt, scoreCards, seedFrom, xorshift32 } from '../shared/poker-eval.js';
 import { evaluatePreflopReferenceV3 } from './preflop-reference-v3.js';
+import { VERSION_V3 } from './policies/contracts.js';
 
 export const PLAY_REPORT_SCHEMA = 1;
 const HERO = 'user';
@@ -21,6 +22,9 @@ export const SESSION_ROWS = 12;
 export const ALLIN_SAMPLES = 3000;
 /** Hands before a per-100 figure is shown for comparable fixed-policy cash play. */
 export const YARDSTICK_MIN_HANDS = 200;
+/** The comparable population the lobby's training preset plays into: six-handed at 100BB against the
+ * current local policy (the version a v3 policy game records on every AI action). */
+export const TRAINING_PRESET_YARDSTICK = Object.freeze({ seats: 6, stackBb: 100, policy: VERSION_V3 });
 const STREETS = ['flop', 'turn', 'river'];
 const TABLES = ['2', '3-4', '5-6', '7-9'];
 const GROUPS = Object.freeze({ 'rfi-unopened': 'rfi', 'vs-single-raise': 'vs-open', 'vs-3bet': 'vs-3bet', push: 'push', 'vs-shove': 'vs-shove' });
@@ -463,7 +467,22 @@ function segmentRows(summaries) {
     const half = 1.96 * 100 * Math.sqrt(variance / row.hands);
     const { netBb: net, adjBb: unused, ...rest } = row;
     return { ...rest, per100: { net: (100 * net) / row.hands, adjusted: 100 * mean, low: 100 * mean - half, high: 100 * mean + half } };
-  }).sort((a, b) => b.hands - a.hands);
+  // The preset population leads, so a display that keeps only the first rows still has it.
+  }).sort((a, b) => Number(isPresetYardstick(b.yardstick)) - Number(isPresetYardstick(a.yardstick)) || b.hands - a.hands);
+}
+
+const isPresetYardstick = (yardstick) => Boolean(yardstick) && yardstick.seats === TRAINING_PRESET_YARDSTICK.seats
+  && yardstick.stackBb === TRAINING_PRESET_YARDSTICK.stackBb && yardstick.policy === TRAINING_PRESET_YARDSTICK.policy;
+
+// How far each comparable population is from its per-100 figure, read off the segments (which
+// yardstickKey already grouped): the preset population first, at zero when nothing was played in it,
+// then the other comparable populations still short of the limit. Counts only, no result.
+function progressOf(segments) {
+  const rows = segments.filter((row) => row.yardstick)
+    .map((row) => ({ ...row.yardstick, games: row.games, hands: row.hands, preset: isPresetYardstick(row.yardstick) }));
+  const preset = rows.find((row) => row.preset) ?? { ...TRAINING_PRESET_YARDSTICK, games: 0, hands: 0, preset: true };
+  const others = rows.filter((row) => !row.preset && row.hands < YARDSTICK_MIN_HANDS).sort((a, b) => b.hands - a.hands);
+  return { target: YARDSTICK_MIN_HANDS, rows: [preset, ...others] };
 }
 
 // Attention-routing heuristics over the window, not statistical findings: each
@@ -565,7 +584,7 @@ export function buildPlayReport(summaries, { now = null, unreadable = { games: 0
       callBelowPrice: listed('callBelowPrice'),
       foldAbovePrice: listed('foldAbovePrice'),
     },
-    results: { segments: segmentRows(games) },
+    results: (() => { const segments = segmentRows(games); return { segments, progress: progressOf(segments) }; })(),
     sessions: windowGames.slice(0, SESSION_ROWS).map(sessionRow),
     focus: focusOf(windowed, windowGames[0] ?? null, windowGames.length > 1 ? mergeGameSummaries(windowGames.slice(1)) : null),
   };
@@ -583,6 +602,37 @@ const OPPONENT_KO = { policy: '로컬 정책', llm: 'LLM', jev: 'JEV', unknown: 
 const UNSUPPORTED_KO = { LIMP_OR_CALLER: '앞에 림프·콜이 있는 팟', MID_STACK_UNSUPPORTED: '15.5~25BB 스택', STACK_OUT_OF_RANGE: '스택 범위 밖',
   FOUR_BET_PLUS: '4벳 이상', FACING_ALLIN_UNMODELED: '깊은 스택 올인 직면', DATASET_SPOT_MISSING: '기준표에 없는 자리',
   SEAT_COUNT_UNSUPPORTED: '좌석 수 미지원', FACING_SIZE_OUT_OF_RANGE: '상대 레이즈 크기 범위 밖', FORCED_STACK: '1BB 이하 스택' };
+
+// "3.0.0" reads as v3, "2.2.0" as v2.2; anything else as written, bounded.
+function policyKo(policy) {
+  const match = typeof policy === 'string' ? /^(\d{1,4})\.(\d{1,4})\.(\d{1,4})$/.exec(policy) : null;
+  if (!match) return `정책 ${String(policy ?? '').slice(0, 40)}`;
+  const [, major, minor, patch] = match;
+  return `정책 v${patch !== '0' ? `${major}.${minor}.${patch}` : minor !== '0' ? `${major}.${minor}` : major}`;
+}
+
+// The progress line of the preset population: a count of comparable hands with their conditions,
+// not a measure of skill. A partial read can only have missed hands, so it says the count may be low.
+function progressLineKo(report) {
+  const progress = report.results?.progress;
+  const row = progress?.rows?.[0];
+  if (!isObject(row) || !Number.isSafeInteger(row.hands) || !Number.isSafeInteger(progress.target)) return '';
+  const conditions = `${row.seats}인 · ${row.stackBb}BB · ${policyKo(row.policy)}`;
+  const line = row.hands < progress.target ? `비교 가능한 핸드 ${row.hands} / ${progress.target} (${conditions})`
+    : `비교 가능한 핸드 ${row.hands} (${conditions}) · 100핸드당 수치는 플레이 리포트의 '결과와 운'에 있습니다`;
+  const scope = report.scope ?? {};
+  const partial = scope.truncated === true || scope.unreadableGames > 0 || scope.unreadableHands > 0;
+  return partial ? `${line} · 읽지 못한 기록이 있어 실제보다 적을 수 있습니다` : line;
+}
+
+/** The lobby's closed view of the preset population's progress: { hands, target, line }, or null. */
+export function trainingProgressOf(report) {
+  if (!isObject(report) || report.schemaVersion !== PLAY_REPORT_SCHEMA) return null;
+  const progress = report.results?.progress;
+  const row = progress?.rows?.[0];
+  if (!isObject(row) || row.preset !== true || !Number.isSafeInteger(row.hands) || !Number.isSafeInteger(progress.target)) return null;
+  return { hands: row.hands, target: progress.target, line: progressLineKo(report) };
+}
 
 // "직전 게임 2/5, 그 전 3/8" — the two sides never share a hand; a side without
 // opportunities is left out, and with neither the comparison is not available.
@@ -608,9 +658,12 @@ const FOCUS_KO = {
 };
 const PRICE_MARGIN_TEXT = '10%p';
 
-/** Display rows: { focus: [{id,title,detail}], sections: [{id,title,note,rows:[{label,value}]}] }. */
+/** Display rows: { focus: [{id,title,detail}], sections: [{id,title,note,rows:[{label,value}]}], progress }.
+ * `progress` is the preset population's line, there even before any hand is played. */
 export function playReportView(report) {
-  if (!isObject(report) || report.schemaVersion !== PLAY_REPORT_SCHEMA || !(report.scope.heroHands > 0)) return { focus: [], sections: [] };
+  if (!isObject(report) || report.schemaVersion !== PLAY_REPORT_SCHEMA) return { focus: [], sections: [] };
+  const progress = progressLineKo(report);
+  if (!(report.scope.heroHands > 0)) return { focus: [], sections: [], progress };
   const t = report.tendency;
   const sections = [];
   const tables = t.tables.filter((row) => row.hands > 0).map((row) => ({ label: `${TABLE_KO[row.table]} · ${row.hands}핸드`,
@@ -659,12 +712,12 @@ export function playReportView(report) {
       { label: '최소 크기 레이즈', value: c.raises ? `레이즈 ${c.raises}번 중 ${c.minRaises}번` : '기록 없음' },
       { label: '탑페어 미만으로 스택 투입', value: `${c.weakStackOff.count}번${hands(c.weakStackOff)}` }] });
   const segments = report.results.segments.map((row) => {
-    const who = row.yardstick ? `${row.yardstick.seats}인 ${row.yardstick.stackBb}BB · 혼자 · ${OPPONENT_KO[row.opponent]}` : OPPONENT_KO[row.opponent];
+    const who = row.yardstick ? `${row.yardstick.seats}인 ${row.yardstick.stackBb}BB · 혼자 · 로컬 ${policyKo(row.yardstick.policy)}` : OPPONENT_KO[row.opponent];
     const head = `${MODE_KO[row.mode]} · ${who} · ${row.games}게임 ${row.hands}핸드`;
     const luck = row.allIns ? `런아웃을 조정한 올인 ${row.allIns}번의 운 ${bbText(row.luckBb)}` : '조정한 올인 없음';
     const hidden = row.unrevealed ? ` · 공개되지 않은 패가 있어 조정하지 않은 올인 ${row.unrevealed}번` : '';
     const per100 = row.per100 ? ` · 100핸드당 ${bbText(row.per100.net)}, 런아웃 운을 뺀 값 ${bbText(row.per100.adjusted)} (핸드를 독립 표본으로 본 근사 95% 구간 ${bbText(row.per100.low)} ~ ${bbText(row.per100.high)})`
-      : row.yardstick ? ` · 100핸드당 수치는 ${YARDSTICK_MIN_HANDS}핸드부터 냅니다` : '';
+      : row.yardstick ? ` · 비교 가능한 핸드 ${row.hands} / ${YARDSTICK_MIN_HANDS} — ${YARDSTICK_MIN_HANDS}핸드가 되면 100핸드당 수치를 냅니다` : '';
     return { label: head, value: `${luck}${hidden}${per100}` };
   });
   if (segments.length) {
@@ -678,7 +731,7 @@ export function playReportView(report) {
       row.closedCalls ? `닫힌 콜 ${row.closedCalls}번 중 필요 승률 미달 ${row.callBelowPrice}` : null,
       row.luckBb === null ? null : `올인 운 ${bbText(row.luckBb)}`].filter(Boolean).join(' · ') }));
   if (sessions.length) sections.push({ id: 'sessions', title: '게임별 추이', note: '최근 게임부터입니다. 게임마다 인원·스택 구성이 달라 값이 그대로 비교되지는 않습니다.', rows: sessions });
-  return { focus: report.focus.map((item) => ({ id: item.id, ...(FOCUS_KO[item.id]?.(item) ?? {}) })).filter((item) => item.title), sections };
+  return { focus: report.focus.map((item) => ({ id: item.id, ...(FOCUS_KO[item.id]?.(item) ?? {}) })).filter((item) => item.title), sections, progress };
 }
 
 /** Lines for one game's own checks (the host's in-game report and the machine

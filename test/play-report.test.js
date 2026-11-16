@@ -6,9 +6,10 @@ import { CANONICAL_REFERENCE_SOURCE, coachingClaimAllowed, referenceClaimAllowed
 import { loadReferenceDataset } from '../tools/preflop-dataset.js';
 import { decisionFacts } from '../tools/review-facts.js';
 import {
-  SHORT_STACK_BB, WINDOW_HERO_HANDS, YARDSTICK_MIN_HANDS, addGameSummary, allInExpectation, buildPlayReport, emptyGameSummary, focusLinesKo,
-  gameCheckLinesKo, playReportView, summarizeGame, vpipBand, yardstickKey,
+  SHORT_STACK_BB, TRAINING_PRESET_YARDSTICK, WINDOW_HERO_HANDS, YARDSTICK_MIN_HANDS, addGameSummary, allInExpectation, buildPlayReport, emptyGameSummary,
+  focusLinesKo, gameCheckLinesKo, playReportView, summarizeGame, trainingProgressOf, vpipBand, yardstickKey,
 } from '../training/play-report.js';
+import { VERSION_V3 } from '../training/policies/contracts.js';
 import { toProcessReview } from '../training/process-review.js';
 import { lookup } from '../training/providers/preflop-json.js';
 import { handClassOf } from '../training/cards.js';
@@ -372,7 +373,7 @@ test('every display line is within the coaching wording contract', () => {
   assert.equal(gameCheckLinesKo(game).length, 4);
   assert.equal(focusLinesKo(report).length, 3);
   assert.deepEqual(gameCheckLinesKo(gameWith({})), []);
-  assert.deepEqual(playReportView(buildPlayReport([])), { focus: [], sections: [] });
+  assert.deepEqual(playReportView(buildPlayReport([])), { focus: [], sections: [], progress: '비교 가능한 핸드 0 / 200 (6인 · 100BB · 정책 v3)' });
 });
 
 test('the reference bands are the review bands', () => {
@@ -405,4 +406,81 @@ test('a malformed hand is skipped and forced, foreign or favourable-deal input i
   assert.equal(skipped.results.hands, 1);
   const off = { ...hand, replay: { ...hand.replay, dealSelectionContractVersion: 1, dealSelection: { schemaVersion: 1, algorithmVersion: 'weighted-holes-v1', mode: 'off' } } };
   assert.equal(summarizeGame(meta(), [off], options).biasedHands, 0);
+});
+
+test('comparable hands show their progress toward the per-100 figure, the training preset population first', () => {
+  assert.deepEqual(TRAINING_PRESET_YARDSTICK, { seats: 6, stackBb: 100, policy: VERSION_V3 });
+  assert.equal(VERSION_V3, '3.0.0', 'the version a v3 policy game records on every AI action');
+  const preset = { ...cashMeta, policy: VERSION_V3 };
+  let n = 0;
+  const cash = (over = {}, hands = 50) => gameWith({ ...preset, gameId: `cash-${n += 1}`, heroHands: hands, ...over }, (summary) => {
+    summary.results = { hands, netBb: hands / 2, adjBb: hands / 5, adjSqBb: hands * 25.04, allIns: 0, luckBb: 0, unrevealed: 0 };
+    if (over.biasedHands) summary.biasedHands = over.biasedHands;
+  });
+  // Nothing played yet: the preset population is still named, at zero.
+  const empty = buildPlayReport([]);
+  assert.deepEqual(empty.results.progress, { target: YARDSTICK_MIN_HANDS,
+    rows: [{ seats: 6, stackBb: 100, policy: '3.0.0', games: 0, hands: 0, preset: true }] });
+  assert.equal(playReportView(empty).progress, '비교 가능한 핸드 0 / 200 (6인 · 100BB · 정책 v3)');
+  assert.deepEqual(trainingProgressOf(empty), { hands: 0, target: 200, line: '비교 가능한 핸드 0 / 200 (6인 · 100BB · 정책 v3)' });
+
+  // Two preset games, a nine-handed v3 game, an older-policy game past the limit, and games
+  // yardstickKey leaves out: another human, a derived seat (no single fixed policy), a favourable
+  // deal, an LLM table, a tournament. Only the first two add to the preset count.
+  const excluded = [cash({ solo: false }, 70), cash({ policy: null }, 70), cash({ biasedHands: 1 }, 70),
+    cash({ opponent: 'llm' }, 70), cash({ mode: 'tournament' }, 70)];
+  for (const game of excluded) assert.equal(yardstickKey(game), null);
+  const games = [cash({}, 50), cash({}, 30), cash({ seats: 9 }, 40), cash({ policy: '2.2.0' }, 250), cash({ policy: '3.1.0' }, 20), ...excluded];
+  const report = buildPlayReport(games);
+  assert.deepEqual(report.results.progress, { target: 200, rows: [
+    { seats: 6, stackBb: 100, policy: '3.0.0', games: 2, hands: 80, preset: true },
+    { seats: 9, stackBb: 100, policy: '3.0.0', games: 1, hands: 40, preset: false },
+    { seats: 6, stackBb: 100, policy: '3.1.0', games: 1, hands: 20, preset: false },
+  ] }, 'a population past the limit has its per-100 figure instead of a progress row');
+  const view = playReportView(report);
+  assert.equal(view.progress, '비교 가능한 핸드 80 / 200 (6인 · 100BB · 정책 v3)');
+  assert.deepEqual(trainingProgressOf(report), { hands: 80, target: 200, line: view.progress });
+  const results = view.sections.find((section) => section.id === 'results').rows;
+  const rowOf = (label) => results.find((row) => row.label.startsWith(label));
+  // Each comparable population names its policy version: two versions at one table size are two rows.
+  assert.match(rowOf('캐시 트레이닝 · 6인 100BB · 혼자 · 로컬 정책 v3 · 2게임 80핸드').value, / · 비교 가능한 핸드 80 \/ 200 — 200핸드가 되면 100핸드당 수치를 냅니다$/);
+  assert.match(rowOf('캐시 트레이닝 · 9인 100BB · 혼자 · 로컬 정책 v3 · 1게임 40핸드').value, /비교 가능한 핸드 40 \/ 200/);
+  assert.match(rowOf('캐시 트레이닝 · 6인 100BB · 혼자 · 로컬 정책 v3.1 · 1게임 20핸드').value, /비교 가능한 핸드 20 \/ 200/);
+  assert.match(rowOf('캐시 트레이닝 · 6인 100BB · 혼자 · 로컬 정책 v2.2 · 1게임 250핸드').value, /100핸드당/);
+  assert.doesNotMatch(rowOf('캐시 트레이닝 · 6인 100BB · 혼자 · 로컬 정책 v2.2 · 1게임 250핸드').value, /비교 가능한 핸드/);
+  for (const row of results.filter((row) => !row.label.includes('혼자'))) assert.doesNotMatch(row.value, /비교 가능한 핸드|100핸드당/, row.label);
+  assert.ok(!results.some((row) => /200핸드부터 냅니다/.test(row.value)), 'the old wording is gone');
+
+  // Past the limit the preset row stays first and says where the figure is.
+  const done = buildPlayReport([cash({}, 230)]);
+  assert.equal(done.results.segments[0].per100 === null, false);
+  assert.deepEqual(done.results.progress.rows, [{ seats: 6, stackBb: 100, policy: '3.0.0', games: 1, hands: 230, preset: true }]);
+  assert.equal(playReportView(done).progress, "비교 가능한 핸드 230 (6인 · 100BB · 정책 v3) · 100핸드당 수치는 플레이 리포트의 '결과와 운'에 있습니다");
+  assert.deepEqual(trainingProgressOf(done), { hands: 230, target: 200, line: playReportView(done).progress });
+
+  // A partial read can only have missed comparable hands: the line says the count may be low.
+  for (const options of [{ truncated: true }, { unreadable: { games: 1, hands: 0 } }, { unreadable: { games: 0, hands: 3 } }]) {
+    const partial = buildPlayReport([cash({}, 50)], options);
+    assert.equal(playReportView(partial).progress, '비교 가능한 핸드 50 / 200 (6인 · 100BB · 정책 v3) · 읽지 못한 기록이 있어 실제보다 적을 수 있습니다');
+    assert.equal(trainingProgressOf(partial).line, playReportView(partial).progress);
+  }
+  // Policy names: a whole version reads as its major number, others as written (bounded).
+  const named = (policy) => playReportView(buildPlayReport([cash({ policy, seats: 9 }, 10)])).sections.find((section) => section.id === 'results').rows[0].label;
+  assert.equal(named('1.0.0'), '캐시 트레이닝 · 9인 100BB · 혼자 · 로컬 정책 v1 · 1게임 10핸드');
+  assert.equal(named('2.2.1'), '캐시 트레이닝 · 9인 100BB · 혼자 · 로컬 정책 v2.2.1 · 1게임 10핸드');
+  assert.equal(named('strategy-v3@3.0.0'), '캐시 트레이닝 · 9인 100BB · 혼자 · 로컬 정책 strategy-v3@3.0.0 · 1게임 10핸드');
+  assert.equal(named(`p${'x'.repeat(100)}`), `캐시 트레이닝 · 9인 100BB · 혼자 · 로컬 정책 p${'x'.repeat(39)} · 1게임 10핸드`);
+  // Every new line keeps the wording contract.
+  const lines = [view.progress, playReportView(done).progress, playReportView(buildPlayReport([cash({}, 50)], { truncated: true })).progress,
+    ...results.map((row) => row.value)];
+  for (const line of lines) {
+    assert.ok(line.length > 0 && !/undefined|NaN|null/.test(line), line);
+    assert.equal(referenceClaimAllowed(line), true, line);
+    assert.equal(coachingClaimAllowed(line), true, line);
+    assert.equal(sanitizeCoachingText(line).removed, 0, line);
+  }
+  // The lobby's DTO is closed: no per-100 or net result rides along.
+  assert.deepEqual(Object.keys(trainingProgressOf(report)).sort(), ['hands', 'line', 'target']);
+  assert.equal(trainingProgressOf(null), null);
+  assert.equal(trainingProgressOf({ schemaVersion: 99 }), null);
 });
