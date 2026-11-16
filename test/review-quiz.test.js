@@ -26,6 +26,12 @@ test('candidates are the game\'s own compared preflop spots, the ones that diffe
   assert.equal(rows[0].title, '핸드 5');
   assert.equal(rows[0].key, '6max-100bb-btn-vs-utg-open-v3:KTo');
   assert.equal(Object.hasOwn(rows[0], 'order'), false);
+  // The same spot and hand played well first and badly later: the later one is the question.
+  const repeated = quizCandidates([
+    item({ handNo: 1, grade: 'preferred', chosen: { action: 'fold' } }),
+    item({ handNo: 8, grade: 'off-policy', chosen: { action: 'call' } }),
+  ]);
+  assert.deepEqual(repeated.map((row) => [row.handNo, row.chosen]), [[8, 'call']]);
   const many = Array.from({ length: 9 }, (_, at) => item({ handNo: at + 1, handClass: `A${'23456789T'[at]}o` }));
   assert.equal(quizCandidates(many).length, QUIZ_LIMIT);
   assert.deepEqual(quizCandidates('x'), []);

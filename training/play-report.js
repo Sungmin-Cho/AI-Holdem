@@ -132,8 +132,11 @@ function inspectDecision(decision, verdict = null) {
       if (eff <= SHORT_STACK_BB) {
         if (action !== 'fold') {
           out.shortEntry = true;
-          // A call for the whole stack is all-in, not a limp.
-          if ((action === 'call' && decision.toCall < hero.stack) || (raise && amount < decision.maxRaiseTo)) out.patterns.push('short-non-all-in');
+          // A call for the whole stack is all-in, not a limp; a raise that covers every
+          // opponent's stack puts all of theirs at risk, whatever hero keeps behind.
+          const cover = Math.max(...decision.publicSeats
+            .filter((seat) => seat.playerId !== decision.actorId && !seat.folded && !seat.out).map((seat) => seat.stack + seat.bet));
+          if ((action === 'call' && decision.toCall < hero.stack) || (raise && amount < Math.min(decision.maxRaiseTo, cover))) out.patterns.push('short-non-all-in');
         }
       } else if (decision.position !== 'SB') {
         out.unopenedDeep = true;
@@ -243,10 +246,10 @@ function addFrequencies(summary, replay) {
       }
     }
   }
-  const foldedPreflop = preflop.some((row) => row.action === 'fold');
-  const acted = mine.some((row) => STREETS.includes(row.street));
-  // A hand hero was all-in in before the flop is not a hand hero "went to showdown" with.
-  const sawFlop = replay.board.length >= 3 && !foldedPreflop && (acted || !replay.allIn.includes(HERO));
+  // A flop hero saw is one hero had a turn on, the clock's actions included. A hand
+  // whose betting ended before the flop (hero all-in, or hero covering an all-in)
+  // only runs out: it is not a hand hero "went to showdown" with.
+  const sawFlop = replay.board.length >= 3 && actions.some((row) => row.playerId === HERO && STREETS.includes(row.street));
   if (sawFlop) {
     post.wtsd.n += 1;
     const shown = replay.showdown !== null && !replay.folded.includes(HERO);
@@ -354,7 +357,7 @@ function addResult(summary, replay, seed) {
 
 /** hands: [{ replay, decisions }] in hand order; replay is the host-safe
  * projection and decisions the host's validated snapshots (or absent). */
-export function summarizeGame(meta, hands, { dataset, factsOf } = {}) {
+export function summarizeGame(meta, hands, { dataset, factsOf, checksOnly = false } = {}) {
   const summary = emptyGameSummary(meta);
   for (const hand of Array.isArray(hands) ? hands : []) {
     const replay = hand?.replay;
@@ -365,11 +368,15 @@ export function summarizeGame(meta, hands, { dataset, factsOf } = {}) {
     if (!Object.hasOwn(replay.startStacks, HERO)) continue;
     if (hand.biased === true || (replay.dealSelection !== undefined && replay.dealSelection?.mode !== 'off')) { summary.biasedHands += 1; continue; }
     summary.heroHands += 1;
-    addFrequencies(summary, replay);
-    addResult(summary, replay, seedFrom(`${summary.gameId}:${replay.handNo}`));
+    // `checksOnly` is for the in-game host report: the pattern lines need neither the
+    // frequencies nor the all-in simulations.
+    if (!checksOnly) {
+      addFrequencies(summary, replay);
+      addResult(summary, replay, seedFrom(`${summary.gameId}:${replay.handNo}`));
+    }
     for (const decision of Array.isArray(hand.decisions) ? hand.decisions : []) {
       if (decision?.processStatus !== 'available' || decision.actorId !== HERO) continue;
-      if (dataset) addReference(summary, decision, dataset);
+      if (dataset && !checksOnly) addReference(summary, decision, dataset);
       addChecks(summary, decision, typeof factsOf === 'function' ? factsOf : () => null);
     }
   }
@@ -384,6 +391,14 @@ function mergeInto(target, source) {
     else if (Array.isArray(value)) target[key] = [...(target[key] ?? []), ...value];
     else if (isObject(value)) target[key] = mergeInto(isObject(target[key]) ? target[key] : {}, value);
   }
+  return target;
+}
+
+/** Adds one summary of the same game into another (every count, the results
+ * included): a game can be reduced hand by hand, yielding in between. */
+export function addGameSummary(target, source) {
+  for (const key of ['hands', 'heroHands', 'biasedHands']) target[key] += source[key];
+  for (const key of ['table', 'preflop', 'postflop', 'reference', 'checks', 'results']) mergeInto(target[key], source[key]);
   return target;
 }
 
@@ -431,19 +446,23 @@ function segmentRows(summaries) {
     for (const field of ['hands', 'netBb', 'adjBb', 'adjSqBb', 'allIns', 'luckBb', 'unrevealed']) row[field] += summary.results[field];
     segments.set(key, row);
   }
-  return [...segments.values()].filter((row) => row.hands > 0).map(({ adjSqBb, ...row }) => {
+  return [...segments.values()].filter((row) => row.hands > 0).map(({ adjSqBb, netBb, adjBb, ...row }) => {
+    // Net results leave this module only as the per-100 figure of a comparable population.
     if (!row.yardstick || row.hands < YARDSTICK_MIN_HANDS) return { ...row, per100: null };
+    row = { ...row, netBb, adjBb };
     // Hands are treated as independent draws: an approximation that ignores what a
     // session has in common, so the interval is a rough width, not a guarantee.
     const mean = row.adjBb / row.hands;
     const variance = Math.max(0, adjSqBb / row.hands - mean ** 2);
     const half = 1.96 * 100 * Math.sqrt(variance / row.hands);
-    return { ...row, per100: { net: (100 * row.netBb) / row.hands, adjusted: 100 * mean, low: 100 * mean - half, high: 100 * mean + half } };
+    const { netBb: net, adjBb: unused, ...rest } = row;
+    return { ...rest, per100: { net: (100 * net) / row.hands, adjusted: 100 * mean, low: 100 * mean - half, high: 100 * mean + half } };
   }).sort((a, b) => b.hands - a.hands);
 }
 
 // Attention-routing heuristics over the window, not statistical findings: each
-// needs a count and a share. `latest` is the newest game and `earlier` the rest
+// needs a count and a share (a fold with a free check, which has no natural
+// denominator, needs a count only). `latest` is the newest game and `earlier` the rest
 // of the window, so the two never overlap; a side without opportunities is null.
 function focusOf(windowed, latest, earlier) {
   const focus = [];
@@ -640,7 +659,7 @@ export function playReportView(report) {
   });
   if (segments.length) {
     sections.push({ id: 'results', title: '결과와 운',
-      note: '마지막 베팅이 끝난 뒤 남은 카드에 대해, 그 시점의 기대 몫과 실제로 받은 몫의 차이를 운으로 셉니다(관련된 패가 모두 공개된 핸드만, 팟에 든 칩 기준). 100핸드당 수치는 혼자 같은 로컬 정책 상대와 같은 인원·스택으로 둔 캐시 트레이닝끼리만 묶어 내며, 실력이나 수익의 증명이 아닙니다.',
+      note: '마지막 베팅이 끝난 뒤 남은 카드에 대해, 그 시점의 기대 몫과 실제로 받은 몫의 차이를 운으로 셉니다(관련된 패가 모두 공개된 핸드만, 팟에 든 칩 기준). 그 전의 카드와 상대의 선택에 든 운은 들어 있지 않으므로 운 전체를 떼어 낸 값은 아닙니다. 100핸드당 수치는 혼자 같은 로컬 정책 상대와 같은 인원·스택으로 둔 캐시 트레이닝끼리만 묶어 내며, 실력이나 수익의 증명이 아닙니다.',
       rows: segments });
   }
   const sessions = report.sessions.map((row) => ({ label: `${(row.savedAt ?? '').slice(0, 10) || '날짜 없음'} · ${MODE_KO[row.mode]} · ${row.heroHands}핸드`,

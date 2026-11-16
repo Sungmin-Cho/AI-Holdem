@@ -76,6 +76,25 @@ test('a game still being played is read again, and a new game appears', async ()
   assert.equal((await reader.read()).report.scope.totalGames, 2);
 });
 
+test('the scan gives the event loop back after every hand and stops when it is told to', async () => {
+  const store = makeStore();
+  createReplayGame(store, { aiCount: 2, hands: 3 });
+  createReplayGame(store, { aiCount: 2, hands: 2 });
+  let yields = 0;
+  const reader = createPlayReportReader(store, { yieldTurn: async () => { yields += 1; } });
+  await reader.read();
+  assert.equal(yields, 5, 'one yield per hand reduced');
+  assert.equal(reader.cachedGames(), 2);
+  // A caller that gives up: the scan ends at the next hand; games already reduced stay.
+  const stop = new AbortController();
+  let reduced = 0;
+  const fresh = createPlayReportReader(store, { yieldTurn: async () => { reduced += 1; if (reduced === 4) stop.abort(); } });
+  await assert.rejects(fresh.read({ signal: stop.signal }), { code: 'PLAY_REPORT_ABORTED' });
+  assert.equal(reduced, 4);
+  assert.equal(fresh.cachedGames(), 1, 'the game finished before the stop is kept');
+  assert.equal((await fresh.read()).report.scope.heroHands, 5, 'a later read completes');
+});
+
 test('a hand that cannot be read is counted and the game is tried again', async () => {
   const store = makeStore();
   const game = createReplayGame(store, { aiCount: 2, hands: 3 });
@@ -101,6 +120,31 @@ test('the read budget ends the scan and the report says it is partial', async ()
   const out = await reader.read();
   assert.equal(out.report.scope.truncated, true);
   assert.ok(out.report.scope.totalGames < 2);
+});
+
+test('a cut scan keeps what it did not reach, and a store too large to list gives a partial report', async () => {
+  const store = makeStore();
+  createReplayGame(store, { aiCount: 2, hands: 3 });
+  createReplayGame(store, { aiCount: 2, hands: 3 });
+  const library = createReplayLibrary(store);
+  let limit = library.reportReadBytes;
+  const cut = { ...library, get reportReadBytes() { return limit; } };
+  const reader = createPlayReportReader(store, { library: cut });
+  await reader.read();
+  assert.equal(reader.cachedGames(), 2);
+  // The next scan runs out of budget at once: both finished games stay known.
+  limit = 1;
+  const partial = await reader.read();
+  assert.equal(partial.report.scope.truncated, true);
+  assert.equal(reader.cachedGames(), 2);
+  limit = library.reportReadBytes;
+  assert.equal((await reader.read()).report.scope.heroHands, 6);
+  // The library refuses to list (more sessions than its limit): a partial, empty report, not a failure.
+  const refusing = createPlayReportReader(store, { library: { ...library, listReportGames: async () => { throw Object.assign(new Error('REPLAY_LIMIT_EXCEEDED'), { code: 'REPLAY_LIMIT_EXCEEDED', fatal: true }); } } });
+  const empty = await refusing.read();
+  assert.equal(empty.report.scope.truncated, true);
+  assert.equal(empty.report.scope.heroHands, 0);
+  await assert.rejects(createPlayReportReader(store, { library: { ...library, listReportGames: async () => { throw new Error('other'); } } }).read());
 });
 
 test('a participant\'s hidden hole cards cannot change any number or line', async () => {

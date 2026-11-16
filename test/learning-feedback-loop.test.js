@@ -161,3 +161,11 @@ test('the machine review lists the game\'s own pattern lines with the engine che
   assert.match(review, SHORT_LINE);
   assert.ok(review.indexOf('### 결정 점검(엔진 계산)') < review.search(SHORT_LINE));
 });
+
+test('the cumulative lines are prepared when a loop boots and when it resumes into play, never by the coach', () => {
+  const source = fs.readFileSync(new URL('../tools/game-loop.js', import.meta.url), 'utf8');
+  assert.equal(source.split('preparePlayFocus();').length - 1, 2, 'boot and resume');
+  assert.match(source, /if \(resumed\.phase === 'playing'\) \{\n\s+preparePlayFocus\(\);/);
+  assert.match(source, /const focusLines = playFocusLines\(\);/, 'the coach reads what is ready and does not wait');
+  assert.doesNotMatch(source, /await playFocusLines/);
+});

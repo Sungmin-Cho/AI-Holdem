@@ -18,12 +18,17 @@ const epoch = 'ab'.repeat(32);
 const SPOT = '6max-100bb-btn-vs-utg-open-v3';
 const RFI = '6max-100bb-co-rfi-v3';
 
-async function fixture(t) {
+async function fixture(t, over = {}) {
   const root = createOwnedTempDir('quiz-route');
   const room = createRoomManager({ storeDir: root });
   room.open({ totalSeats: 3 });
   const guest = room.join({ code: room.load().joinCode, name: 'Guest', addr: '1' });
-  const manager = { room, current: { gameId, sessionDir: root }, snapshot: () => ({ gameId, gameEpoch: epoch, state: 'playing' }) };
+  // The route answers only for a game that is over (its committed engine state says so).
+  const writeState = (gameOver) => fs.writeFileSync(path.join(root, 'state.json'), JSON.stringify({ gameOver, at: Math.random() }));
+  writeState(over.gameOver ?? true);
+  let checks = 0;
+  const manager = { room, current: { gameId, sessionDir: root },
+    snapshot: () => { checks += 1; return { gameId, gameEpoch: over.staleFrom && checks >= over.staleFrom ? 'cd'.repeat(32) : epoch, state: 'ended' }; } };
   const app = await startAppServer({ manager, token: 'host', storeDir: root, publicPort: 0 });
   t.after(() => app.close());
   const headers = { authorization: 'Bearer host', 'x-game-epoch': epoch, 'content-type': 'application/json', connection: 'close' };
@@ -31,7 +36,7 @@ async function fixture(t) {
   const ledger = () => {
     try { return JSON.parse(fs.readFileSync(path.join(root, '.training', 'grid-exposure-log.json'), 'utf8')).rows.map((row) => row.spotKey); } catch { return []; }
   };
-  return { app, root, guest, headers, post, ledger };
+  return { app, root, guest, headers, post, ledger, writeState, resetChecks: () => { checks = 0; } };
 }
 const items = [{ spotKey: SPOT, handClass: 'KTo' }, { spotKey: RFI, handClass: '64o' }, { spotKey: SPOT, handClass: 'AA' }];
 
@@ -68,6 +73,30 @@ test('answering records each spot as a chart view first and serves the reference
   });
   assert.deepEqual(body.items, expected, 'the unknown spot is left out');
   assert.deepEqual(f.ledger().sort(), [RFI, SPOT].sort(), 'one exposure row per distinct spot');
+});
+
+test('a game still being played gets no answers, and a game replaced mid-request gets none either', async (t) => {
+  const playing = await fixture(t, { gameOver: false });
+  const refused = await playing.post({ items });
+  assert.equal(refused.status, 409);
+  assert.deepEqual(await refused.json(), { code: 'GAME_NOT_OVER' });
+  assert.deepEqual(playing.ledger(), []);
+  playing.writeState(true);
+  assert.equal((await playing.post({ items })).status, 200, 'once the game is over the same request is answered');
+  // The epoch changes while the body is read (second identity check): nothing is recorded.
+  const replacedEarly = await fixture(t, { staleFrom: 2 });
+  replacedEarly.resetChecks();
+  const early = await replacedEarly.post({ items });
+  assert.equal(early.status, 409);
+  assert.deepEqual(await early.json(), { code: 'STALE_GAME' });
+  assert.deepEqual(replacedEarly.ledger(), []);
+  // ... or after the exposures were written (third check): recorded, but not disclosed.
+  const replacedLate = await fixture(t, { staleFrom: 3 });
+  replacedLate.resetChecks();
+  const late = await replacedLate.post({ items });
+  assert.equal(late.status, 409);
+  assert.deepEqual(await late.json(), { code: 'STALE_GAME' });
+  assert.equal(replacedLate.ledger().length, 2, 'the conservative side: the view is on record');
 });
 
 test('while an assessment is open no question is served and nothing is recorded', async (t) => {

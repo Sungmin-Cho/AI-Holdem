@@ -7149,6 +7149,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     ...(factsLines.length ? factsLines : ['(없음)']),
     '',
     '중요한 결정마다 사실 카드의 수치(필요 승률·SPR·에퀴티·선택 크기)를 근거로 과정을 평가하라.',
+    '사실 카드에 "가격 비교(칩 기준 …)" 문장이 있는 결정(콜 뒤에 베팅이 없는 닫힌 결정)은 그 문장을 "추정 레인지 기준"이라는 단서와 함께 인용할 수 있다. 그 밖의 결정에서는 필요 승률과 에퀴티를 직접 견주어 판정하지 마라. "드로 아웃이 나올 확률"은 이길 확률이 아니다.',
     '검증된 최적·GTO 정답·확정 누수를 주장하지 마라. 기대값(EV)은 숫자 없이 개념으로만 쓴다.',
     '출력은 비어 있지 않은 한국어 과정 평가 본문만 작성하라.',
   ].join('\n');
@@ -7319,12 +7320,13 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     } catch { out.gameLines = []; }
     let cumulative = null;
     if (storeDir) {
-      let timer;
+      // The scan gives the loop back after every hand; at the deadline it is told to stop
+      // and the review goes on without the cumulative part.
+      const deadline = new AbortController();
+      const timer = setTimeout(() => deadline.abort(), 10_000);
+      timer.unref?.();
       try {
-        cumulative = await Promise.race([
-          playReportReader(storeDir).read(),
-          new Promise((resolve) => { timer = setTimeout(() => resolve(null), 10_000); timer.unref?.(); }),
-        ]);
+        cumulative = await playReportReader(storeDir).read({ signal: deadline.signal });
       } catch { cumulative = null; } finally { clearTimeout(timer); }
     }
     const rows = [];
@@ -9408,6 +9410,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // begin-owner가 seal/Q에 없는 핸드만 새 descriptor로 돌려주므로, 살아 있는
       // generation이 없는 크래시 재개에서만 그 핸드를 다시 스폰한다.
       if (resumed.phase === 'playing') {
+        preparePlayFocus();
         await beginCoachOwner(Number(engineState.lastHand?.handNo ?? 0));
         await reconcileTrainingNow();
         resumed = readLoopState();

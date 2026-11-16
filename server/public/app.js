@@ -1668,6 +1668,8 @@ function paintReview(view) {
   reopen.hidden=!state.open;
   reopen.textContent='결과 다시 보기'+(overlay.dataset.dismissed==='true' && ui.review && ui.review!==reviewSeen?' ·':'');
   if(state.open)void loadFinalSummary();
+  // The quiz belongs to one final screen: when the screen is gone (a new game on this page) it starts over.
+  else if(quiz.phase!=='idle'&&quiz.phase!=='loading')Object.assign(quiz,{phase:'idle',questions:[],state:null,error:'',painted:null});
   const show=state.open && overlay.dataset.dismissed!=='true' && (!dialogs.active || dialogs.active===overlay);
   overlay.hidden=!show;
   if(!show){if(dialogs.active===overlay)dialogs.close();return;}

@@ -4,7 +4,7 @@
 // per game and reused while the game's state file is the same one; a game that
 // is still being played, or one with a hand that could not be read, is read again.
 import { CANONICAL_REFERENCE_SOURCE } from '../shared/reference.js';
-import { buildPlayReport, playReportView, summarizeGame } from '../training/play-report.js';
+import { addGameSummary, buildPlayReport, emptyGameSummary, playReportView, summarizeGame } from '../training/play-report.js';
 import { loadReferenceDataset } from './preflop-dataset.js';
 import { createReplayLibrary } from './replay-library.js';
 import { decisionFacts } from './review-facts.js';
@@ -27,16 +27,37 @@ export function createPlayReportReader(storeDir, options = {}) {
   const dataset = options.dataset === undefined ? reportDataset() : options.dataset;
   const factsOf = options.factsOf ?? decisionFacts;
   const clock = options.now ?? (() => new Date().toISOString());
+  const yieldTurn = options.yieldTurn ?? (() => new Promise((resolve) => { setImmediate(resolve); }));
   const cache = new Map();
   let inflight = null;
 
-  async function scan() {
-    const entries = (await library.listReportGames()).slice(0, MAX_GAMES);
+  // One hand at a time, giving the event loop back in between: a hand can cost an
+  // all-in simulation and a closed-decision equity, and this runs in processes
+  // that are also playing a game. An aborted signal ends the scan at the next hand.
+  async function reduce(meta, hands, signal) {
+    const summary = emptyGameSummary(meta);
+    for (const hand of hands) {
+      if (signal?.aborted) throw Object.assign(new Error('PLAY_REPORT_ABORTED'), { code: 'PLAY_REPORT_ABORTED', fatal: true });
+      addGameSummary(summary, summarizeGame(meta, [hand], { dataset, factsOf }));
+      await yieldTurn();
+    }
+    return summary;
+  }
+
+  async function scan(signal) {
     const budget = { used: 0, limit: library.reportReadBytes };
     const summaries = [];
     const unreadable = { games: 0, hands: 0 };
     const seen = new Set();
     let truncated = false;
+    let entries = [];
+    try {
+      entries = (await library.listReportGames()).slice(0, MAX_GAMES);
+    } catch (error) {
+      // More sessions than the library lists: say the report is partial rather than fail.
+      if (!error?.fatal) throw error;
+      truncated = true;
+    }
     for (const entry of entries) {
       seen.add(entry.gameId);
       if (entry.code) { unreadable.games += 1; continue; }
@@ -44,27 +65,33 @@ export function createPlayReportReader(storeDir, options = {}) {
       try {
         const game = await library.readReportGame(entry.gameId, { budget, known: cached?.identity ?? null });
         if (game.reused) { summaries.push(cached.summary); continue; }
-        const summary = summarizeGame(game.meta, game.hands, { dataset, factsOf });
+        const summary = await reduce(game.meta, game.hands, signal);
         unreadable.hands += game.unreadable;
         // Only a finished game read in full is kept: anything else is read again.
         if (game.final && game.unreadable === 0) cache.set(entry.gameId, { identity: game.identity, summary });
         else cache.delete(entry.gameId);
         summaries.push(summary);
       } catch (error) {
-        cache.delete(entry.gameId);
-        // A fatal limit (the read budget) ends the scan: what was read so far is a partial report.
+        if (error?.code === 'PLAY_REPORT_ABORTED') throw error;
+        // A fatal limit (the read budget) ends the scan: what was read so far is a partial
+        // report, and what is already known about this game stays.
         if (error?.fatal) { truncated = true; break; }
+        cache.delete(entry.gameId);
         unreadable.games += 1;
       }
     }
-    for (const gameId of [...cache.keys()]) if (!seen.has(gameId)) cache.delete(gameId);
+    // A game that is gone from the store leaves the cache; after a cut scan the games it did
+    // not reach are simply unknown and stay.
+    if (!truncated) for (const gameId of [...cache.keys()]) if (!seen.has(gameId)) cache.delete(gameId);
     const report = buildPlayReport(summaries, { now: clock(), unreadable, truncated });
     return { report, view: playReportView(report), summaries };
   }
 
-  /** { report, view, summaries }; concurrent callers share one scan. */
-  function read() {
-    inflight ??= scan().finally(() => { inflight = null; });
+  /** { report, view, summaries }; concurrent callers share one scan. `signal`
+   * (of the caller that starts the scan) stops it between hands: finished games
+   * already reduced stay cached, so a later read resumes from there. */
+  function read({ signal } = {}) {
+    inflight ??= scan(signal).finally(() => { inflight = null; });
     return inflight;
   }
 

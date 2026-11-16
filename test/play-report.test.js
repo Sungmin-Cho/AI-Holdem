@@ -6,7 +6,7 @@ import { CANONICAL_REFERENCE_SOURCE, coachingClaimAllowed, referenceClaimAllowed
 import { loadReferenceDataset } from '../tools/preflop-dataset.js';
 import { decisionFacts } from '../tools/review-facts.js';
 import {
-  SHORT_STACK_BB, WINDOW_HERO_HANDS, YARDSTICK_MIN_HANDS, allInExpectation, buildPlayReport, emptyGameSummary, focusLinesKo,
+  SHORT_STACK_BB, WINDOW_HERO_HANDS, YARDSTICK_MIN_HANDS, addGameSummary, allInExpectation, buildPlayReport, emptyGameSummary, focusLinesKo,
   gameCheckLinesKo, playReportView, summarizeGame, vpipBand, yardstickKey,
 } from '../training/play-report.js';
 import { toProcessReview } from '../training/process-review.js';
@@ -92,6 +92,50 @@ test('at ten big blinds or less a small raise is an entry that is not all-in; a 
   assert.equal(SHORT_STACK_BB, 10);
 });
 
+test('a raise that covers every opponent is all-in in effect, whatever the host keeps behind', () => {
+  // The host has 100BB on the button; the blinds have 8BB and 6BB. Opening to 8BB covers both.
+  const record = play(setup3(5000, 300, 400), (legal) => (legal.canCheck ? ['check'] : legal.callAmount === 50 ? ['raise', 400] : ['fold']));
+  const covering = summarizeGame(meta(), [handOf(record)], options);
+  assert.equal(covering.checks.shortEntries, 1);
+  assert.deepEqual(covering.checks.shortNonAllIn, []);
+  const small = play(setup3(5000, 300, 400), (legal) => (legal.canCheck ? ['check'] : legal.callAmount === 50 ? ['raise', 125] : ['fold']));
+  assert.deepEqual(summarizeGame(meta(), [handOf(small)], options).checks.shortNonAllIn, [1]);
+});
+
+test('a watchdog fold before the flop is not a flop the host saw', () => {
+  // The host is folded by the clock; the two others see a flop and a showdown.
+  const record = play(setup3(5000, 5000, 5000), () => ['fold'], checkOrCall);
+  assert.ok(record.board.length >= 3, 'fixture: the others reached the flop');
+  const forcedFold = (rec) => ({ ...rec, actions: rec.actions.map((action) => (action.playerId === 'user' ? { ...action, forced: true } : action)) });
+  const hand = handOf(forcedFold(record));
+  assert.equal(hand.replay.actions.find((action) => action.playerId === 'user').forced, true);
+  const summary = summarizeGame(meta(), [hand], options);
+  assert.deepEqual(summary.postflop.wtsd, { k: 0, n: 0 });
+  assert.deepEqual(summary.table['3-4'], { hands: 0, vpip: 0, pfr: 0 }, 'a forced action is not an entry decision');
+  // The deliberate fold gives the same answer.
+  assert.deepEqual(summarizeGame(meta(), [handOf(record)], options).postflop.wtsd, { k: 0, n: 0 });
+});
+
+test('a game reduced hand by hand adds up to the game reduced at once; checks-only skips the rest', () => {
+  const hands = [
+    handOf(play(setup3(5000, 5000, 5000), checkOrCall, checkOrCall)),
+    handOf(play(setup3(400, 5000, 5000), (legal) => (legal.canCheck ? ['check'] : legal.canRaise && legal.callAmount === 50 ? ['raise', legal.minRaiseTo] : ['fold']))),
+    handOf(play(setup3(5000, 600, 5000),
+      (legal) => (legal.canCheck ? ['check'] : legal.callAmount === 50 ? ['raise', 125] : ['call']),
+      (legal) => (legal.toAct === 'p1' && legal.canRaise ? ['raise', legal.maxRaiseTo] : legal.canCheck ? ['check'] : ['fold']))),
+  ];
+  const whole = summarizeGame(meta(), hands, options);
+  const added = emptyGameSummary(meta());
+  for (const hand of hands) addGameSummary(added, summarizeGame(meta(), [hand], options));
+  assert.deepEqual(added, whole);
+  assert.equal(whole.results.allIns, 1);
+  const checks = summarizeGame(meta(), hands, { ...options, checksOnly: true });
+  assert.deepEqual(checks.checks, whole.checks);
+  assert.deepEqual(checks.results, emptyGameSummary().results, 'no all-in simulation');
+  assert.equal(checks.reference.snapshots, 0);
+  assert.deepEqual(checks.table, emptyGameSummary().table);
+});
+
 test('calling a shove with nobody left to act is a closed decision', () => {
   // p1 (small blind) shoves over the user's limp-free fold line: here the user is on
   // the button, folds; replay the same seats with the user calling the shove instead.
@@ -102,6 +146,8 @@ test('calling a shove with nobody left to act is a closed decision', () => {
   assert.equal(summary.checks.closed, 1);
   assert.equal(summary.checks.closedCalls, 1);
   assert.equal(summary.preflop.shoveCalls, 1);
+  // The board only ran out: the host covered the all-in and never had a turn after the flop.
+  assert.deepEqual(summary.postflop.wtsd, { k: 0, n: 0 });
   assert.equal(summary.results.hands, 1);
   // Both hands were shown at the all-in showdown, so the result is adjusted.
   assert.equal(summary.results.allIns, 1);
@@ -181,6 +227,8 @@ test('the pattern window is the newest games up to the hand limit; results cover
   assert.equal(report.results.segments.length, 1);
   assert.equal(report.results.segments[0].hands, 2000);
   assert.equal(report.results.segments[0].per100, null, 'no per-100 figure for a tournament');
+  assert.deepEqual(Object.keys(report.results.segments[0]).sort(), ['allIns', 'games', 'hands', 'luckBb', 'mode', 'opponent', 'per100', 'unrevealed', 'yardstick'],
+    'net results leave only as the per-100 figure of a comparable population');
   // A single game is always in the window, whatever its size.
   assert.equal(buildPlayReport([games[0]]).scope.games, 1);
   assert.equal(buildPlayReport([]).scope.heroHands, 0);

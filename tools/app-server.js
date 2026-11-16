@@ -438,9 +438,12 @@ export async function startAppServer({
   // served. Not listed for the remote host: the study room it belongs with is local.
   async function serveQuiz(req,res,gameId) {
     if (req.method !== 'POST') {json(res,405,{code:'METHOD_NOT_ALLOWED'});return;}
-    const snapshot=manager.snapshot();
-    if(manager.current?.gameId!==gameId || req.headers['x-game-epoch']!==snapshot.gameEpoch) {json(res,409,{code:'STALE_GAME'});return;}
+    const epoch=req.headers['x-game-epoch'];
+    const currentGame=()=>manager.current?.gameId===gameId && manager.snapshot().gameEpoch===epoch;
+    if(!currentGame()) {json(res,409,{code:'STALE_GAME'});return;}
     const body=await bodyOf(req);
+    // The body arrived over time: the game it was sent for must still be the current one.
+    if(!currentGame()) {json(res,409,{code:'STALE_GAME'});return;}
     const items=body?.items;
     if(!body || Array.isArray(body) || Object.keys(body).length!==1 || !Array.isArray(items) || items.length<1 || items.length>5 ||
       !items.every(item=>item && typeof item==='object' && !Array.isArray(item) && Object.keys(item).length===2 &&
@@ -448,6 +451,10 @@ export async function startAppServer({
         typeof item.handClass==='string' && /^[2-9TJQKA]{2}[so]?$/.test(item.handClass))) {
       json(res,400,{code:'BAD_COMMAND'});return;
     }
+    // Only for a game that is over: while it is played the reference stays in the study room.
+    let over=false;
+    try {over=readCommitFile('state.json').gameOver===true;} catch {committedCache.clear();}
+    if(!over) {json(res,409,{code:'GAME_NOT_OVER'});return;}
     const charts=new Map(),served=[];
     try {
       for(const item of items) {
@@ -464,6 +471,9 @@ export async function startAppServer({
     } catch(error) {
       json(res,409,{code:error.code==='GRID_LOCKED'?'GRID_LOCKED':'STUDY_BUSY'});return;
     }
+    // Exposures written for a game that was replaced meanwhile stay (the conservative side);
+    // the answers are not sent.
+    if(!currentGame()) {json(res,409,{code:'STALE_GAME'});return;}
     json(res,200,{ok:true,items:served});
   }
   const committedCache = new Map();

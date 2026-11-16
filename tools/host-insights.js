@@ -59,7 +59,7 @@ export function gameChecksOf(records, { seats = [], reveal = 'showdown', key = '
     if (!summary) {
       try {
         summary = summarizeGame({}, [{ replay: replayRecord(record, { reveal, humanIds }), decisions: toProcessReview(record).decisions }],
-          { dataset: null, factsOf: decisionFacts });
+          { dataset: null, factsOf: decisionFacts, checksOnly: true });
       } catch {
         continue;
       }

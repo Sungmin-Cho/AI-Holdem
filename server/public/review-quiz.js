@@ -13,7 +13,6 @@ export const QUIZ_LIMIT = 5;
 /** Up to `limit` distinct (spot, hand) pairs: choices that differed from the
  * reference first, then low-frequency ones, then the rest, oldest hand first. */
 export function quizCandidates(items, { limit = QUIZ_LIMIT, titleOf = () => '' } = {}) {
-  const seen = new Set();
   const rows = [];
   for (const item of Array.isArray(items) ? items : []) {
     if (!item || item.status !== 'supported' || item.forced === true) continue;
@@ -22,13 +21,14 @@ export function quizCandidates(items, { limit = QUIZ_LIMIT, titleOf = () => '' }
     if (typeof item.handClass !== 'string' || !HAND_RE.test(item.handClass)) continue;
     if (!ACTIONS.includes(item.chosen?.action)) continue;
     const key = `${item.spotKey}:${item.handClass}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
     rows.push({ key, spotKey: item.spotKey, handClass: item.handClass, chosen: item.chosen.action,
       handNo: Number.isSafeInteger(item.handNo) ? item.handNo : 0, order: GRADE_ORDER[item.grade] ?? 2, title: String(titleOf(item) ?? '') });
   }
   rows.sort((a, b) => a.order - b.order || a.handNo - b.handNo || a.key.localeCompare(b.key));
-  return rows.slice(0, Math.max(0, limit)).map(({ order, ...row }) => row);
+  // One question per (spot, hand): the occurrence that ranks first is the one kept.
+  const seen = new Set();
+  const distinct = rows.filter((row) => !seen.has(row.key) && seen.add(row.key));
+  return distinct.slice(0, Math.max(0, limit)).map(({ order, ...row }) => row);
 }
 
 /** The request body for the app server: the pairs and nothing else. */
@@ -81,7 +81,8 @@ export const QUIZ_NOTE = '휴리스틱 기준표와의 비교이며 점수로 �
 
 /** Status line for a failed open, by the server's code. */
 export function quizErrorText(code) {
-  if (code === 'GRID_LOCKED') return '학습실에서 평가·재평가가 진행 중일 때는 복습 문제를 열 수 없습니다. 실행을 마친 뒤 다시 열어 주세요.';
+  if (code === 'GRID_LOCKED') return '학습실에서 평가·재평가·일반화 연습이 진행 중일 때는 복습 문제를 열 수 없습니다. 실행을 마친 뒤 다시 열어 주세요.';
+  if (code === 'GAME_NOT_OVER') return '게임이 끝난 뒤에 열 수 있습니다.';
   if (code === 'STUDY_BUSY') return '학습 기록이 잠시 사용 중입니다. 다시 열어 주세요.';
   return '복습 문제를 불러오지 못했습니다. 다시 열어 주세요.';
 }

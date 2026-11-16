@@ -4,7 +4,9 @@ import {
   PRICE_MARGIN, chipFacts, closureOf, drawOdds, equityFacts, factsLineKo, handFacts, priceVerdict,
 } from '../shared/decision-facts.js';
 import { coachingClaimAllowed, referenceClaimAllowed } from '../shared/reference.js';
+import { applyAction, legalFor } from '../engine/hand.js';
 import { decisionFacts } from '../tools/review-facts.js';
+import { mulberry32, setup3 } from './helpers/fixtures.js';
 
 const seat = (playerId, over = {}) => ({ playerId, position: 'BTN', stack: 8000, bet: 0, contribution: 500,
   folded: false, allIn: false, out: false, ...over });
@@ -164,10 +166,47 @@ test('review facts carry the closure, the comparison and the draw chance', () =>
 });
 
 test('a range equity built on too few compatible deals is not reported', () => {
-  const snapshot = river();
-  // Aces only, against a hero holding two of them and a third on the board: one combo left.
-  const narrow = { AA: 1 };
-  const board = { holeCards: ['Ah', 'Kd'], board: ['Ac', '7s', '2d', '9h', '3c'] };
-  assert.ok(Number.isFinite(equityFacts({ ...snapshot, ...board }, { ranges: [narrow] })));
-  assert.throws(() => equityFacts({ ...snapshot, ...board }, { ranges: [narrow, narrow], minDealt: 500 }), RangeError);
+  const snapshot = { ...river(), holeCards: ['Ah', 'Kd'], board: ['Ac', '7s', '2d', '9h', '3c'] };
+  // The first opponent can only hold the last two aces. The second holds them
+  // almost always too (a blocked deal) and kings very rarely: a few deals in
+  // 1,500 are compatible, far fewer than the floor.
+  const aces = { AA: 1 };
+  const mostlyBlocked = { AA: 1, KK: 0.002 };
+  const few = equityFacts(snapshot, { ranges: [aces, mostlyBlocked] });
+  assert.ok(Number.isFinite(few), 'some deals are compatible, so without a floor a number comes out');
+  assert.throws(() => equityFacts(snapshot, { ranges: [aces, mostlyBlocked], minDealt: 500 }), RangeError);
+  assert.ok(Number.isFinite(equityFacts(snapshot, { ranges: [aces], minDealt: 500 })), 'one opponent: every deal is compatible');
+});
+
+test('a call marked closed is the last action of its hand, for every seat of random engine hands', () => {
+  // Random three-handed hands with uneven stacks (short blinds, partial all-ins, side pots).
+  let closedCalls = 0;
+  let kinds = new Set();
+  for (let seed = 1; seed <= 2000; seed += 1) {
+    const rand = mulberry32(seed);
+    const stacks = [5000, 5000, 5000].map(() => [40, 75, 150, 400, 900, 2500, 5000][Math.floor(rand() * 7)]);
+    let state = setup3(...stacks);
+    for (let step = 0; !legalFor(state).handOver; step += 1) {
+      assert.ok(step < 200, 'fixture hand did not terminate');
+      const legal = legalFor(state);
+      const roll = rand();
+      let action = legal.canCheck ? 'check' : 'call';
+      let amount;
+      if (legal.canRaise && roll < 0.3) { action = 'raise'; amount = roll < 0.12 ? legal.maxRaiseTo : Math.min(legal.maxRaiseTo, legal.minRaiseTo); }
+      else if (!legal.canCheck && roll > 0.9) action = 'fold';
+      state = applyAction(state, legal.toAct, action, amount).state;
+    }
+    const record = state.lastHand;
+    record.decisions.forEach((decision) => {
+      const closure = closureOf(decision);
+      if (!closure || decision.chosenAction.action !== 'call') return;
+      closedCalls += 1;
+      kinds.add(closure.kind);
+      const at = record.actions.findIndex((action) => action.decisionId === decision.decisionId);
+      assert.ok(at >= 0, decision.decisionId);
+      assert.equal(at, record.actions.length - 1, `seed ${seed}: ${decision.decisionId} (${closure.kind}) was followed by ${JSON.stringify(record.actions.slice(at + 1).map((a) => [a.playerId, a.action, a.street]))}`);
+    });
+  }
+  assert.ok(closedCalls > 150, String(closedCalls));
+  assert.deepEqual([...kinds].sort(), ['hero-all-in', 'opponents-all-in', 'river']);
 });
