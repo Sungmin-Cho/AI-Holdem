@@ -397,7 +397,7 @@ export function mergeGameSummaries(games) {
 }
 
 const rate = (k, n) => (n > 0 ? k / n : null);
-const refsOf = (summary, hands) => hands.map((handNo) => ({ gameId: summary.gameId, handNo }));
+const refsOf = (summary, hands) => hands.map((handNo) => ({ gameId: summary.gameId, day: typeof summary.savedAt === 'string' ? summary.savedAt.slice(5, 10) : null, handNo }));
 
 function sessionRow(summary) {
   const hands = TABLES.reduce((sum, key) => sum + summary.table[key].hands, 0);
@@ -618,7 +618,8 @@ export function playReportView(report) {
           .map((row) => `${UNSUPPORTED_KO[row.code] ?? '기타'} ${row.count}`).join(' · ') }] : [])] });
   }
   const c = report.checks;
-  const hands = (list) => (list.hands.length ? ` (핸드 ${list.hands.slice(0, 5).map((row) => row.handNo).join(', ')})` : '');
+  // Hand numbers repeat from game to game, so each example names its game's day.
+  const hands = (list) => (list.hands.length ? ` (예: ${list.hands.slice(0, 5).map((row) => `${row.day ? `${row.day} ` : ''}핸드 ${row.handNo}`).join(', ')})` : '');
   sections.push({ id: 'checks', title: '결정 점검',
     note: `결정 시점 기록만으로 센 살펴볼 패턴입니다. 가격 비교는 콜하면 베팅이 끝나는 결정에서만 하며, 칩 기준으로 필요 승률과 추정 승률을 견준 것입니다. 추정 레인지는 보정되지 않은 참고값이고 ${PRICE_MARGIN_TEXT} 이상 벌어진 경우만 셉니다. 점검한 결정 ${c.decisions}건.`,
     rows: [
