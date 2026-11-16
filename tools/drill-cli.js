@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { createMistakeBank } from './training-stores.js';
-import { generateQueue } from '../training/drill-generator.js';
+import { dueForReview, generateQueue, legalActionsFor } from '../training/drill-generator.js';
 import { evaluateDrillAnswer } from '../training/drill-evaluator.js';
 import { nextSchedule, SRS_VERSION } from '../training/spaced-repetition.js';
 import { createProfileStore, trainingStoreIo } from './training-stores.js';
@@ -24,7 +24,7 @@ import { nativePreflopSnapshotV3 } from '../training/native-preflop-snapshot-v3.
 import { strataForSpot } from '../training/drill-strata.js';
 import { loadReferenceDataset } from './preflop-dataset.js';
 import { ensureDir, openContained, writeContained } from './training-store.js';
-import { evaluationIdOf, coded } from '../training/contracts.js';
+import { assertEvaluationId, evaluationIdOf, coded } from '../training/contracts.js';
 import { withNamedLock } from '../engine/state.js';
 import { studyHistory, retestEligibility } from '../training/study-history.js';
 import { appendLedgerRow, appendLedgerRows, MEASUREMENT_MODES, readRecentViewSeed } from './learning-ledgers.js';
@@ -654,6 +654,47 @@ function allHandClassesOrder() {
   }
   return out;
 }
+// The chart of one spot (no I/O beyond the bundled dataset): its source and every hand's cell.
+function spotChart(spotKey, requested) {
+  const known = requested ? KNOWN_REFERENCE_SOURCES.find((row) => sameSource(row, requested))
+    : spotKey.endsWith('-v3') ? V3_REFERENCE_SOURCE : spotKey.endsWith('-v2') ? KNOWN_REFERENCE_SOURCES.find((row) => row.version === '2.0.0') : LEGACY_REFERENCE_SOURCE;
+  if (!known) throw coded('SOURCE_UNAVAILABLE', 'requested reference source is not available');
+  const dataset = loadReferenceDataset(known);
+  const source = sourceIdentityOfDataset(dataset);
+  const cells = {};
+  let any = false;
+  for (const hand of allHandClassesOrder()) {
+    const found = lookup(dataset, { spotKey, handClass: hand });
+    if (found.status !== 'supported') { cells[hand] = null; continue; }
+    any = true;
+    const f = { fold: 0, call: 0, raise: 0 };
+    for (const row of found.actions) f[row.action] = Math.round((f[row.action] + row.frequency) * 10000) / 10000;
+    cells[hand] = f;
+  }
+  if (!any) throw coded('UNSUPPORTED_SPOT', 'spot is not in the reference dataset');
+  return { source, cells };
+}
+
+// Records one chart view (caller holds the drill lock): the append-only exposure ledger first,
+// then the recent-view file the question generators read.
+function recordChartView(storeDir, source, spotKey) {
+  const at = new Date().toISOString();
+  const latest = new Map();
+  for (const row of [...loadExposures(storeDir), { sourceIdentity: source, spotKey, at }]) {
+    if (Date.parse(at) - Date.parse(row.at) > EXPOSURE_WINDOW_MS) continue;
+    const key = JSON.stringify([row.sourceIdentity.id, row.sourceIdentity.version, row.sourceIdentity.contentSha256 ?? null, row.spotKey]);
+    const prior = latest.get(key);
+    if (!prior || Date.parse(row.at) >= Date.parse(prior.at)) latest.set(key, row);
+  }
+  const rows = [...latest.values()].sort((left, right) => left.at.localeCompare(right.at));
+  // #298: 덧붙이기 전용 노출 원장을 먼저 쓴다. 실패하면 차트를 돌려주지 않는다(노출 없음). 원장만 쓰고 아래 쓰기가
+  // 실패하면 원장이 열람을 과대 기록한다 — 평가 쪽에는 보수적인 방향이다.
+  appendLedgerRow(trainingRoot(storeDir), 'exposure', { at, sourceIdentity: { ...source }, spotKey }, {
+    at, seedRows: () => readRecentViewSeed(trainingRoot(storeDir)),
+  });
+  writeContained(trainingRoot(storeDir), EXPOSURE_SEGMENTS, JSON.stringify(rows), { mode: 'replace' });
+}
+
 export async function readSpotChart(storeDir, { spotKey, source: requested } = {}) {
   if (typeof spotKey !== 'string' || !/^[a-z0-9-]{1,100}$/.test(spotKey)) throw coded('UNSUPPORTED_SPOT', 'spot key is invalid');
   return withDrillLock(storeDir, async () => {
@@ -661,37 +702,8 @@ export async function readSpotChart(storeDir, { spotKey, source: requested } = {
     if (session && LOCKED_RUN_MODES.has(session.mode) && session.index < (session.queue?.length ?? 0)) {
       throw coded('GRID_LOCKED', 'charts are hidden while an assessment, retest or transfer run is open');
     }
-    const known = requested ? KNOWN_REFERENCE_SOURCES.find((row) => sameSource(row, requested))
-      : spotKey.endsWith('-v3') ? V3_REFERENCE_SOURCE : spotKey.endsWith('-v2') ? KNOWN_REFERENCE_SOURCES.find((row) => row.version === '2.0.0') : LEGACY_REFERENCE_SOURCE;
-    if (!known) throw coded('SOURCE_UNAVAILABLE', 'requested reference source is not available');
-    const dataset = loadReferenceDataset(known);
-    const source = sourceIdentityOfDataset(dataset);
-    const cells = {};
-    let any = false;
-    for (const hand of allHandClassesOrder()) {
-      const found = lookup(dataset, { spotKey, handClass: hand });
-      if (found.status !== 'supported') { cells[hand] = null; continue; }
-      any = true;
-      const f = { fold: 0, call: 0, raise: 0 };
-      for (const row of found.actions) f[row.action] = Math.round((f[row.action] + row.frequency) * 10000) / 10000;
-      cells[hand] = f;
-    }
-    if (!any) throw coded('UNSUPPORTED_SPOT', 'spot is not in the reference dataset');
-    const at = new Date().toISOString();
-    const latest = new Map();
-    for (const row of [...loadExposures(storeDir), { sourceIdentity: source, spotKey, at }]) {
-      if (Date.parse(at) - Date.parse(row.at) > EXPOSURE_WINDOW_MS) continue;
-      const key = JSON.stringify([row.sourceIdentity.id, row.sourceIdentity.version, row.sourceIdentity.contentSha256 ?? null, row.spotKey]);
-      const prior = latest.get(key);
-      if (!prior || Date.parse(row.at) >= Date.parse(prior.at)) latest.set(key, row);
-    }
-    const rows = [...latest.values()].sort((left, right) => left.at.localeCompare(right.at));
-    // #298: 덧붙이기 전용 노출 원장을 먼저 쓴다. 실패하면 차트를 돌려주지 않는다(노출 없음). 원장만 쓰고 아래 쓰기가
-    // 실패하면 원장이 열람을 과대 기록한다 — 평가 쪽에는 보수적인 방향이다.
-    appendLedgerRow(trainingRoot(storeDir), 'exposure', { at, sourceIdentity: { ...source }, spotKey }, {
-      at, seedRows: () => readRecentViewSeed(trainingRoot(storeDir)),
-    });
-    writeContained(trainingRoot(storeDir), EXPOSURE_SEGMENTS, JSON.stringify(rows), { mode: 'replace' });
+    const { source, cells } = spotChart(spotKey, requested);
+    recordChartView(storeDir, source, spotKey);
     return { ok: true, source, spotKey, cells };
   });
 }
@@ -940,6 +952,213 @@ export async function answerQuestion(storeDir, { action, sizeBb, sessionId, ques
     persistSession(storeDir, session);
     await replayPending(storeDir, session, committed.events);
     return answerPayload(session);
+  });
+}
+
+// ── End-of-game review quiz (#349) ────────────────────────────────────────────
+// The app server's host-only quiz routes. Opening serves the asked pairs with their choices and no
+// reference. An answer records the chart view first; then, for a v3 spot whose due mistake-bank item
+// it finds, one spaced-repetition review through the drill's own grading and transition. No profile
+// or practice event is written. The review log `quiz-reviews.json` makes one game's answer to one
+// pair count once and lets the next answer finish a write that was interrupted.
+const QUIZ_DRILL_MODES = new Set(['free', 'leak', 'daily', 'mistake-review', 'assessment', 'retest', 'transfer']);
+const QUIZ_LOG_SEGMENTS = ['quiz-reviews.json'];
+const QUIZ_LOG_MAX_BYTES = 1024 * 1024;
+const QUIZ_LOG_MAX_ROWS = 500;
+const QUIZ_ACTIONS = ['fold', 'call', 'raise'];
+const QUIZ_ROW_KEYS = ['action', 'at', 'before', 'gameId', 'grade', 'handClass', 'mistakeId', 'patch', 'spotKey', 'state'].join();
+const QUIZ_STATES = new Set(['pending', 'applied', 'unconfirmed']);
+const QUIZ_SPOT_RE = /^[a-z0-9-]{1,100}$/;
+const QUIZ_HAND_RE = /^[2-9TJQKA]{2}[so]?$/;
+
+// Read only, never replayed: the quiz goes ahead only when no measurement run can be open and no
+// drill answer is unresolved. A drill pending captures the bank item's schedule; changing it first
+// would leave that pending unprovable.
+function quizGate(storeDir) {
+  let session;
+  try { session = loadSession(storeDir); } catch { throw coded('STUDY_BUSY', 'the drill session cannot be read'); }
+  if (session === null) return;
+  const shaped = object(session) && QUIZ_DRILL_MODES.has(session.mode) && Array.isArray(session.queue)
+    && Number.isSafeInteger(session.index) && session.index >= 0 && session.index <= session.queue.length;
+  if (object(session) && LOCKED_RUN_MODES.has(session.mode) && !(shaped && runProvenFinished(session))) {
+    throw coded('GRID_LOCKED', 'charts are hidden while an assessment, retest or transfer run is open');
+  }
+  if (!shaped) throw coded('STUDY_BUSY', 'the drill session state cannot be proven');
+  if (session.pending !== null && session.pending !== undefined) throw coded('STUDY_BUSY', 'an unresolved drill answer must be resumed first');
+}
+
+// The action classes a question on this spot offers: the drill prompt's actions without sizes.
+function quizChoices(spotKey) {
+  const legal = legalActionsFor(spotKey);
+  return legal ? [...new Set(legal.map((entry) => entry.split(':')[0]))] : null;
+}
+
+// The drill's grading of one answer, on a question-shaped object (the drill's practice list is not
+// consulted: a game asks spots the drill does not practise). v3 compares action classes only.
+function quizGrade(source, spotKey, handClass, action) {
+  try {
+    const question = { questionId: 'quiz', sourceIdentity: { ...source }, prompt: { spotKey, handClass },
+      answerPolicy: { providerId: source.id, providerVersion: source.version, contentSha256: source.contentSha256 } };
+    const strategy = lookupStrategy(question);
+    if (strategy.status !== 'supported') return null;
+    const result = evaluateDrillAnswer(question, { action }, strategy);
+    return result.status === 'reference-adherence' ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+function readQuizLog(storeDir) {
+  let text;
+  try { text = openContained(trainingRoot(storeDir), QUIZ_LOG_SEGMENTS, { maxBytes: QUIZ_LOG_MAX_BYTES }).toString('utf8'); }
+  catch (error) { return error.code === 'ENOENT' ? { rows: [] } : null; }
+  try {
+    const data = JSON.parse(text);
+    return object(data) && data.schemaVersion === 1 && Array.isArray(data.rows) && data.rows.length <= QUIZ_LOG_MAX_ROWS ? { rows: data.rows } : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeQuizLog(storeDir, rows) {
+  writeContained(trainingRoot(storeDir), QUIZ_LOG_SEGMENTS, JSON.stringify({ schemaVersion: 1, rows }), { mode: 'replace' });
+}
+
+// Every row must be one this code could have written: its shape, a unique (game, spot, hand), an
+// offered action, the grade that answer gets now and the exact transition from its captured
+// schedule. A pending row must still name a bank item of the same source and pair. A row's time is
+// not compared with the clock (a clock moved back does not make the log invalid).
+function validQuizLog(rows, items, v3) {
+  const keys = new Set();
+  const grades = new Map();
+  for (const row of rows) {
+    if (!object(row) || Object.keys(row).sort().join() !== QUIZ_ROW_KEYS) return false;
+    if (!isSessionId(row.gameId) || typeof row.spotKey !== 'string' || !QUIZ_SPOT_RE.test(row.spotKey) || !row.spotKey.endsWith('-v3')
+      || typeof row.handClass !== 'string' || !QUIZ_HAND_RE.test(row.handClass) || !QUIZ_ACTIONS.includes(row.action)
+      || typeof row.at !== 'string' || !Number.isFinite(Date.parse(row.at)) || new Date(row.at).toISOString() !== row.at
+      || !QUIZ_STATES.has(row.state) || !object(row.before) || !object(row.patch)) return false;
+    try { assertEvaluationId(row.mistakeId); } catch { return false; }
+    const key = JSON.stringify([row.gameId, row.spotKey, row.handClass]);
+    if (keys.has(key)) return false;
+    keys.add(key);
+    if (!quizChoices(row.spotKey)?.includes(row.action)) return false;
+    const gradeKey = JSON.stringify([row.spotKey, row.handClass, row.action]);
+    if (!grades.has(gradeKey)) grades.set(gradeKey, quizGrade(v3, row.spotKey, row.handClass, row.action));
+    const result = grades.get(gradeKey);
+    if (!result || result.grade !== row.grade) return false;
+    let expected;
+    try { expected = scheduleTarget(row.before, result, row.at); } catch { return false; }
+    if (!isDeepStrictEqual(expected, row.patch)) return false;
+    if (row.state === 'pending') {
+      const item = items.find((candidate) => candidate.mistakeId === row.mistakeId);
+      if (!item || !sameSource(item.sourceIdentity, v3) || item.spotKey !== row.spotKey || item.handClass !== row.handClass) return false;
+    }
+  }
+  return true;
+}
+
+const quizUnconfirmed = { recorded: false, reason: 'REVIEW_UNCONFIRMED' };
+function quizRecorded(before, patch, already) {
+  return { recorded: true, already, nextReviewAt: patch.nextReviewAt, intervalDays: patch.intervalDays,
+    graduated: Boolean(patch.graduatedAt) && !before.graduatedAt };
+}
+
+async function recordQuizReview(storeDir, { gameId, spotKey, handClass, action, at, source, faults }) {
+  const fault = (step) => { if (faults?.failAt === step) throw coded('FAULT_INJECTED', `injected failure at ${step}`); };
+  const v3 = sourceIdentityOfDataset(loadReferenceDataset(V3_REFERENCE_SOURCE));
+  const log = readQuizLog(storeDir);
+  if (!log) return { recorded: false, reason: 'REVIEW_LOG_INVALID' };
+  const items = await readOnlyBank(storeDir).list();
+  if (!validQuizLog(log.rows, items, v3)) return { recorded: false, reason: 'REVIEW_LOG_INVALID' };
+  // Finish what an interrupted answer left. A schedule that is neither the captured one nor its
+  // target was changed by a drill review since: the row ends unconfirmed and nothing is written.
+  let recovered = false;
+  for (const row of log.rows) {
+    if (row.state !== 'pending') continue;
+    const current = items.find((item) => item.mistakeId === row.mistakeId).reviewState;
+    if (isDeepStrictEqual(current, { ...row.before, ...row.patch })) row.state = 'applied';
+    else if (isDeepStrictEqual(current, row.before)) {
+      await applySrsTarget(storeDir, { mistakeId: row.mistakeId, before: row.before, patch: row.patch });
+      row.state = 'applied';
+    } else row.state = 'unconfirmed';
+    recovered = true;
+  }
+  if (recovered) writeQuizLog(storeDir, log.rows);
+  if (!sameSource(source, v3)) return { recorded: false, reason: 'SOURCE_NOT_TRACKED' };
+  const prior = log.rows.find((row) => row.gameId === gameId && row.spotKey === spotKey && row.handClass === handClass);
+  if (prior) return prior.state === 'applied' ? quizRecorded(prior.before, prior.patch, true) : quizUnconfirmed;
+  // The study room's due rule; the first due item in bank order, as the daily queue would ask it.
+  const same = items.filter((item) => sameSource(item.sourceIdentity, v3) && item.spotKey === spotKey && item.handClass === handClass);
+  if (!same.length) return { recorded: false, reason: 'NOT_IN_BANK' };
+  const target = same.find((item) => dueForReview(item, at));
+  if (!target) return { recorded: false, reason: 'NOT_DUE' };
+  const result = quizGrade(v3, spotKey, handClass, action);
+  if (!result) return quizUnconfirmed;
+  const before = { ...target.reviewState };
+  const patch = scheduleTarget(before, result, at);
+  // Room for the new row first, by insertion order; this game's rows and pending rows stay.
+  const rows = [...log.rows];
+  while (rows.length + 1 > QUIZ_LOG_MAX_ROWS) {
+    const index = rows.findIndex((row) => row.gameId !== gameId && row.state !== 'pending');
+    if (index < 0) return quizUnconfirmed;
+    rows.splice(index, 1);
+  }
+  const row = { gameId, spotKey, handClass, action, grade: result.grade, at, mistakeId: target.mistakeId, before, patch, state: 'pending' };
+  rows.push(row);
+  fault('journal-pending');
+  writeQuizLog(storeDir, rows);
+  fault('bank');
+  await applySrsTarget(storeDir, { mistakeId: target.mistakeId, before, patch });
+  fault('journal-applied');
+  row.state = 'applied';
+  writeQuizLog(storeDir, rows);
+  return quizRecorded(before, patch, false);
+}
+
+/** Opening the quiz: the asked pairs that have a chart cell, with the actions each offers. No
+ * reference and no chart view (the reference is disclosed only by an answer). */
+export async function readQuizSpots(storeDir, pairs) {
+  return withDrillLock(storeDir, async () => {
+    quizGate(storeDir);
+    const charts = new Map();
+    const items = [];
+    for (const { spotKey, handClass } of Array.isArray(pairs) ? pairs : []) {
+      if (typeof spotKey !== 'string' || !QUIZ_SPOT_RE.test(spotKey) || typeof handClass !== 'string' || !QUIZ_HAND_RE.test(handClass)) continue;
+      if (!charts.has(spotKey)) {
+        try { charts.set(spotKey, spotChart(spotKey).cells); } catch { charts.set(spotKey, null); }
+      }
+      const choices = quizChoices(spotKey);
+      if (charts.get(spotKey)?.[handClass] && choices) items.push({ spotKey, handClass, choices });
+    }
+    return { items };
+  });
+}
+
+/** One quiz answer: the chart view is recorded first (refused while a measurement run is open or a
+ * drill answer is unresolved), then the review step. The reference goes out only after the view is
+ * on record. `faults` is a test-only seam that cuts the review writes at a boundary. */
+export async function answerQuizQuestion(storeDir, { gameId, spotKey, handClass, action, now, faults } = {}) {
+  if (!isSessionId(gameId) || typeof spotKey !== 'string' || !QUIZ_SPOT_RE.test(spotKey)
+    || typeof handClass !== 'string' || !QUIZ_HAND_RE.test(handClass) || !QUIZ_ACTIONS.includes(action)) {
+    throw coded('BAD_COMMAND', 'quiz answer is invalid');
+  }
+  return withDrillLock(storeDir, async () => {
+    quizGate(storeDir);
+    let chart;
+    try { chart = spotChart(spotKey); } catch { throw coded('QUIZ_NOT_ISSUED', 'the spot has no chart'); }
+    const cell = chart.cells[handClass];
+    const choices = quizChoices(spotKey);
+    if (!cell || !choices) throw coded('QUIZ_NOT_ISSUED', 'the hand has no chart cell');
+    if (!choices.includes(action)) throw coded('BAD_COMMAND', 'the question does not offer this action');
+    try { recordChartView(storeDir, chart.source, spotKey); }
+    catch { throw coded('STUDY_BUSY', 'the chart view could not be recorded'); }
+    let review;
+    try {
+      review = await recordQuizReview(storeDir, { gameId, spotKey, handClass, action, at: now ?? new Date().toISOString(), source: chart.source, faults });
+    } catch {
+      review = quizUnconfirmed;
+    }
+    return { ok: true, spotKey, handClass, reference: { fold: cell.fold, call: cell.call, raise: cell.raise }, review: { ...review } };
   });
 }
 

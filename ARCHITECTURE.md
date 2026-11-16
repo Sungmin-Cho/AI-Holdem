@@ -41,7 +41,7 @@ AI 홀덤은 브라우저 UI에서 policy 또는 LLM 페르소나를 상대로 �
 | `tools/study-summary.js` | 검증된 학습 이벤트를 게임·연습·평가·재시험별 공개 요약으로 투영한다. |
 | `training/play-report.js` | 플레이 리포트(순수): 게임 하나를 합칠 수 있는 요약으로 줄이고 요약들을 닫힌 DTO와 표시 행으로 만든다. 빈도, v3 기준표 대조(실제 든 패 기준), 살펴볼 패턴, 런아웃 운. 점수가 아니다. |
 | `tools/play-report-store.js` | store의 끝난 핸드를 복기 라이브러리의 봉쇄 읽기로 읽어 플레이 리포트를 만든다. 끝난 게임을 빠짐없이 읽었을 때만 요약을 메모리에 둔다. |
-| `server/public/review-quiz.js` | 종료 화면의 복습 문제(호스트 전용). 문제는 학습 항목에서, 기준 행동은 앱 서버 `POST /api/game/:id/quiz`에서 온다. |
+| `server/public/review-quiz.js` | 종료 화면의 복습 문제(호스트 전용). 문제는 학습 항목에서, 낼 행동은 앱 서버 `POST /api/game/:id/quiz`에서, 기준 빈도와 복습 기록 결과는 답마다 `POST /api/game/:id/quiz-answer`에서 온다. |
 | `shared/reference.js` | 휴리스틱 기준표의 출처·허용 액션·분포 일치 계약. 학습 효과나 solver 권위로 승격하지 않는다. |
 | `shared/free-text.js` | 사유·메모 정규화(`normalizeFreeText`). 코드포인트·바이트 상한. import 없음. |
 | `shared/seat-roles.js` | 호스트 id `'user'`, 참가자 `h1..hK`, `isHumanSeat`/`humanIdsOf`/`seatLabel`. 서버는 `publish-contract.js` 재수출만 쓴다. |
@@ -164,7 +164,9 @@ tools/game-loop.js  (사이드카, detached 프로세스)
 - **플레이 리포트**: `training/play-report.js`가 게임별 요약(빈도, 실제 든 패의 v3 기준 빈도 합과 실제 행동, 살펴볼 패턴, 런아웃 운)을 만들고 최근 600핸드 창으로 합친다. 입력은 `tools/replay-library.js` `readReportGame`이 내주는 **검증된 복기 DTO와 호스트 결정 스냅샷**뿐이다 — 참가자의 비공개 패는 어떤 수치에도 들어가지 않는다. 유리한 딜 핸드와 강제 액션은 뺀다. 100핸드당 수치는 비교 가능한 모집단(혼자, 캐시 트레이닝, 모든 AI 액션이 같은 정책 버전을 기록, 파생 정책 없음, 같은 인원·스택, 200핸드 이상)에만 낸다. 기존 점수·목표·SR·학습 효과 프로토콜에는 들어가지 않는다.
 - **제공 경로**: 학습실 `GET /api/report`(capability `playReport`), 게임 중 호스트 `report`의 패턴 줄(완료 핸드별 캐시), 종합 리뷰 synthesizer의 `play report` 블록과 기계 리뷰. evaluator는 결과를 모르는 채로 두므로 블록을 받지 않는다. 누적 스캔은 학습실 요청, 루프 부팅·재개(코치용 focus 준비), 종료 리뷰(10초 기한, 넘으면 누적 부분 없이 진행)에서만 시작하고, 핸드 하나를 줄일 때마다 이벤트 루프를 양보한다. 캐시는 프로세스별이다(학습 서비스와 게임 루프가 각자 읽는다). 세션이 1,000개를 넘거나 읽기 예산(128 MiB)을 넘으면 리포트에 일부만 읽었다고 표시한다.
 - **코치**: 대상은 점검에 걸린 결정 → 그 밖의 결정 → 프리플랍 폴드 순(같은 등급 안에서 비용순)으로 고른다. 프리플랍 폴드만 있는 핸드는 한 문장 평가다. 프롬프트는 사실 카드에 적힌 가격 비교 한 문장만 인용할 수 있고, 준비된 누적 패턴 줄과 대상 결정에 호스트가 적은 의도 메모(같은 decisionId의 호스트 액션 것만)를 자료로 받는다. 핸드마다 봉인 노트 1건이라는 불변식은 그대로다.
-- **종료 화면 복습**: 호스트의 로컬 테이블에서 방금 끝난 게임에만 뜬다(참가자·관전자·원격 호스트·지난 기록 열람에는 없음). `POST /api/game/:id/quiz`는 끝난 게임(`state.json` `gameOver`)에만 답하고, 본문을 읽은 뒤와 응답 직전에 게임·epoch을 다시 확인한다. 스팟마다 `readSpotChart`로 차트 열람 노출을 먼저 기록하고(평가·재평가·일반화 실행이 열려 있으면 `GRID_LOCKED`) 물은 패의 기준 빈도만 돌려준다. 물은 스팟이 그 게임의 학습 항목인지는 확인하지 않는다 — 학습실의 차트 열람과 같은 권한이다. 도중에 락 경합으로 실패하면 앞 스팟의 노출은 남는다(보수적인 쪽). 답은 저장하지 않는다.
+- **종료 화면 복습**: 호스트의 로컬 테이블에서 방금 끝난 게임에만 뜬다(참가자·관전자·원격 호스트·지난 기록 열람에는 없음). 두 호스트 경로(원격 허용 목록에 없음)는 끝난 게임(`state.json` `gameOver`)에만 답하고, 본문을 읽은 뒤와 응답 직전에 게임·epoch을 다시 확인한다. 받는 쌍은 **그 게임이 낸 문제**뿐이다: 그 순간 호스트 snapshot 경로가 주는 학습 항목(relay가 살아 있으면 `proxyGame`과 같은 relay capability로 읽은 relay의 호스트 snapshot — 본문을 다 받은 뒤 바인딩과 게임을 다시 확인한다 — 없으면 `loadUiState` 복원)에 브라우저와 같은 `quizCandidates`를 적용한 집합이다. 캐시하지 않는다.
+  - `POST /api/game/:id/quiz`(열기): 기준 빈도를 주지 않고 노출도 쓰지 않는다. 차트 칸이 있는 쌍만 `{spotKey, handClass, choices}`로 돌려준다(`choices`는 드릴 문제와 같은 `legalActionsFor`의 행동 종류). 드릴 세션이 측정 실행 중이거나 끝났음을 증명할 수 없으면 `GRID_LOCKED`.
+  - `POST /api/game/:id/quiz-answer`(답, `{spotKey, handClass, action}`): `tools/drill-cli.js` `answerQuizQuestion`이 드릴 락 안에서 측정 실행(`GRID_LOCKED`)·드릴의 미해결 pending(`STUDY_BUSY`)을 확인하고, 그 문제가 내지 않는 행동을 거절한 뒤, 차트 열람 노출을 **먼저** 기록하고 나서야 그 칸의 기준 빈도를 돌려준다(브라우저는 이 응답으로만 피드백을 그린다). 이어 v3 스팟이고 같은 출처·스팟·패의 오답 은행 항목이 학습실 규칙(`dueForReview`)으로 복습 시각이 되었으면, 드릴의 채점(`lookupStrategy`·`evaluateDrillAnswer`)과 전이(`scheduleTarget`·`applySrsTarget`)로 은행 목록 순서의 첫 항목 하나의 복습 상태만 움직인다. profile·연습 이벤트는 쓰지 않는다. `.training/quiz-reviews.json`이 (게임, 스팟, 패)마다 한 번만 세게 하고(`pending → applied`, 다음 답이 끊긴 쓰기를 마무리, 드릴이 그 사이 같은 항목을 복습했으면 `unconfirmed`), 파일 전체가 의미까지 검증되지 않으면 복습 기록만 멈춘다. v1/v2 스팟은 노출·피드백만 있고 기록하지 않는다(레이즈 크기 채점).
 
 ### Reference coverage v2 (#150)
 

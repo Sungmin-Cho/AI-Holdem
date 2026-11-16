@@ -24,6 +24,9 @@ import { toPublicSummary } from '../training/public-view.js';
 import { evaluationIdOf } from '../training/contracts.js';
 import { nextSchedule } from '../training/spaced-repetition.js';
 import { makeLoop, makeSession } from './helpers/relay-proxy-fixture.js';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { createProfileStore } from '../tools/training-stores.js';
+import { LEARNING_EFFECT_PROTOCOL_V1, PROTOCOL_SHA256, evaluateLearningEffect, sealPlan } from '../training/learning-effect.js';
 
 const GAME = '00000000-0000-4000-8000-000000000349';
 const EPOCH = 'ab'.repeat(32);
@@ -131,7 +134,7 @@ async function fixture(t, { training = [], gameOver = true, state = 'ended', ses
 // A store whose bank has one due game item for (spot, hand), and a finished game that asked it.
 async function dueGame(t, spotKey = BTN, handClass = '72o', options = {}) {
   const miss = evaluation(spotKey, handClass, missOf(spotKey, handClass), { handNo: 4 });
-  const f = await fixture(t, { training: [trainingRow(miss), ...(options.training ?? [])], ...options });
+  const f = await fixture(t, { ...options, training: [trainingRow(miss), ...(options.training ?? [])] });
   const collected = await createMistakeBank(f.store).collect(miss);
   assert.equal(collected.added, true);
   return { ...f, miss, item: collected.item };
@@ -424,8 +427,9 @@ test('each write boundary that fails is finished by the next answer, never count
   // The applied mark fails after the bank write: the next answer only marks it.
   const markFailed = await answer('32o', { failAt: 'journal-applied' });
   assert.deepEqual(markFailed?.review, { recorded: false, reason: 'REVIEW_UNCONFIRMED' });
-  assert.equal((await bankItems(store))[2].attempts, 1);
-  assert.deepEqual(journal(store).rows.map((row) => row.state), ['pending', 'pending']);
+  // Every answer first finishes what an earlier one left: the bank write of 82o is applied now.
+  assert.deepEqual((await bankItems(store)).map((row) => row.attempts), [0, 1, 1, 0]);
+  assert.deepEqual(journal(store).rows.map((row) => [row.handClass, row.state]), [['82o', 'applied'], ['32o', 'pending']]);
   assert.equal((await answer('42o'))?.review?.recorded, true);
   assert.deepEqual(journal(store).rows.map((row) => [row.handClass, row.state]), [['82o', 'applied'], ['32o', 'applied'], ['42o', 'applied']]);
   assert.deepEqual((await bankItems(store)).map((row) => row.attempts), [0, 1, 1, 1]);
@@ -496,12 +500,11 @@ test('the review log keeps at most 500 rows by insertion order and never drops t
   // 500 applied rows of other games, written with a clock that ran ahead.
   const future = new Date(Date.now() + 10 * DAY).toISOString();
   const patch = { lastReviewedAt: future, attempts: 1, ...nextSchedule({ grade: 'preferred', intervalDays: 1, ease: 2.3, lapses: 0, now: Date.parse(future), srsVersion: 2, correctStreak: 0, graduatedAt: null }) };
-  const others = Array.from({ length: 500 }, (_, at) => ({ gameId: `00000000-0000-4000-8000-${String(at).padStart(12, '0')}`, spotKey: BTN, handClass: '72o',
+  const others = Array.from({ length: 500 }, (_, at) => ({ gameId: `00000000-0000-4000-9000-${String(at).padStart(12, '0')}`, spotKey: BTN, handClass: '72o',
     action: 'fold', grade: 'preferred', at: future, mistakeId: item.mistakeId, before: item.reviewState, patch, state: 'applied' }));
   fs.writeFileSync(journalFile(store), JSON.stringify({ schemaVersion: 1, rows: others }));
   const answer = (handClass) => drill.answerQuizQuestion?.(store, { gameId: GAME, spotKey: BTN, handClass, action: 'fold' });
-  assert.equal((await answer('72o'))?.review?.recorded, true);
-  assert.equal((await answer('82o'))?.review?.recorded, true);
+  assert.deepEqual([(await answer('72o'))?.review?.recorded, (await answer('82o'))?.review?.already], [true, false]);
   const rows = journal(store).rows;
   assert.equal(rows.length, 500);
   assert.deepEqual(rows.slice(-2).map((row) => [row.gameId, row.handClass]), [[GAME, '72o'], [GAME, '82o']]);
@@ -659,3 +662,87 @@ test('a relay binding lost while its snapshot is read, or an oversized snapshot,
   const big = await relayGame(t, { relayTraining: [], diskTraining: [], bytes: 65 * 1024 * 1024 });
   assert.deepEqual((await big.answer(BTN, '72o', 'fold')).body, { code: 'RELAY_UNAVAILABLE' });
 });
+
+// ── the sealed evaluator sees the answer-time view ───────────────────────────
+// A small copy of the learning-effect pipeline scenario (test/learning-effect-pipeline.test.js):
+// real v3 assessment answers re-dated into a sealed schedule. The quiz answer's own exposure row,
+// re-dated into the same schedule, is what the evaluator reads as a chart view.
+async function assessmentRuns(store, count) {
+  const runs = [];
+  for (let at = 0; at < count; at += 1) {
+    const started = await startDrill(store, { mode: 'assessment', source: V3, seed: `quiz-effect-${at}` });
+    for (;;) {
+      const next = await nextQuestion(store);
+      if (next.done || !next.question) break;
+      const cell = cellOf(next.question.prompt.spotKey, next.question.prompt.handClass);
+      const legal = next.question.prompt.legalActions;
+      const pick = legal.map((entry) => entry.split(':')).sort((a, b) => cell[b[0]] - cell[a[0]])[at % 2 ? legal.length - 1 : 0];
+      await answerQuestion(store, { sessionId: started.sessionId, questionId: next.question.questionId, attemptNo: next.index,
+        action: pick[0], ...(pick[1] ? { sizeBb: Number(pick[1]) } : {}) });
+    }
+  }
+  const byRun = new Map();
+  for (const event of await createProfileStore(store).readEventSnapshot()) {
+    if (!byRun.has(event.studyRun.id)) byRun.set(event.studyRun.id, []);
+    byRun.get(event.studyRun.id).push(event);
+  }
+  return [...byRun.values()].map((run) => run.sort((a, b) => a.studyRun.index - b.studyRun.index));
+}
+
+test('the answer-time view is a chart exposure for the sealed evaluator: M2 sees it between, M1 sees it before', { timeout: 300_000 }, async () => {
+  const C = Date.parse('2026-10-01T00:00:00.000Z');
+  const H = 3_600_000;
+  const at = (ms) => new Date(C + ms).toISOString();
+  const pool = await assessmentRuns(createOwnedTempDir('quiz-effect-pool'), 4);
+  assert.equal(pool.length, 4);
+  const relabel = (event, { runId, mode, total, index, startedAt, assessmentId = null, appliedAt }) => {
+    const id = randomBytes(32).toString('hex');
+    const [, decision, provider] = event.evaluationId.split(':');
+    return { ...structuredClone(event), evaluationId: `${id}:${decision}:${provider}`, payloadSha256: id, appliedAt,
+      studyRun: { id: runId, mode, total, index, startedAt, ...(assessmentId ? { assessmentId } : {}) } };
+  };
+  const place = (events, { mode = 'assessment', startMs, assessmentId = null }) => {
+    const runId = randomUUID();
+    const startedAt = at(startMs);
+    return { runId, events: events.map((event, index) => relabel(event, { runId, mode, total: events.length, index, startedAt, assessmentId,
+      appliedAt: at(startMs + (index + 1) * 60_000) })),
+    row: { type: 'start', startId: randomUUID(), runId, mode, total: events.length, startedAt, sourceIdentity: V3, ...(assessmentId ? { assessmentId } : {}) } };
+  };
+  const ledger = (kind, rows, coverageFrom) => ({ status: 'ok', ledger: { schemaVersion: 1, kind, createdAt: coverageFrom, coverageFrom, rows,
+    dropped: 0, droppedThrough: null, resets: [] } });
+  const baseline = [place(pool[0], { startMs: H }), place(pool[1], { startMs: 2 * H })];
+  const post = [place(pool[2], { startMs: 8 * DAY }), place(pool[3], { startMs: 8 * DAY + H })];
+  const retests = baseline.map((run, i) => place(pool[i], { mode: 'retest', startMs: 9 * DAY + i * H, assessmentId: run.runId }));
+  const runs = [...baseline, ...post, ...retests];
+  const sealed = sealPlan({ baselineRuns: 2 }, at(0));
+  const enrollment = { id: randomUUID(), protocolId: LEARNING_EFFECT_PROTOCOL_V1.id, protocolSha256: PROTOCOL_SHA256, source: V3, consentedAt: at(0),
+    plan: sealed.plan, planSha256: sealed.planSha256, postOpensAt: sealed.postOpensAt, postClosesAt: sealed.postClosesAt, withdrawnAt: null };
+  const chartOf = (spotKey) => dataset.data.spots[spotKey] ?? null;
+  const evaluate = (exposureRows) => evaluateLearningEffect({ events: runs.flatMap((run) => run.events), enrollment, now: at(15 * DAY), chartOf,
+    runLog: ledger('run', runs.map((run) => run.row), at(0)), exposureLog: ledger('exposure', exposureRows, at(-7 * DAY)) });
+
+  // A real quiz answer on the chart of a baseline item; its ledger row is re-dated between the baseline answer and its retest.
+  const quizView = async (spotKey, handClass) => {
+    const store = createOwnedTempDir('quiz-effect-view');
+    const action = classes(generator.legalActionsFor(spotKey)).find((entry) => cellOf(spotKey, handClass)[entry] >= 0);
+    const out = await drill.answerQuizQuestion(store, { gameId: GAME, spotKey, handClass, action });
+    assert.equal(out.ok, true);
+    const [row] = exposureRows(store);
+    assert.deepEqual([row.spotKey, row.sourceIdentity], [spotKey, V3]);
+    return row;
+  };
+  const item = baseline[0].events[0].mixObservation;
+  const clean = evaluate([]);
+  assert.equal(clean.m2.excluded.REHEARSED ?? 0, 0);
+  const between = evaluate([{ ...(await quizView(item.spotKey, item.handClass)), at: at(5 * DAY) }]);
+  assert.ok(between.m2.excluded.REHEARSED >= 1, 'the quiz answer between the baseline answer and the retest is a rehearsal');
+  // Before a post item, on a spot key that shares its chart: that item is no longer clean.
+  const target = post[0].events.map((event) => event.mixObservation).find((observation) => Object.keys(dataset.data.spots)
+    .some((other) => other !== observation.spotKey && chartOf(other) === chartOf(observation.spotKey) && cellOf(other, observation.handClass)));
+  assert.ok(target, 'a post item whose chart another spot key shares');
+  const partner = Object.keys(dataset.data.spots).find((other) => other !== target.spotKey && chartOf(other) === chartOf(target.spotKey)
+    && cellOf(other, target.handClass));
+  const before = evaluate([{ ...(await quizView(partner, target.handClass)), at: at(3 * DAY) }]);
+  assert.ok(before.items.post.excluded.KNOWN_EXPOSURE_CHART > (clean.items.post.excluded.KNOWN_EXPOSURE_CHART ?? 0));
+});
+

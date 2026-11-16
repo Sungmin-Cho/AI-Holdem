@@ -12,8 +12,9 @@ import { createRoomManager } from "./room-manager.js";
 import { createSessionSummaryCache } from "./session-summary.js";
 import { RelayDenied } from "./relay-access.js";
 import { readHud, readReport, readReveal } from "./host-insights.js";
-import { readSpotChart } from "./drill-cli.js";
+import { answerQuizQuestion, readQuizSpots } from "./drill-cli.js";
 import { rankPlayers } from "../server/public/final-summary.js";
+import { quizCandidates } from "../server/public/review-quiz.js";
 import { HOST_ID } from "../shared/seat-roles.js";
 import { statExact } from "../shared/exact-stat.js";
 import { SPECTATOR_ID, viewerRole } from "../shared/viewer-access.js";
@@ -431,50 +432,126 @@ export async function startAppServer({
       json(res,error.code==='REVEAL_NOT_READY'?409:503,{code:error.code==='REVEAL_NOT_READY'?'REVEAL_NOT_READY':'INSIGHT_UNAVAILABLE'});
     }
   }
-  // Host-only review quiz for the screen of a game that has ended. Answering it shows the
-  // reference for the asked hands, so every spot is first recorded as a chart view in the
-  // study store's exposure ledger (tools/drill-cli.js readSpotChart, which also refuses while
-  // an assessment, retest or transfer run is open). A spot that cannot be recorded is not
-  // served. Not listed for the remote host: the study room it belongs with is local.
-  async function serveQuiz(req,res,gameId) {
-    if (req.method !== 'POST') {json(res,405,{code:'METHOD_NOT_ALLOWED'});return;}
+  // Host-only review quiz for the screen of a game that has ended (#349). Not listed for the
+  // remote host: the study room it belongs with is local. The questions are the ones the game asked:
+  // the training list the host's snapshot route gives the browser right now, through the browser's
+  // own quizCandidates. With a live relay that is the relay's host snapshot, read over the same
+  // verified capability as proxyGame; without one it is the ended-game restore the snapshot branch
+  // serves (relay restore rules). Never cached. Opening shows no reference; an answer records the
+  // chart view first (tools/drill-cli.js answerQuizQuestion), then returns the reference and, for a
+  // due mistake-bank item, records one review.
+  const RELAY_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024;
+  const quizError = (code) => Object.assign(new Error(code), { code });
+  async function relayHostTraining(gameId, epoch, res) {
+    const current = manager.current, session = manager.session, loop = session.loop;
+    const sessionDir = current.sessionDir, selectionVersion = current.selectionVersion;
+    if (typeof loop?.captureRelayAccess !== "function") throw quizError("RELAY_UNAVAILABLE");
+    const capability = loop.captureRelayAccess();
+    const controller = new AbortController();
+    const abandon = () => controller.abort();
+    res.on("close", abandon);
+    const revalidate = () => {
+      const latest = manager.snapshot();
+      if (manager.current?.gameId !== gameId || manager.current?.sessionDir !== sessionDir ||
+          manager.current?.selectionVersion !== selectionVersion || latest.gameEpoch !== epoch)
+        throw new RelayDenied("STALE_GAME", "STALE");
+      if (res.destroyed || manager.current !== current || manager.session !== session || session.loop !== loop)
+        throw new RelayDenied("RELAY_UNAVAILABLE", "CHANGED");
+    };
+    try {
+      let access = null;
+      // The granted access is used at once: the request starts in the same step as the last check.
+      const upstream = await capability.use({ gameEpoch: epoch, revalidate }, (granted) => {
+        access = granted;
+        const query = new URLSearchParams({ token: granted.sessionToken });
+        return openUpstream({ port: granted.port, path: `/api/snapshot?${query}`, method: "GET",
+          headers: { "x-seat": HOST_ID, "x-session-token": granted.sessionToken }, signal: controller.signal });
+      });
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of upstream) {
+        size += chunk.length;
+        if (size > RELAY_SNAPSHOT_MAX_BYTES) { controller.abort(); throw new RelayDenied("RELAY_UNAVAILABLE", "TOO_LARGE"); }
+        chunks.push(chunk);
+      }
+      // The capability proves the relay only up to the send: the binding and the game are checked
+      // again once the whole body is in, before anything is written.
+      if (upstream.statusCode !== 200 || !access.stillBound()) throw new RelayDenied("RELAY_UNAVAILABLE", "CHANGED");
+      revalidate();
+      const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (!Array.isArray(value?.training)) throw new RelayDenied("RELAY_UNAVAILABLE", "SHAPE");
+      return value.training;
+    } catch (error) {
+      throw quizError(error instanceof RelayDenied && error.code === "STALE_GAME" ? "STALE_GAME" : "RELAY_UNAVAILABLE");
+    } finally {
+      res.off("close", abandon);
+    }
+  }
+  async function issuedQuizPairs(gameId, epoch, res) {
+    let training = [];
+    if (manager.session) training = await relayHostTraining(gameId, epoch, res);
+    else if (["ended", "completed"].includes(manager.snapshot().state)) {
+      try { training = loadUiState(manager.current.sessionDir, readCommitFile("state.json").sessionToken).training; }
+      catch { committedCache.clear(); training = []; }
+    }
+    return new Set(quizCandidates(Array.isArray(training) ? training : []).map((row) => row.key));
+  }
+  const QUIZ_SPOT_RE = /^[a-z0-9-]{1,100}$/, QUIZ_HAND_RE = /^[2-9TJQKA]{2}[so]?$/;
+  // Shared head of both quiz routes: method, game identity before and after the body, body shape,
+  // a game that is over. Returns the body, or null after answering.
+  async function quizHead(req, res, gameId, validBody) {
+    if (req.method !== 'POST') {json(res,405,{code:'METHOD_NOT_ALLOWED'});return null;}
     const epoch=req.headers['x-game-epoch'];
     const currentGame=()=>manager.current?.gameId===gameId && manager.snapshot().gameEpoch===epoch;
-    if(!currentGame()) {json(res,409,{code:'STALE_GAME'});return;}
+    if(!currentGame()) {json(res,409,{code:'STALE_GAME'});return null;}
     const body=await bodyOf(req);
     // The body arrived over time: the game it was sent for must still be the current one.
-    if(!currentGame()) {json(res,409,{code:'STALE_GAME'});return;}
-    const items=body?.items;
-    if(!body || Array.isArray(body) || Object.keys(body).length!==1 || !Array.isArray(items) || items.length<1 || items.length>5 ||
-      !items.every(item=>item && typeof item==='object' && !Array.isArray(item) && Object.keys(item).length===2 &&
-        typeof item.spotKey==='string' && /^[a-z0-9-]{1,100}$/.test(item.spotKey) &&
-        typeof item.handClass==='string' && /^[2-9TJQKA]{2}[so]?$/.test(item.handClass))) {
-      json(res,400,{code:'BAD_COMMAND'});return;
-    }
+    if(!currentGame()) {json(res,409,{code:'STALE_GAME'});return null;}
+    if(!body || Array.isArray(body) || typeof body!=='object' || !validBody(body)) {json(res,400,{code:'BAD_COMMAND'});return null;}
     // Only for a game that is over: while it is played the reference stays in the study room.
     let over=false;
     try {over=readCommitFile('state.json').gameOver===true;} catch {committedCache.clear();}
-    if(!over) {json(res,409,{code:'GAME_NOT_OVER'});return;}
-    const charts=new Map(),served=[];
-    try {
-      for(const item of items) {
-        if(!charts.has(item.spotKey)) {
-          try {charts.set(item.spotKey,(await readSpotChart(storeDir,{spotKey:item.spotKey})).cells);}
-          catch(error) {
-            if(['GRID_LOCKED','LOCKED'].includes(error?.code))throw error;
-            charts.set(item.spotKey,null);
-          }
-        }
-        const cell=charts.get(item.spotKey)?.[item.handClass];
-        if(cell)served.push({spotKey:item.spotKey,handClass:item.handClass,actions:{fold:cell.fold,call:cell.call,raise:cell.raise}});
-      }
-    } catch(error) {
-      json(res,409,{code:error.code==='GRID_LOCKED'?'GRID_LOCKED':'STUDY_BUSY'});return;
+    if(!over) {json(res,409,{code:'GAME_NOT_OVER'});return null;}
+    return { body, epoch, currentGame };
+  }
+  const relayRefusal = (res, error) => json(res, error.code === 'STALE_GAME' ? 409 : 503, { code: error.code === 'STALE_GAME' ? 'STALE_GAME' : 'RELAY_UNAVAILABLE' });
+  async function serveQuiz(req,res,gameId) {
+    const head=await quizHead(req,res,gameId,(body)=>Object.keys(body).length===1 && Array.isArray(body.items) &&
+      body.items.length>=1 && body.items.length<=5 &&
+      body.items.every(item=>item && typeof item==='object' && !Array.isArray(item) && Object.keys(item).length===2 &&
+        typeof item.spotKey==='string' && QUIZ_SPOT_RE.test(item.spotKey) && typeof item.handClass==='string' && QUIZ_HAND_RE.test(item.handClass)));
+    if(!head) return;
+    let issued;
+    try {issued=await issuedQuizPairs(gameId,head.epoch,res);} catch(error) {relayRefusal(res,error);return;}
+    const asked=head.body.items.filter(item=>issued.has(`${item.spotKey}:${item.handClass}`));
+    let served=[];
+    if(asked.length) {
+      try {served=(await readQuizSpots(storeDir,asked)).items;}
+      catch(error) {json(res,409,{code:error.code==='GRID_LOCKED'?'GRID_LOCKED':'STUDY_BUSY'});return;}
     }
-    // Exposures written for a game that was replaced meanwhile stay (the conservative side);
-    // the answers are not sent.
-    if(!currentGame()) {json(res,409,{code:'STALE_GAME'});return;}
+    if(!head.currentGame()) {json(res,409,{code:'STALE_GAME'});return;}
     json(res,200,{ok:true,items:served});
+  }
+  async function serveQuizAnswer(req,res,gameId) {
+    const head=await quizHead(req,res,gameId,(body)=>Object.keys(body).length===3 &&
+      typeof body.spotKey==='string' && QUIZ_SPOT_RE.test(body.spotKey) && typeof body.handClass==='string' && QUIZ_HAND_RE.test(body.handClass) &&
+      ['fold','call','raise'].includes(body.action));
+    if(!head) return;
+    const {spotKey,handClass,action}=head.body;
+    let issued;
+    try {issued=await issuedQuizPairs(gameId,head.epoch,res);} catch(error) {relayRefusal(res,error);return;}
+    if(!issued.has(`${spotKey}:${handClass}`)) {json(res,409,{code:'QUIZ_NOT_ISSUED'});return;}
+    let answer;
+    try {answer=await answerQuizQuestion(storeDir,{gameId,spotKey,handClass,action});}
+    catch(error) {
+      if(error.code==='BAD_COMMAND') json(res,400,{code:'BAD_COMMAND'});
+      else json(res,409,{code:['GRID_LOCKED','QUIZ_NOT_ISSUED'].includes(error.code)?error.code:'STUDY_BUSY'});
+      return;
+    }
+    // A view or review written for a game replaced meanwhile stays (the conservative side; the
+    // answer was that game's); the reference is not sent.
+    if(!head.currentGame()) {json(res,409,{code:'STALE_GAME'});return;}
+    json(res,200,{ok:true,spotKey,handClass,reference:answer.reference,review:answer.review});
   }
   const committedCache = new Map();
   const readCommitFile = name => {
@@ -773,8 +850,8 @@ export async function startAppServer({
     if(summaryMatch){await serveSummary(req,res,summaryMatch[1]);return;}
     const insightMatch=/^\/api\/game\/([0-9a-f-]{36})\/(hud|report|reveal)$/.exec(pathname);
     if(insightMatch){await serveInsight(req,res,insightMatch[1],insightMatch[2]);return;}
-    const quizMatch=/^\/api\/game\/([0-9a-f-]{36})\/quiz$/.exec(pathname);
-    if(quizMatch){await serveQuiz(req,res,quizMatch[1]);return;}
+    const quizMatch=/^\/api\/game\/([0-9a-f-]{36})\/(quiz|quiz-answer)$/.exec(pathname);
+    if(quizMatch){await (quizMatch[2]==='quiz'?serveQuiz:serveQuizAnswer)(req,res,quizMatch[1]);return;}
     if(pathname==='/api/app/interrupt-decision') {
       if(req.method!=='POST'){json(res,405,{code:'METHOD_NOT_ALLOWED'});return;}
       const body=await bodyOf(req);
