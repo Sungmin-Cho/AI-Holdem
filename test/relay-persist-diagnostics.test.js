@@ -253,20 +253,24 @@ test('#347 a root replaced during the wait is refused, and nothing is written in
   let moved = false;
   const fault = failRenames(['ui-snapshot.json'], { times: 1, onFail: () => {
     fs.renameSync.call(fs, f.dir, displaced);
+    moved = true;
     fs.mkdirSync(f.dir);
     fs.writeFileSync(path.join(f.dir, 'sentinel'), 'foreign-root');
-    moved = true;
   } });
   let response;
+  let replacement = null;
   try { response = await f.publish(2); } finally {
     fault.restore();
+    // The original root comes back whatever happened above; the assertions follow.
     if (moved) {
-      assert.deepEqual(fs.readdirSync(f.dir), ['sentinel'], 'no snapshot, temporary or record reached the replacement root');
-      fs.rmSync(f.dir, { recursive: true });
-      fs.renameSync(displaced, f.dir);
+      try { replacement = fs.readdirSync(f.dir); } catch { replacement = null; } finally {
+        fs.rmSync(f.dir, { recursive: true, force: true });
+        fs.renameSync(displaced, f.dir);
+      }
     }
   }
   assert.ok(moved, 'the root was replaced during the collision');
+  assert.deepEqual(replacement, ['sentinel'], 'no snapshot, temporary or record reached the replacement root');
   assert.deepEqual([response.status, response.body], [500, { ok: false, code: 'PERSIST_FAILED' }]);
 });
 
