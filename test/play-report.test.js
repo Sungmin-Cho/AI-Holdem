@@ -185,6 +185,12 @@ test('the all-in expectation enumerates the cards to come', () => {
   assert.equal(turn.revealed, true);
   assert.ok(Math.abs(turn.expected - 2000 * (2 / 44)) < 1e-9, String(turn.expected));
   assert.equal(turn.won, 0);
+  // A folded hand the host can see holds the other two aces: they cannot come.
+  const dead = allInExpectation(replayOf({ folded: ['p2'], holes: { user: ['Ah', 'Ad'], p1: ['Kh', 'Kd'], p2: ['As', 'Ac'] } }));
+  assert.equal(dead.expected, 0);
+  // The same fold with the cards not shown (a participant's) leaves them in the deck.
+  const unseen = allInExpectation(replayOf({ folded: ['p2'], holes: { user: ['Ah', 'Ad'], p1: ['Kh', 'Kd'] } }));
+  assert.ok(Math.abs(unseen.expected - 2000 * (2 / 44)) < 1e-9);
   // Betting that ended on the river, a fold, or no showdown has nothing to adjust.
   assert.equal(allInExpectation(replayOf({ actions: [{ playerId: 'user', action: 'call', amount: 900, street: 'river', board: ['Ks', '7c', '2d', '3h', '9s'] }] })), null);
   assert.equal(allInExpectation(replayOf({ folded: ['user'] })), null);

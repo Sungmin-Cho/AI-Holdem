@@ -295,6 +295,12 @@ export function allInExpectation(replay, { seed = 1, samples = ALLIN_SAMPLES } =
     if (card < 0 || used[card]) return { revealed: false };
     used[card] = 1;
   }
+  // Cards the host can see in a hand that folded cannot come either. (A participant's
+  // folded cards are not in the projection, so they stay in the deck like any unseen card.)
+  for (const [pid, cards] of Object.entries(replay.holes)) {
+    if (ids.includes(pid) || !Array.isArray(cards)) continue;
+    for (const card of cards.map(cardInt)) if (card >= 0) used[card] = 1;
+  }
   const deck = [];
   for (let card = 0; card < 52; card += 1) if (!used[card]) deck.push(card);
   const shares = pots.map(() => 0);

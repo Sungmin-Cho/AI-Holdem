@@ -159,8 +159,11 @@ test('a read started right after the last caller left gets its own scan, and the
   await held.entered;
   gone.abort();
   await assert.rejects(abandoned, { code: PLAY_REPORT_ABORTED });
-  // The old scan stays held at its gate while the new read runs to its end: it must not join it.
-  const out = await held.reader.read();
+  // The old scan stays held at its gate while the new read runs to its end: it must not join
+  // it, and a third caller joins the new one.
+  const replacement = held.reader.read();
+  assert.equal(held.reader.read(), replacement, 'one replacement scan for both callers');
+  const out = await replacement;
   assert.equal(out.report.scope.heroHands, 6);
   assert.equal(out.report.scope.truncated, false);
   assert.equal(held.reader.cachedGames(), 2);
