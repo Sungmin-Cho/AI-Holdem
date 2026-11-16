@@ -12,6 +12,7 @@ import { createRoomManager } from "./room-manager.js";
 import { createSessionSummaryCache } from "./session-summary.js";
 import { RelayDenied } from "./relay-access.js";
 import { readHud, readReport, readReveal } from "./host-insights.js";
+import { readSpotChart } from "./drill-cli.js";
 import { rankPlayers } from "../server/public/final-summary.js";
 import { HOST_ID } from "../shared/seat-roles.js";
 import { statExact } from "../shared/exact-stat.js";
@@ -430,6 +431,41 @@ export async function startAppServer({
       json(res,error.code==='REVEAL_NOT_READY'?409:503,{code:error.code==='REVEAL_NOT_READY'?'REVEAL_NOT_READY':'INSIGHT_UNAVAILABLE'});
     }
   }
+  // Host-only review quiz for the screen of a game that has ended. Answering it shows the
+  // reference for the asked hands, so every spot is first recorded as a chart view in the
+  // study store's exposure ledger (tools/drill-cli.js readSpotChart, which also refuses while
+  // an assessment, retest or transfer run is open). A spot that cannot be recorded is not
+  // served. Not listed for the remote host: the study room it belongs with is local.
+  async function serveQuiz(req,res,gameId) {
+    if (req.method !== 'POST') {json(res,405,{code:'METHOD_NOT_ALLOWED'});return;}
+    const snapshot=manager.snapshot();
+    if(manager.current?.gameId!==gameId || req.headers['x-game-epoch']!==snapshot.gameEpoch) {json(res,409,{code:'STALE_GAME'});return;}
+    const body=await bodyOf(req);
+    const items=body?.items;
+    if(!body || Array.isArray(body) || Object.keys(body).length!==1 || !Array.isArray(items) || items.length<1 || items.length>5 ||
+      !items.every(item=>item && typeof item==='object' && !Array.isArray(item) && Object.keys(item).length===2 &&
+        typeof item.spotKey==='string' && /^[a-z0-9-]{1,100}$/.test(item.spotKey) &&
+        typeof item.handClass==='string' && /^[2-9TJQKA]{2}[so]?$/.test(item.handClass))) {
+      json(res,400,{code:'BAD_COMMAND'});return;
+    }
+    const charts=new Map(),served=[];
+    try {
+      for(const item of items) {
+        if(!charts.has(item.spotKey)) {
+          try {charts.set(item.spotKey,(await readSpotChart(storeDir,{spotKey:item.spotKey})).cells);}
+          catch(error) {
+            if(['GRID_LOCKED','LOCKED'].includes(error?.code))throw error;
+            charts.set(item.spotKey,null);
+          }
+        }
+        const cell=charts.get(item.spotKey)?.[item.handClass];
+        if(cell)served.push({spotKey:item.spotKey,handClass:item.handClass,actions:{fold:cell.fold,call:cell.call,raise:cell.raise}});
+      }
+    } catch(error) {
+      json(res,409,{code:error.code==='GRID_LOCKED'?'GRID_LOCKED':'STUDY_BUSY'});return;
+    }
+    json(res,200,{ok:true,items:served});
+  }
   const committedCache = new Map();
   const readCommitFile = name => {
     const file = path.join(manager.current.sessionDir, name);
@@ -727,6 +763,8 @@ export async function startAppServer({
     if(summaryMatch){await serveSummary(req,res,summaryMatch[1]);return;}
     const insightMatch=/^\/api\/game\/([0-9a-f-]{36})\/(hud|report|reveal)$/.exec(pathname);
     if(insightMatch){await serveInsight(req,res,insightMatch[1],insightMatch[2]);return;}
+    const quizMatch=/^\/api\/game\/([0-9a-f-]{36})\/quiz$/.exec(pathname);
+    if(quizMatch){await serveQuiz(req,res,quizMatch[1]);return;}
     if(pathname==='/api/app/interrupt-decision') {
       if(req.method!=='POST'){json(res,405,{code:'METHOD_NOT_ALLOWED'});return;}
       const body=await bodyOf(req);

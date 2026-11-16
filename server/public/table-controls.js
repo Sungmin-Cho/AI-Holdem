@@ -149,3 +149,13 @@ export function serverClockOffset(dateHeader, receivedAt = Date.now(), requested
   // HTTP Date has one-second precision; use its midpoint and half the round trip.
   return Number.isFinite(at) ? at + 500 + Math.max(0,receivedAt-requestedAt)/2 - receivedAt : 0;
 }
+
+/** A decision worth a note of intent: after the flop a call of five big blinds or a
+ * pot of ten, before the flop a call of ten big blinds (a shove, a large 3-bet). */
+export function bigDecision(view, legal) {
+  const bb = view?.blinds?.[1];
+  if (!legal || !(bb > 0)) return false;
+  const call = legal.callAmount ?? 0;
+  const postflop = (view.board?.length ?? 0) >= 3;
+  return postflop ? call >= 5 * bb || (legal.potTotal ?? 0) >= 10 * bb : call >= 10 * bb;
+}
