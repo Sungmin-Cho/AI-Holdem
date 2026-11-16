@@ -65,7 +65,8 @@ export function persistFailureEntry(stage, error, now = new Date()) {
 }
 
 function validEntry(entry) {
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.event !== 'string') return false;
+  // A string key only: a lookup would coerce ['persist-failed'] to the same name.
   const shape = Object.hasOwn(SHAPES, entry.event) ? SHAPES[entry.event] : null;
   if (!shape) return false;
   const keys = Object.keys(entry);

@@ -391,8 +391,13 @@ test('#347 one refused snapshot replacement in the relay is waited out: no refus
   const detail = () => JSON.stringify({refused: fault.refused(), recovery: f.recovery, relayDiagnostics: relayDiagnostics(f.root)});
   assert.equal(fault.refused().length, 1, `the relay met one refused replacement: ${detail()}`);
   assert.deepEqual(f.recovery, [], detail());
-  assert.deepEqual(relayDiagnostics(f.root).map(({at, ...rest}) => rest),
-    [{event: 'rename-retried', target: 'ui-snapshot.json', code: 'EPERM', attempts: 2}], detail());
+  // The injected refusal was waited out and noted. A real collision on Windows during the run is
+  // waited out and noted too (a further entry, or more attempts on the same write): allowed here;
+  // the exact counts are the in-process tests' (relay-persist-diagnostics).
+  const entries = relayDiagnostics(f.root);
+  assert.ok(entries.some((entry) => entry.event === 'rename-retried' && entry.target === 'ui-snapshot.json'
+    && entry.code === 'EPERM' && entry.attempts >= 2), detail());
+  assert.ok(entries.every((entry) => entry.event === 'rename-retried'), `nothing was refused: ${detail()}`);
   assert.ok(handLevels(f.root).length >= 5, 'the game went on');
 });
 
@@ -406,7 +411,9 @@ test('#347 a snapshot replacement refused past the cap is the PERSIST_FAILED ref
     {event: 'publish-refused', code: 'PUBLISH_REJECTED', httpStatus: 500, serverCode: 'PERSIST_FAILED', retry: false, bound: false, retire: false},
     {event: 'server-recovery-verified'},
   ], detail());
-  assert.deepEqual(relayDiagnostics(f.root).map(({at, ...rest}) => rest),
+  // Exactly that refusal; any other entry can only be a real collision the relay waited out.
+  const entries = relayDiagnostics(f.root);
+  assert.deepEqual(entries.filter((entry) => entry.event !== 'rename-retried').map(({at, ...rest}) => rest),
     [{event: 'persist-failed', stage: 'ui-commit', code: 'EPERM', syscall: 'rename', attempts: RELAY_RENAME_ATTEMPTS}], detail());
   assert.ok(handLevels(f.root).length >= 5, 'the game went on after the recovery');
   assertResendsCarryNoFreshClock(f);

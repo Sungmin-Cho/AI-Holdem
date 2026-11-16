@@ -4,7 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startServer } from '../server/server.js';
+import { createActionReceiptStore, createRelayRootOwner } from '../server/action-receipts.js';
+import { gameEpochOf } from '../publish-contract.js';
 import { createOwnedTempDir, registerOwnedServer } from './helpers/owned-fixtures.mjs';
+import { skipOnWin32 } from './helpers/platform.js';
 
 // #347: Windows refuses a rename onto a file another process holds open. The relay waits such a
 // collision out a bounded number of times (as engine/state.js commitTmp does) and notes the retry;
@@ -241,6 +244,111 @@ for (const swap of ['target', 'temporary']) {
   });
 }
 
+test('#347 a root replaced during the wait is refused, and nothing is written into the replacement', async (t) => {
+  // Renaming a directory with an open handle inside is EPERM on win32 (the S4 root tests skip it too).
+  if (skipOnWin32(t, 'renaming a directory with an open handle is EPERM on win32')) return;
+  const f = await fixture(t);
+  const holder = createOwnedTempDir('holdem-persist-diagnostics-root');
+  const displaced = path.join(holder, 'original');
+  let moved = false;
+  const fault = failRenames(['ui-snapshot.json'], { times: 1, onFail: () => {
+    fs.renameSync.call(fs, f.dir, displaced);
+    fs.mkdirSync(f.dir);
+    fs.writeFileSync(path.join(f.dir, 'sentinel'), 'foreign-root');
+    moved = true;
+  } });
+  let response;
+  try { response = await f.publish(2); } finally {
+    fault.restore();
+    if (moved) {
+      assert.deepEqual(fs.readdirSync(f.dir), ['sentinel'], 'no snapshot, temporary or record reached the replacement root');
+      fs.rmSync(f.dir, { recursive: true });
+      fs.renameSync(displaced, f.dir);
+    }
+  }
+  assert.ok(moved, 'the root was replaced during the collision');
+  assert.deepEqual([response.status, response.body], [500, { ok: false, code: 'PERSIST_FAILED' }]);
+});
+
+test('#347 the cancellation ledger waits a collision out the same way', () => {
+  const dir = createOwnedTempDir('holdem-persist-diagnostics-ledger');
+  const store = createActionReceiptStore(dir, gameEpochOf(TOKEN), { owner: createRelayRootOwner(dir) });
+  const fault = failRenames(['ui-action-cancellations.json'], { code: 'EBUSY', times: 2 });
+  let proof;
+  try { proof = store.cancel(request(), D1, 1); } finally { fault.restore(); }
+  assert.equal(fault.failed.length, 2);
+  assert.deepEqual(proof, { decisionId: D1, requestId: 'request-1' }, 'the durable proof is given after the collision');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'ui-action-cancellations.json'), 'utf8')).entries[0].requestId, 'request-1');
+});
+
+test('#347 a write that fails after its retried rename reports no retry, only the failure', async (t) => {
+  const f = await fixture(t);
+  const fault = failRenames(['ui-snapshot.json'], { times: 1 });
+  const refusing = fs.renameSync;
+  const realClose = fs.closeSync;
+  let renamed = false;
+  let closeFailed = false;
+  fs.renameSync = function renameSync(from, to, ...rest) {
+    const out = refusing.call(this, from, to, ...rest);
+    if (path.basename(String(to)) === 'ui-snapshot.json') renamed = true;
+    return out;
+  };
+  // The writer closes the renamed temporary's fd next; that close fails once.
+  fs.closeSync = function closeSync(fd) {
+    if (renamed && !closeFailed) {
+      closeFailed = true;
+      throw systemError('EIO', 'close', 'ui-snapshot.json');
+    }
+    return realClose.call(this, fd);
+  };
+  let response;
+  try { response = await f.publish(2); } finally { fs.closeSync = realClose; fault.restore(); }
+  assert.ok(closeFailed, 'the close after the retried rename failed');
+  assert.deepEqual([response.status, response.body], [500, { ok: false, code: 'PERSIST_FAILED' }]);
+  assert.deepEqual(withoutTime(f.entries()), [{ event: 'persist-failed', stage: 'ui-commit', code: 'EIO', syscall: 'close' }]);
+});
+
+test('#347 odd thrown values change nothing in the answer or the recovery and record only closed values', async (t) => {
+  const f = await fixture(t);
+  const selfCause = Object.assign(new Error(PRIVATE_DIR), { code: 'EIO', syscall: 'rename' });
+  selfCause.cause = selfCause;
+  const loopCause = { code: 'EIO', syscall: PRIVATE_DIR };
+  const mutualCause = Object.assign(new Error(PRIVATE_DIR), { code: 'EIO', syscall: 'rename', cause: loopCause });
+  loopCause.cause = mutualCause;
+  const throwingCode = Object.defineProperty(new Error(PRIVATE_DIR), 'code', { get() { throw new Error(PRIVATE_DIR); } });
+  const frozen = Object.freeze(Object.assign(new Error(PRIVATE_DIR), { code: 'EPERM', syscall: 'rename' }));
+  const cases = [
+    { thrown: null, entry: { code: null, syscall: null } },
+    { thrown: PRIVATE_DIR, entry: { code: null, syscall: null } },
+    { thrown: 42, entry: { code: null, syscall: null } },
+    // The getter's own throw replaces the rename error, still as a plain 500.
+    { thrown: throwingCode, entry: { code: null, syscall: null } },
+    // A collision is still waited out; a frozen error just cannot carry its attempt count.
+    { thrown: frozen, entry: { code: 'EPERM', syscall: 'rename' }, renames: RETRIES + 1 },
+    { thrown: selfCause, entry: { code: 'EIO', syscall: 'rename', attempts: 1 } },
+    { thrown: mutualCause, entry: { code: 'EIO', syscall: 'rename', attempts: 1, causeCode: 'EIO', causeSyscall: 'OTHER' } },
+  ];
+  let publishId = 2;
+  for (const { thrown, entry, renames = 1 } of cases) {
+    const real = fs.renameSync;
+    let calls = 0;
+    fs.renameSync = function renameSync(from, to, ...rest) {
+      if (path.basename(String(to)) === 'ui-snapshot.json') { calls += 1; throw thrown; }
+      return real.call(this, from, to, ...rest);
+    };
+    let response;
+    try { response = await f.publish(publishId); } finally { fs.renameSync = real; }
+    assert.equal(calls, renames);
+    assert.deepEqual([response.status, response.body], [500, { ok: false, code: 'PERSIST_FAILED' }]);
+    assert.deepEqual((await f.status()).body, { ok: false, code: 'ACTION_RECOVERY_REQUIRED' });
+    assert.equal((await f.publish(publishId)).status, 200);
+    assert.deepEqual(withoutTime(f.entries()).at(-1), { event: 'persist-failed', stage: 'ui-commit', ...entry });
+    publishId += 1;
+  }
+  assert.equal(f.entries().length, cases.length);
+  assertNothingPrivate(f.diagnosticsText());
+});
+
 test('#347 an unlisted code or syscall is recorded as OTHER, an absent one as null', async (t) => {
   const f = await fixture(t);
   let fault = failRenames(['ui-snapshot.json'], { code: 'E_PRIVATE_PERSON_HOME', syscall: 'copy /Users/private-person' });
@@ -295,6 +403,7 @@ test('#347 the record is bounded, survives a relay restart and drops entries it 
     { event: 'persist-failed', stage: PRIVATE_DIR, code: 'EPERM', syscall: 'rename', at: '2026-11-16T00:00:00.000Z' },
     { event: 'rename-retried', target: PRIVATE_DIR, code: 'EPERM', attempts: 2, at: '2026-11-16T00:00:00.000Z' },
     { event: 'rename-retried', target: 'ui-snapshot.json', code: 'EPERM', attempts: 99, at: '2026-11-16T00:00:00.000Z' },
+    { event: ['persist-failed'], stage: 'ui-commit', code: 'EPERM', syscall: 'rename', at: '2026-11-16T00:00:00.000Z' },
     { event: 'persist-failed', stage: 'ui-commit', code: 'EPERM', syscall: 'rename', at: '2026-11-16T00:00:00.000Z' },
   ] }));
   let publishId = 2;
