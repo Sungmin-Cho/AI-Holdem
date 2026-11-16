@@ -48,7 +48,9 @@ test('questions exist only for what the server served, with the choices it sent 
     item({ handNo: 6, spotKey: '2max-10bb-bb-vs-sb-shove-v3', handClass: 'Q9o', chosen: { action: 'fold' } }),
     item({ handNo: 7, spotKey: '6max-100bb-co-rfi-unopened', handClass: 'AJo', chosen: { action: 'raise' } }),
     item({ handNo: 8, handClass: 'T9s' }),
-  ]);
+  ], { limit: 6 });
+  assert.equal(candidates.length, 6);
+  assert.ok(candidates.some((row) => row.handClass === 'T9s'), 'T9s is a candidate the server does not serve');
   const questions = quizQuestions(candidates, { ok: true, items: [
     { spotKey: '6max-100bb-btn-vs-utg-open-v3', handClass: 'KTo', choices: ['fold', 'call', 'raise'] },
     { spotKey: '6max-100bb-co-rfi-v3', handClass: '64o', choices: ['fold', 'raise'] },

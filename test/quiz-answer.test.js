@@ -317,9 +317,12 @@ test('a drill session whose state cannot be proven refuses the quiz without writ
   for (const [session, code] of [
     [{ mode: 'assessment', queue: [{}], answers: [] }, 'GRID_LOCKED'],          // no index: its end is not proven
     [{ mode: 'assessment', queue: [], index: 0, answers: [], pending: { attemptNo: 0 } }, 'GRID_LOCKED'],
+    [{ mode: 'retest', queue: [{}], index: 0, answers: [] }, 'GRID_LOCKED'],
+    [{ mode: 'transfer', queue: [{}, {}], index: 1, answers: [{}] }, 'GRID_LOCKED'],
     [{ mode: 'nightly', queue: [], index: 0 }, 'STUDY_BUSY'],
     [{ mode: 'free', queue: 'x', index: 0 }, 'STUDY_BUSY'],
     [[1, 2], 'STUDY_BUSY'],
+    [null, 'STUDY_BUSY'],                                                      // a session file whose content is null
   ]) {
     writeJson(sessionPath, session);
     assert.deepEqual((await f.answer(BTN, '72o', 'fold')).body, { code }, JSON.stringify(session));
@@ -434,11 +437,71 @@ test('each write boundary that fails is finished by the next answer, never count
   assert.deepEqual(journal(store).rows.map((row) => [row.handClass, row.state]), [['82o', 'applied'], ['32o', 'applied'], ['42o', 'applied']]);
   assert.deepEqual((await bankItems(store)).map((row) => row.attempts), [0, 1, 1, 1]);
   assert.equal((await answer('32o'))?.review?.already, true);
-  // The recent-view file cannot be written after the ledger row: no reference, no review.
-  fs.rmSync(path.join(store, '.training', 'grid-exposures.json'));
-  fs.mkdirSync(path.join(store, '.training', 'grid-exposures.json'));
-  await assert.rejects(answer('72o'));
-  assert.equal((await bankItems(store))[0].attempts, 0);
+  // The recent-view file is not written after the ledger row: no reference, no review, and the
+  // ledger keeps the row (the conservative side for the evaluator).
+  const rowsBefore = exposureRows(store).length;
+  const logBefore = fs.readFileSync(journalFile(store), 'utf8');
+  const bankBefore = bankBytes(store);
+  await assert.rejects(answer('72o', { failAt: 'recent-view' }), { code: 'STUDY_BUSY' });
+  assert.equal(exposureRows(store).length, rowsBefore + 1);
+  assert.equal(fs.readFileSync(journalFile(store), 'utf8'), logBefore);
+  assert.equal(bankBytes(store), bankBefore);
+});
+
+test('a bank write that fails while finishing an earlier answer is retried by the next answer', async () => {
+  const store = createOwnedTempDir('quiz-recover');
+  const bank = createMistakeBank(store);
+  for (const hand of ['72o', '82o', '32o']) await bank.collect(evaluation(BTN, hand, missOf(BTN, hand)));
+  const answer = (handClass, faults) => drill.answerQuizQuestion?.(store, { gameId: GAME, spotKey: BTN, handClass, action: 'fold', ...(faults ? { faults } : {}) });
+  assert.equal((await answer('72o', { failAt: 'bank' }))?.review?.reason, 'REVIEW_UNCONFIRMED');
+  const pending = fs.readFileSync(journalFile(store), 'utf8');
+  assert.deepEqual((await answer('82o', { failAt: 'recover' }))?.review, { recorded: false, reason: 'REVIEW_UNCONFIRMED' });
+  assert.equal(fs.readFileSync(journalFile(store), 'utf8'), pending, 'the pending row stays for the next answer');
+  assert.deepEqual((await bankItems(store)).map((row) => row.attempts), [0, 0, 0]);
+  assert.equal((await answer('32o'))?.review?.recorded, true);
+  assert.deepEqual(journal(store).rows.map((row) => [row.handClass, row.state]), [['72o', 'applied'], ['32o', 'applied']]);
+  assert.deepEqual((await bankItems(store)).map((row) => row.attempts), [1, 0, 1]);
+});
+
+test('another game answering the same pair chooses from the bank as recovery left it', async () => {
+  const OTHER = '00000000-0000-4000-8000-000000000350';
+  const store = createOwnedTempDir('quiz-recover-pair');
+  const bank = createMistakeBank(store);
+  const first = (await bank.collect(evaluation(BTN, '72o', missOf(BTN, '72o')))).item;
+  const second = (await bank.collect(evaluation(BTN, '72o', missOf(BTN, '72o'), { origin: 'practice' }))).item;
+  const answer = (gameId, extra = {}) => drill.answerQuizQuestion?.(store, { gameId, spotKey: BTN, handClass: '72o', action: 'fold', ...extra });
+  assert.equal((await answer(GAME, { faults: { failAt: 'bank' } }))?.review?.reason, 'REVIEW_UNCONFIRMED');
+  // The other game's answer first finishes the first item; that item is no longer due, so it takes the second.
+  assert.equal((await answer(OTHER))?.review?.recorded, true);
+  const [a, b] = await bankItems(store);
+  assert.deepEqual([a.mistakeId, a.attempts, b.mistakeId, b.attempts], [first.mistakeId, 1, second.mistakeId, 1]);
+  assert.deepEqual(journal(store).rows.map((row) => [row.gameId, row.mistakeId, row.state]),
+    [[GAME, first.mistakeId, 'applied'], [OTHER, second.mistakeId, 'applied']]);
+  // With one item, an answer after its recovered schedule has come due reviews it from that schedule.
+  const lone = createOwnedTempDir('quiz-recover-due');
+  const { item } = await createMistakeBank(lone).collect(evaluation(BTN, '72o', missOf(BTN, '72o')));
+  const once = (gameId, extra = {}) => drill.answerQuizQuestion?.(lone, { gameId, spotKey: BTN, handClass: '72o', action: 'fold', ...extra });
+  assert.equal((await once(GAME, { faults: { failAt: 'bank' } }))?.review?.reason, 'REVIEW_UNCONFIRMED');
+  const later = new Date(Date.now() + 40 * DAY).toISOString();
+  assert.equal((await once(OTHER, { now: later }))?.review?.recorded, true);
+  const [after] = await bankItems(lone);
+  assert.equal(after.attempts, 2);
+  assert.equal(after.lastReviewedAt, later);
+  assert.deepEqual(journal(lone).rows.map((row) => [row.gameId, row.state, row.before.attempts]), [[GAME, 'applied', 0], [OTHER, 'applied', 1]]);
+  void item;
+});
+
+test('new evidence for the same item (its lastSeenAt) does not stop a pending review from being finished', async () => {
+  const store = createOwnedTempDir('quiz-recover-evidence');
+  const bank = createMistakeBank(store);
+  await bank.collect(evaluation(BTN, '72o', missOf(BTN, '72o')));
+  await bank.collect(evaluation(BTN, '82o', missOf(BTN, '82o')));
+  const answer = (handClass, faults) => drill.answerQuizQuestion?.(store, { gameId: GAME, spotKey: BTN, handClass, action: 'fold', ...(faults ? { faults } : {}) });
+  assert.equal((await answer('72o', { failAt: 'bank' }))?.review?.reason, 'REVIEW_UNCONFIRMED');
+  await bank.collect(evaluation(BTN, '72o', missOf(BTN, '72o')));        // the same miss again: evidence and lastSeenAt only
+  assert.equal((await answer('82o'))?.review?.recorded, true);
+  assert.deepEqual(journal(store).rows.map((row) => [row.handClass, row.state]), [['72o', 'applied'], ['82o', 'applied']]);
+  assert.deepEqual((await bankItems(store)).map((row) => [row.attempts, row.evidence]), [[1, 2], [1, 1]]);
 });
 
 test('a review the drill made meanwhile ends a pending quiz row unconfirmed without a second write', { timeout: 120_000 }, async (t) => {
@@ -492,7 +555,8 @@ test('an inconsistent review log stops recording and is left as it is; a clock m
   assert.equal((await answer('82o'))?.review?.recorded, true);
 });
 
-test('the review log keeps at most 500 rows by insertion order and never drops the current game or a pending row', async (t) => {
+test('the review log keeps at most 500 rows by insertion order and never drops the current game\'s rows', async (t) => {
+  // (A pending row is finished by recovery before any trimming, so trimming only ever sees settled rows.)
   const store = createOwnedTempDir('quiz-trim');
   const bank = createMistakeBank(store);
   const { item } = await bank.collect(evaluation(BTN, '72o', missOf(BTN, '72o')));
@@ -658,6 +722,18 @@ test('a relay binding lost while its snapshot is read, or an oversized snapshot,
   assert.equal(gone.relay.seen.closed, 1, 'the relay request was abandoned before its end');
   gone.relay.release();
   assert.equal(exposureRows(gone.store).length, 0);
+  // The game is replaced while the body arrives and the old relay stops with it: reported as a stale game.
+  const replaced = await relayGame(t, { relayTraining: [trainingRow(row)], diskTraining: [], hold: true });
+  const replacing = replaced.answer(BTN, '72o', 'fold');
+  for (let at = 0; at < 200 && !replaced.relay.seen.requests.length; at += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  replaced.manager.current = { ...replaced.manager.current, gameId: '00000000-0000-4000-8000-000000000351' };
+  replaced.loop.state.binding = null;
+  replaced.relay.release();
+  const stale = await replacing;
+  assert.equal(stale.status, 409);
+  assert.deepEqual(stale.body, { code: 'STALE_GAME' });
+  assert.equal(exposureRows(replaced.store).length, 0);
+  assert.equal(journal(replaced.store), null);
   // A snapshot over 64 MiB is refused.
   const big = await relayGame(t, { relayTraining: [], diskTraining: [], bytes: 65 * 1024 * 1024 });
   assert.deepEqual((await big.answer(BTN, '72o', 'fold')).body, { code: 'RELAY_UNAVAILABLE' });
@@ -725,10 +801,13 @@ test('the answer-time view is a chart exposure for the sealed evaluator: M2 sees
   const quizView = async (spotKey, handClass) => {
     const store = createOwnedTempDir('quiz-effect-view');
     const action = classes(generator.legalActionsFor(spotKey)).find((entry) => cellOf(spotKey, handClass)[entry] >= 0);
+    const started = Date.now();
     const out = await drill.answerQuizQuestion(store, { gameId: GAME, spotKey, handClass, action });
+    const ended = Date.now();
     assert.equal(out.ok, true);
     const [row] = exposureRows(store);
     assert.deepEqual([row.spotKey, row.sourceIdentity], [spotKey, V3]);
+    assert.ok(Date.parse(row.at) >= started - 1 && Date.parse(row.at) <= ended + 1, 'the view is dated at the answer');
     return row;
   };
   const item = baseline[0].events[0].mixObservation;

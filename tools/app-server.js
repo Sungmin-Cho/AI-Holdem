@@ -474,15 +474,20 @@ export async function startAppServer({
         if (size > RELAY_SNAPSHOT_MAX_BYTES) { controller.abort(); throw new RelayDenied("RELAY_UNAVAILABLE", "TOO_LARGE"); }
         chunks.push(chunk);
       }
-      // The capability proves the relay only up to the send: the binding and the game are checked
+      // The capability proves the relay only up to the send: the game and the binding are checked
       // again once the whole body is in, before anything is written.
-      if (upstream.statusCode !== 200 || !access.stillBound()) throw new RelayDenied("RELAY_UNAVAILABLE", "CHANGED");
       revalidate();
+      if (upstream.statusCode !== 200 || !access.stillBound()) throw new RelayDenied("RELAY_UNAVAILABLE", "CHANGED");
       const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       if (!Array.isArray(value?.training)) throw new RelayDenied("RELAY_UNAVAILABLE", "SHAPE");
       return value.training;
     } catch (error) {
-      throw quizError(error instanceof RelayDenied && error.code === "STALE_GAME" ? "STALE_GAME" : "RELAY_UNAVAILABLE");
+      // A game replaced meanwhile is reported as such, whatever failed first (the old relay may
+      // have stopped with it).
+      const stale = (error instanceof RelayDenied && error.code === "STALE_GAME") || manager.current?.gameId !== gameId ||
+        manager.current?.sessionDir !== sessionDir || manager.current?.selectionVersion !== selectionVersion ||
+        manager.snapshot().gameEpoch !== epoch;
+      throw quizError(stale ? "STALE_GAME" : "RELAY_UNAVAILABLE");
     } finally {
       res.off("close", abandon);
     }

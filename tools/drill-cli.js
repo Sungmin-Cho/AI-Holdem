@@ -677,7 +677,7 @@ function spotChart(spotKey, requested) {
 
 // Records one chart view (caller holds the drill lock): the append-only exposure ledger first,
 // then the recent-view file the question generators read.
-function recordChartView(storeDir, source, spotKey) {
+function recordChartView(storeDir, source, spotKey, fault = () => {}) {
   const at = new Date().toISOString();
   const latest = new Map();
   for (const row of [...loadExposures(storeDir), { sourceIdentity: source, spotKey, at }]) {
@@ -692,6 +692,7 @@ function recordChartView(storeDir, source, spotKey) {
   appendLedgerRow(trainingRoot(storeDir), 'exposure', { at, sourceIdentity: { ...source }, spotKey }, {
     at, seedRows: () => readRecentViewSeed(trainingRoot(storeDir)),
   });
+  fault('recent-view');
   writeContained(trainingRoot(storeDir), EXPOSURE_SEGMENTS, JSON.stringify(rows), { mode: 'replace' });
 }
 
@@ -975,9 +976,15 @@ const QUIZ_HAND_RE = /^[2-9TJQKA]{2}[so]?$/;
 // drill answer is unresolved. A drill pending captures the bank item's schedule; changing it first
 // would leave that pending unprovable.
 function quizGate(storeDir) {
+  // An absent session file is no session; a file whose content is `null` (or anything else that is
+  // not a session) is an unknown state.
   let session;
-  try { session = loadSession(storeDir); } catch { throw coded('STUDY_BUSY', 'the drill session cannot be read'); }
-  if (session === null) return;
+  try {
+    session = JSON.parse(openContained(trainingRoot(storeDir), SESSION_SEGMENTS, { maxBytes: SESSION_MAX_BYTES }).toString('utf8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw coded('STUDY_BUSY', 'the drill session cannot be read');
+  }
   const shaped = object(session) && QUIZ_DRILL_MODES.has(session.mode) && Array.isArray(session.queue)
     && Number.isSafeInteger(session.index) && session.index >= 0 && session.index <= session.queue.length;
   if (object(session) && LOCKED_RUN_MODES.has(session.mode) && !(shaped && runProvenFinished(session))) {
@@ -1047,7 +1054,8 @@ function validQuizLog(rows, items, v3) {
     const result = grades.get(gradeKey);
     if (!result || result.grade !== row.grade) return false;
     let expected;
-    try { expected = scheduleTarget(row.before, result, row.at); } catch { return false; }
+    // Re-derived with the SR version the row was captured under, as the drill's pending proof does.
+    try { expected = scheduleTarget(row.before, result, row.at, row.patch.srsVersion === SRS_VERSION ? SRS_VERSION : 1); } catch { return false; }
     if (!isDeepStrictEqual(expected, row.patch)) return false;
     if (row.state === 'pending') {
       const item = items.find((candidate) => candidate.mistakeId === row.mistakeId);
@@ -1063,12 +1071,14 @@ function quizRecorded(before, patch, already) {
     graduated: Boolean(patch.graduatedAt) && !before.graduatedAt };
 }
 
+const quizFault = (faults) => (step) => { if (faults?.failAt === step) throw coded('FAULT_INJECTED', `injected failure at ${step}`); };
+
 async function recordQuizReview(storeDir, { gameId, spotKey, handClass, action, at, source, faults }) {
-  const fault = (step) => { if (faults?.failAt === step) throw coded('FAULT_INJECTED', `injected failure at ${step}`); };
+  const fault = quizFault(faults);
   const v3 = sourceIdentityOfDataset(loadReferenceDataset(V3_REFERENCE_SOURCE));
   const log = readQuizLog(storeDir);
   if (!log) return { recorded: false, reason: 'REVIEW_LOG_INVALID' };
-  const items = await readOnlyBank(storeDir).list();
+  let items = await readOnlyBank(storeDir).list();
   if (!validQuizLog(log.rows, items, v3)) return { recorded: false, reason: 'REVIEW_LOG_INVALID' };
   // Finish what an interrupted answer left. A schedule that is neither the captured one nor its
   // target was changed by a drill review since: the row ends unconfirmed and nothing is written.
@@ -1078,12 +1088,17 @@ async function recordQuizReview(storeDir, { gameId, spotKey, handClass, action, 
     const current = items.find((item) => item.mistakeId === row.mistakeId).reviewState;
     if (isDeepStrictEqual(current, { ...row.before, ...row.patch })) row.state = 'applied';
     else if (isDeepStrictEqual(current, row.before)) {
+      fault('recover');
       await applySrsTarget(storeDir, { mistakeId: row.mistakeId, before: row.before, patch: row.patch });
       row.state = 'applied';
     } else row.state = 'unconfirmed';
     recovered = true;
   }
-  if (recovered) writeQuizLog(storeDir, log.rows);
+  if (recovered) {
+    writeQuizLog(storeDir, log.rows);
+    // The recovered reviews moved schedules: choose and capture from the bank as it is now.
+    items = await readOnlyBank(storeDir).list();
+  }
   if (!sameSource(source, v3)) return { recorded: false, reason: 'SOURCE_NOT_TRACKED' };
   const prior = log.rows.find((row) => row.gameId === gameId && row.spotKey === spotKey && row.handClass === handClass);
   if (prior) return prior.state === 'applied' ? quizRecorded(prior.before, prior.patch, true) : quizUnconfirmed;
@@ -1150,7 +1165,7 @@ export async function answerQuizQuestion(storeDir, { gameId, spotKey, handClass,
     const choices = quizChoices(spotKey);
     if (!cell || !choices) throw coded('QUIZ_NOT_ISSUED', 'the hand has no chart cell');
     if (!choices.includes(action)) throw coded('BAD_COMMAND', 'the question does not offer this action');
-    try { recordChartView(storeDir, chart.source, spotKey); }
+    try { recordChartView(storeDir, chart.source, spotKey, quizFault(faults)); }
     catch { throw coded('STUDY_BUSY', 'the chart view could not be recorded'); }
     let review;
     try {

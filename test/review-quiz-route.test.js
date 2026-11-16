@@ -163,9 +163,11 @@ test('the quiz is drawn one question at a time, shows a reference only from the 
   assert.ok(buttons().every((button) => button.disabled), 'locked while the answer is sent');
   buttons()[2].click();
   assert.equal(sent.length, 1, 'one answer in flight at a time');
-  const repainted = doc.createElement('div');
-  paintQuiz(repainted, questions, { doc, state, submit });
-  assert.ok([...repainted.querySelectorAll('button.quiz-choice')].every((button) => button.disabled), 'a repaint keeps it locked');
+  // The table repaints its quiz into the same element while the answer is in flight (app.js paintFinalQuiz).
+  paintQuiz(box, questions, { doc, state, submit, onRefused: (code) => refused.push(code) });
+  assert.ok(buttons().every((button) => button.disabled), 'a repaint keeps it locked');
+  buttons()[0].click();
+  assert.equal(sent.length, 1, 'still one answer in flight after the repaint');
   settle({ ok: false, code: 'GRID_LOCKED' });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(box.querySelector('.quiz-feedback'), null);
@@ -219,6 +221,10 @@ test('the table has the quiz section, the review link and the memo nudge wired f
   const script = fs.readFileSync(new URL('../server/public/app.js', import.meta.url), 'utf8');
   assert.match(script, /const allowed=!hidden&&Boolean\(appGameId\)&&!remoteHostTable&&!terminalRecord;/);
   assert.match(script, /paintFinalQuiz\(participantMode\|\|spectator\);/);
+  // Answers go to the server; a refusal that only reopening can fix sends the quiz back to its open button.
+  assert.match(script, /submit:submitQuizAnswer,onRefused:quizRefused/);
+  assert.match(script, /appFetch\('quiz-answer',/);
+  assert.match(script, /if\(!quizNeedsReopen\(code\)\|\|quiz\.phase!=='open'\)return;\n  Object\.assign\(quiz,\{phase:'error',error:quizAnswerErrorText\(code\),questions:\[\],state:null\}\);\n  paintFinalQuiz\(false\);/);
   assert.match(script, /studyLink\(authenticatedStudyUrl,\{mode:'daily'\}\)/);
   assert.match(script, /toggle\.classList\.toggle\('is-nudge', big\);/);
 });
