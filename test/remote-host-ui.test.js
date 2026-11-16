@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { HOST_TOKEN_KEY, goToLogin, isRemoteHostPage, loginErrorText, loginPath, reloadWhenRestored } from "../server/public/remote-host.js";
+import { HOST_TOKEN_KEY, goToLogin, isRemoteHostPage, loginErrorText, loginPath, markLogoutStarted, reloadWhenRestored } from "../server/public/remote-host.js";
 
 const read = (name) => fs.readFileSync(new URL(`../server/public/${name}`, import.meta.url), "utf8");
 
@@ -77,6 +77,23 @@ test("login navigation moves the whole tab and a restored page reloads", () => {
   const foreignFrame = { top: foreignTop, location: { origin: "https://mini:8898", replace: (url) => replaced.push(["frame", url]) } };
   goToLogin({ win: foreignFrame });
   assert.deepEqual(replaced, [["top", "/login?expired=1"], ["top", "/login"], ["frame", "/login"]]);
+  // A logout started in the tab (#347): an expiry seen afterwards, from the lobby or its table, is that
+  // logout and leaves the navigation to it; the logout's own navigation still goes.
+  const tab = [];
+  const lobby = { location: { origin: "https://mini:8898", replace: (url) => tab.push(["top", url]) } };
+  lobby.top = lobby;
+  const table = { top: lobby, location: { origin: "https://mini:8898", replace: (url) => tab.push(["frame", url]) } };
+  markLogoutStarted(lobby);
+  goToLogin({ expired: true, win: table });
+  goToLogin({ expired: true, win: lobby });
+  goToLogin({ win: lobby });
+  assert.deepEqual(tab, [["top", "/login"]]);
+  // The mark belongs to that tab's page: another tab, or a page whose parent is another origin, still expires.
+  const other = { location: { origin: "https://mini:8898", replace: (url) => tab.push(["other", url]) } };
+  other.top = other;
+  goToLogin({ expired: true, win: other });
+  goToLogin({ expired: true, win: { top: lobby, location: { origin: "https://elsewhere:8898", replace: (url) => tab.push(["foreign-origin", url]) } } });
+  assert.deepEqual(tab, [["top", "/login"], ["other", "/login?expired=1"], ["foreign-origin", "/login?expired=1"]]);
   const listeners = {};
   let reloads = 0;
   reloadWhenRestored({ addEventListener: (type, fn) => { listeners[type] = fn; }, location: { reload: () => { reloads += 1; } } });

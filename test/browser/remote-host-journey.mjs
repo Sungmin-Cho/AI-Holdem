@@ -33,13 +33,22 @@ export async function runRemoteHostJourney(outDir) {
     return result.data;
   };
   const evaluate = async (expr) => { const data = await browser(['eval', expr]); return data?.result ?? data; };
+  // Where the tab is when a wait gives up: its path and query and the login page's note (#347). Never
+  // the token (sessionStorage, the local lobby's fragment) or the host name.
+  const pageNow = async () => {
+    try {
+      return await evaluate("JSON.stringify({ at: location.pathname + location.search, note: document.querySelector('#login-note')?.textContent ?? null })");
+    } catch {
+      return 'unknown (the browser did not answer)';
+    }
+  };
   const wait = async (predicate, label, timeoutMs = 20000) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (await predicate()) return;
       await new Promise((r) => setTimeout(r, 150));
     }
-    throw new Error(`remote host journey timeout: ${label} (state ${app?.manager.snapshot().state})`);
+    throw new Error(`remote host journey timeout: ${label} (state ${app?.manager.snapshot().state}; page ${await pageNow()})`);
   };
   const atLogin = (search = '') => evaluate(`location.pathname==='/login' && location.search===${JSON.stringify(search)} && !!document.querySelector('#login-form')`);
   const signIn = async (password) => {

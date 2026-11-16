@@ -11,14 +11,34 @@ export function loginPath({ expired = false } = {}) {
   return expired ? '/login?expired=1' : '/login';
 }
 
-/** Navigate the whole tab (the lobby when called from its table iframe) to the login page. */
-export function goToLogin({ expired = false, win = globalThis.window } = {}) {
-  let target = win;
+/** The page a login navigation moves: the lobby around a same-origin table iframe, else this page. */
+function tabPage(win) {
   try {
-    if (win.top && win.top !== win && win.top.location.origin === win.location.origin) target = win.top;
+    if (win.top && win.top !== win && win.top.location.origin === win.location.origin) return win.top;
   } catch {
     /* a cross-origin parent: leave it alone */
   }
+  return win;
+}
+
+// A logout started in this tab (#347). The server ends the session, and the session's event
+// streams, before the logout answers; until the tab has left, the lobby's poll and its table's
+// requests are refused. Those refusals are this logout, not an expiry, and must not turn its
+// `/login` into `/login?expired=1`. The mark sits on the tab's top page, where the table iframe
+// reads it too, and leaves with that page.
+const LOGOUT_MARK = 'holdemHostLogoutStarted';
+
+export function markLogoutStarted(win = globalThis.window) {
+  tabPage(win)[LOGOUT_MARK] = true;
+}
+
+/**
+ * Navigate the whole tab (the lobby when called from its table iframe) to the login page. An
+ * expiry seen after this tab started its logout is left to the logout's own navigation.
+ */
+export function goToLogin({ expired = false, win = globalThis.window } = {}) {
+  const target = tabPage(win);
+  if (expired && target[LOGOUT_MARK] === true) return;
   target.location.replace(loginPath({ expired }));
 }
 

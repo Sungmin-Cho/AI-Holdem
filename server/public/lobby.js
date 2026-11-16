@@ -6,7 +6,7 @@ import { createShellBridge } from './shell-bridge.js';
 import { renderQr, copyText } from './invite.js';
 import { openHelp, helpButton, wireHelpMenu } from './help-panel.js';
 import { paintShellContext } from './shell-context.js';
-import { HOST_TOKEN_KEY, isRemoteHostPage, loginPath, reloadWhenRestored } from './remote-host.js';
+import { HOST_TOKEN_KEY, goToLogin, isRemoteHostPage, loginPath, markLogoutStarted, reloadWhenRestored } from './remote-host.js';
 const $ = (id) => document.getElementById(id),
   form = $("setup-form");
 const fragment = new URLSearchParams(location.hash.slice(1));
@@ -74,9 +74,10 @@ async function api(url, options = {}) {
   });
   const data = await response.json();
   if (response.status === 401 && remoteHost) {
-    // An expired, logged-out or re-keyed remote session: sign in again.
+    // An expired, logged-out-elsewhere or re-keyed remote session: sign in again. A refusal during
+    // this tab's own logout is that logout, and goToLogin leaves the navigation to it.
     sessionStorage.removeItem(HOST_TOKEN_KEY);
-    location.replace(loginPath({ expired: true }));
+    goToLogin({ expired: true });
   }
   if (!response.ok)
     throw Object.assign(new Error(data.code ?? "연결 실패"), {
@@ -1016,6 +1017,8 @@ if (remoteHost) {
   $("study").hidden = true;
   $("logout").hidden = false;
   $("logout").onclick = async () => {
+    // From the click on, a refused request in this tab (the poll, the table iframe) is this logout.
+    markLogoutStarted();
     try {
       await fetch("/api/host/logout", {
         method: "POST",
