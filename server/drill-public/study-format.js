@@ -616,8 +616,10 @@ export function formatPlayReport(response) {
   // second is not an empty store, and reading again may get further.
   const unread = count(scope.unreadableGames) || count(scope.unreadableHands) || scope.truncated === true;
   if (hands === 0) {
-    return { empty: true, retry: Boolean(unread), focus: [], sections: [],
-      scope: unread ? ['플레이 기록을 리포트에 담지 못했습니다', ...partial].join(' · ') : '끝난 핸드가 쌓이면 여기에 플레이 리포트가 보입니다.' };
+    const scopeText = unread ? ['플레이 기록을 리포트에 담지 못했습니다', ...partial].join(' · ')
+      : count(scope.biasedHands) ? `끝난 ${count(scope.biasedHands)}핸드가 모두 유리한 딜이라 리포트에서 뺐습니다. 유리한 딜을 끈 게임의 핸드가 쌓이면 여기에 보입니다.`
+        : '끝난 핸드가 쌓이면 여기에 플레이 리포트가 보입니다.';
+    return { empty: true, retry: Boolean(unread), focus: [], sections: [], scope: scopeText };
   }
   return {
     empty: false,

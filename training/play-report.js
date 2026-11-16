@@ -493,7 +493,11 @@ function focusOf(windowed, latest, earlier) {
 /** summaries: game summaries in any order. The pattern window is the newest
  * games up to WINDOW_HERO_HANDS hero hands; results cover every game given. */
 export function buildPlayReport(summaries, { now = null, unreadable = { games: 0, hands: 0 }, truncated = false } = {}) {
-  const games = (Array.isArray(summaries) ? summaries : []).filter((summary) => summary?.schemaVersion === PLAY_REPORT_SCHEMA && summary.heroHands > 0)
+  const valid = (Array.isArray(summaries) ? summaries : []).filter((summary) => summary?.schemaVersion === PLAY_REPORT_SCHEMA);
+  // Favourable-deal hands are in no figure, but they are counted wherever they were
+  // played: a game made only of them has no hand in the report and still explains why.
+  const biasedHands = valid.reduce((sum, summary) => sum + summary.biasedHands, 0);
+  const games = valid.filter((summary) => summary.heroHands > 0)
     .sort((a, b) => String(b.savedAt ?? '').localeCompare(String(a.savedAt ?? '')) || String(a.gameId).localeCompare(String(b.gameId)));
   const windowGames = [];
   let heroHands = 0;
@@ -520,7 +524,7 @@ export function buildPlayReport(summaries, { now = null, unreadable = { games: 0
     schemaVersion: PLAY_REPORT_SCHEMA,
     generatedAt: typeof now === 'string' ? now : null,
     scope: { games: windowGames.length, totalGames: games.length, heroHands,
-      biasedHands: windowGames.reduce((sum, summary) => sum + summary.biasedHands, 0),
+      biasedHands,
       from: windowGames.at(-1)?.savedAt ?? null, to: windowGames[0]?.savedAt ?? null,
       unreadableGames: unreadable.games ?? 0, unreadableHands: unreadable.hands ?? 0, truncated: truncated === true },
     tendency: {
