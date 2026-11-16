@@ -547,6 +547,13 @@ test('an inconsistent review log stops recording and is left as it is; a clock m
   }
   fs.writeFileSync(journalFile(store), '{broken');
   assert.equal((await answer('82o'))?.review?.reason, 'REVIEW_LOG_INVALID');
+  // A row captured under SR v1 (no srsVersion in its transition) is re-derived with v1: valid, and its key counts.
+  const v1Patch = { lastReviewedAt: row.at, attempts: 1, ...nextSchedule({ grade: row.grade, intervalDays: 1, ease: 2.3, lapses: 0, now: Date.parse(row.at) }) };
+  assert.equal(Object.hasOwn(v1Patch, 'srsVersion'), false);
+  fs.writeFileSync(journalFile(store), JSON.stringify({ schemaVersion: 1, rows: [{ ...row, before: item.reviewState, patch: v1Patch }] }));
+  assert.equal((await answer('72o'))?.review?.already, true);
+  fs.writeFileSync(journalFile(store), JSON.stringify({ schemaVersion: 1, rows: [{ ...row, before: item.reviewState, patch: { ...v1Patch, intervalDays: v1Patch.intervalDays + 3 } }] }));
+  assert.equal((await answer('82o'))?.review?.reason, 'REVIEW_LOG_INVALID', 'a v1 transition that does not reproduce is still refused');
   // A row written "in the future" (the clock was later moved back) is a valid row; its key still counts.
   const future = new Date(Date.now() + 10 * DAY).toISOString();
   const patch = { lastReviewedAt: future, attempts: 1, ...nextSchedule({ grade: row.grade, intervalDays: 1, ease: 2.3, lapses: 0, now: Date.parse(future), srsVersion: 2, correctStreak: 0, graduatedAt: null }) };
@@ -636,7 +643,7 @@ test('the due rule of the study room is one function', () => {
 
 // ── live relay ────────────────────────────────────────────────────────────────
 // A relay whose host snapshot is `snapshot`; `hold` delays the end of the body until released.
-async function snapshotRelay(snapshot, { hold = false, bytes = null } = {}) {
+async function snapshotRelay(snapshot, { hold = false, bytes = null, drop = false } = {}) {
   let release;
   const released = new Promise((resolve) => { release = resolve; });
   const seen = { requests: [], closed: 0 };
@@ -655,6 +662,7 @@ async function snapshotRelay(snapshot, { hold = false, bytes = null } = {}) {
     const text = JSON.stringify(snapshot);
     res.write(text.slice(0, 10));
     if (hold) await released;
+    if (drop) { res.destroy(); return; }                      // the connection fails mid-body
     res.end(text.slice(10));
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -662,8 +670,8 @@ async function snapshotRelay(snapshot, { hold = false, bytes = null } = {}) {
   return { port: server.address().port, seen, release, close: () => new Promise((resolve) => { server.closeAllConnections?.(); server.close(resolve); }) };
 }
 
-async function relayGame(t, { relayTraining, diskTraining, hold = false, bytes = null }) {
-  const relay = await snapshotRelay({ ok: true, training: relayTraining }, { hold, bytes });
+async function relayGame(t, { relayTraining, diskTraining, hold = false, bytes = null, drop = false }) {
+  const relay = await snapshotRelay({ ok: true, training: relayTraining }, { hold, bytes, drop });
   t.after(() => relay.close());
   const root = createOwnedTempDir('quiz-relay');
   const session = makeSession(root, relay.port, { sessionToken: TOKEN });
@@ -734,6 +742,14 @@ test('a relay binding lost while its snapshot is read, or an oversized snapshot,
   assert.deepEqual(stale.body, { code: 'STALE_GAME' });
   assert.equal(exposureRows(replaced.store).length, 0);
   assert.equal(journal(replaced.store), null);
+  // The game is replaced and then the old relay's connection fails mid-body: still a stale game.
+  const dropped = await relayGame(t, { relayTraining: [trainingRow(row)], diskTraining: [], hold: true, drop: true });
+  const dropping = dropped.answer(BTN, '72o', 'fold');
+  for (let at = 0; at < 200 && !dropped.relay.seen.requests.length; at += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  dropped.manager.current = { ...dropped.manager.current, gameId: '00000000-0000-4000-8000-000000000352' };
+  dropped.relay.release();
+  assert.deepEqual(await dropping, { status: 409, body: { code: 'STALE_GAME' } });
+  assert.equal(exposureRows(dropped.store).length, 0);
   // A snapshot over 64 MiB is refused.
   const big = await relayGame(t, { relayTraining: [], diskTraining: [], bytes: 65 * 1024 * 1024 });
   assert.deepEqual((await big.answer(BTN, '72o', 'fold')).body, { code: 'RELAY_UNAVAILABLE' });

@@ -15,6 +15,7 @@ import { eventFromEvaluation, eventForPrior } from '../training/profile-store.js
 import { learningEventKey } from '../training/study-history.js';
 import { validateStudyRun } from '../shared/study-contract.js';
 import { lookup } from '../training/providers/preflop-json.js';
+import { parsePreflopKeyV3 } from '../shared/preflop-key.js';
 import { CANONICAL_REFERENCE_SOURCE, LEGACY_REFERENCE_SOURCE, KNOWN_REFERENCE_SOURCES, V2_REFERENCE_SOURCE, V3_REFERENCE_SOURCE, referenceSchemaOf } from '../shared/reference.js';
 import { rebuildFromEvents } from '../training/profile-aggregator.js';
 import { nativePreflopSnapshot } from '../training/native-preflop-snapshot.js';
@@ -1040,7 +1041,7 @@ function validQuizLog(rows, items, v3) {
   const grades = new Map();
   for (const row of rows) {
     if (!object(row) || Object.keys(row).sort().join() !== QUIZ_ROW_KEYS) return false;
-    if (!isSessionId(row.gameId) || typeof row.spotKey !== 'string' || !QUIZ_SPOT_RE.test(row.spotKey) || !row.spotKey.endsWith('-v3')
+    if (!isSessionId(row.gameId) || typeof row.spotKey !== 'string' || !QUIZ_SPOT_RE.test(row.spotKey) || !parsePreflopKeyV3(row.spotKey)
       || typeof row.handClass !== 'string' || !QUIZ_HAND_RE.test(row.handClass) || !QUIZ_ACTIONS.includes(row.action)
       || typeof row.at !== 'string' || !Number.isFinite(Date.parse(row.at)) || new Date(row.at).toISOString() !== row.at
       || !QUIZ_STATES.has(row.state) || !object(row.before) || !object(row.patch)) return false;
