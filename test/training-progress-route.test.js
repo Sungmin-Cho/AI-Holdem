@@ -162,6 +162,40 @@ test('a finished result is reused only briefly and only for the same game state;
   assert.equal(short.scans.length, 2);
 });
 
+test('a scan started under another game state answers as pending, so the current state is read next', async (t) => {
+  const reader = heldReader();
+  const { get, view } = await server(t, { reader, progressWaitMs: 5000 });
+  const before = get();
+  await until(() => reader.scans.length === 1);
+  // The game finishes while the scan is still reading: a request now joins the running scan.
+  Object.assign(view, { gameId: '00000000-0000-4000-8000-000000000002', state: 'completed' });
+  const after = get();
+  await settle();
+  assert.equal(reader.scans.length, 1, 'no overlapping scan');
+  reader.scans[0].finish(80);
+  const line = '비교 가능한 핸드 80 / 200 (6인 · 100BB · 정책 v3)';
+  assert.deepEqual((await before).body, { ok: true, progress: { hands: 80, target: 200, line } }, 'the request it was started for');
+  assert.deepEqual((await after).body, { ok: true, progress: { hands: 80, target: 200, line }, pending: true }, 'read under the old state');
+  // The lobby asks again: that request reads the current state.
+  const again = get();
+  await until(() => reader.scans.length === 2);
+  reader.scans[1].finish(130);
+  assert.equal((await again).body.progress.hands, 130);
+  assert.equal((await again).body.pending, undefined);
+});
+
+test('closing the server drops the route\'s share of a running scan', async (t) => {
+  const reader = heldReader();
+  const { app, get } = await server(t, { reader, progressWaitMs: 20 });
+  assert.equal((await get()).body.pending, true);
+  // Another consumer of the same reader (the game loop) reads without the route's signal.
+  const other = reader.read();
+  other.catch(() => {});
+  await app.close();
+  assert.equal(reader.scans[0].options.signal.aborted, true);
+  assert.equal(reader.scans[1].options.signal, undefined, 'the other consumer is not cut off');
+});
+
 test('the route gives up its scan at the end of its lifetime, and a failed scan is an error the lobby hides', async (t) => {
   const reader = heldReader();
   const { get } = await server(t, { reader, progressWaitMs: 20, progressWorkMs: 60 });

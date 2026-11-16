@@ -244,12 +244,26 @@ test('a pending answer is asked again a few times while the setup screen is show
   await context.askTrainingProgress();
   assert.equal(timers.length, 1);
   assert.ok(timers[0].ms >= 1000);
+  // A retry callback starts the next ask without awaiting it: give the loop a turn before looking.
   for (let n = 0; n < 20 && timers.length; n += 1) {
     const next = timers.shift();
-    await next.fn();
+    next.fn();
+    await settle();
   }
-  assert.ok(context.requests.length <= 8, `bounded retries: ${context.requests.length}`);
+  assert.equal(context.requests.length, 10, 'one ask and nine retries: 2.5 s answers and 5 s gaps outlast the route\'s 60 s scan');
+  assert.match(source, /const PROGRESS_TRIES = 10;/);
+  assert.match(source, /const PROGRESS_RETRY_MS = 5000;/);
   assert.equal(timers.length, 0);
+  // A retry already scheduled does not ask once the setup screen is hidden.
+  const leaving = lobby();
+  const scheduled = [];
+  leaving.context.setTimeout = (fn) => { scheduled.push(fn); return 1; };
+  leaving.context.answer = () => ({ ok: true, progress: null, pending: true });
+  await leaving.context.askTrainingProgress();
+  assert.equal(scheduled.length, 1);
+  leaving.$('setup').hidden = true;
+  await scheduled[0]();
+  assert.equal(leaving.context.requests.length, 1);
   // A hidden setup screen stops the retries.
   const hidden = lobby();
   const later = [];
@@ -343,6 +357,23 @@ test('progress is asked when the setup screen comes into view, and an older answ
   release();
   await slow;
   assert.equal($('training-progress').textContent, line(60));
+  // Leaving the setup screen ends the chain: the retry is cleared and an answer still on its way is dropped.
+  const away = lobby();
+  const cleared = [];
+  away.context.setTimeout = () => 41;
+  away.context.clearTimeout = (id) => { cleared.push(id); };
+  away.context.answer = () => ({ ok: true, progress: { hands: 3, target: 200, line: line(3) }, pending: true });
+  away.context.watchTrainingProgress();
+  await settle();
+  let land;
+  away.context.answer = () => new Promise((resolve) => { land = () => resolve({ ok: true, progress: { hands: 9, target: 200, line: line(9) } }); });
+  const late = away.context.askTrainingProgress();
+  away.$('setup').hidden = true;
+  away.context.watchTrainingProgress();
+  assert.ok(cleared.includes(41), 'the scheduled retry is cleared');
+  land();
+  await late;
+  assert.equal(away.$('training-progress').textContent, line(3), 'the late answer is not painted');
   // A pending answer that carries the last finished count shows it while the scan goes on.
   context.answer = () => ({ ok: true, progress: { hands: 60, target: 200, line: line(60) }, pending: true });
   const timers = [];

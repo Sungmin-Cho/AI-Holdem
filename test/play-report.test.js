@@ -458,6 +458,26 @@ test('comparable hands show their progress toward the per-100 figure, the traini
   assert.equal(playReportView(done).progress, "비교 가능한 핸드 230 (6인 · 100BB · 정책 v3) · 100핸드당 수치는 플레이 리포트의 '결과와 운'에 있습니다");
   assert.deepEqual(trainingProgressOf(done), { hands: 230, target: 200, line: playReportView(done).progress });
 
+  // The limit, exactly: progress below it, the per-100 figure from it.
+  for (const [hands, figure] of [[199, false], [200, true], [201, true]]) {
+    const edge = buildPlayReport([cash({}, hands)]);
+    assert.equal(edge.results.segments[0].per100 !== null, figure, String(hands));
+    assert.equal(edge.results.progress.rows[0].hands, hands);
+    assert.equal(playReportView(edge).progress, figure
+      ? `비교 가능한 핸드 ${hands} (6인 · 100BB · 정책 v3) · 100핸드당 수치는 플레이 리포트의 '결과와 운'에 있습니다`
+      : `비교 가능한 핸드 ${hands} / 200 (6인 · 100BB · 정책 v3)`);
+    const value = playReportView(edge).sections.find((section) => section.id === 'results').rows[0].value;
+    assert.equal(/100핸드당/.test(value) && !/비교 가능한 핸드/.test(value), figure, value);
+    // Below the limit no net result or figure rides along.
+    if (!figure) assert.deepEqual(Object.keys(edge.results.segments[0]).sort(), ['allIns', 'games', 'hands', 'luckBb', 'mode', 'opponent', 'per100', 'unrevealed', 'yardstick']);
+  }
+  // Another comparable population leaves the progress rows exactly when it reaches the limit.
+  const others = buildPlayReport([cash({ seats: 9 }, 199), cash({ seats: 2 }, 200)]);
+  assert.deepEqual(others.results.progress.rows.map((row) => [row.seats, row.hands]), [[6, 0], [9, 199]]);
+  assert.equal(others.results.segments.find((row) => row.yardstick.seats === 2).per100 !== null, true);
+  // The preset population leads the result rows even when another population has more hands.
+  const ordered = buildPlayReport([cash({ seats: 9 }, 400), cash({}, 30), cash({ opponent: 'llm', policy: null }, 500)]);
+  assert.deepEqual(ordered.results.segments.map((row) => [row.yardstick?.seats ?? null, row.hands]), [[6, 30], [null, 500], [9, 400]]);
   // A partial read can only have missed comparable hands: the line says the count may be low.
   for (const options of [{ truncated: true }, { unreadable: { games: 1, hands: 0 } }, { unreadable: { games: 0, hands: 3 } }]) {
     const partial = buildPlayReport([cash({}, 50)], options);

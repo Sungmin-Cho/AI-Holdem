@@ -545,6 +545,7 @@ export function buildPlayReport(summaries, { now = null, unreadable = { games: 0
   });
   const checks = windowed.checks;
   const listed = (key) => ({ count: checks[key].length, hands: examples[key].slice(0, 8) });
+  const segments = segmentRows(games);
   return {
     schemaVersion: PLAY_REPORT_SCHEMA,
     generatedAt: typeof now === 'string' ? now : null,
@@ -584,7 +585,7 @@ export function buildPlayReport(summaries, { now = null, unreadable = { games: 0
       callBelowPrice: listed('callBelowPrice'),
       foldAbovePrice: listed('foldAbovePrice'),
     },
-    results: (() => { const segments = segmentRows(games); return { segments, progress: progressOf(segments) }; })(),
+    results: { segments, progress: progressOf(segments) },
     sessions: windowGames.slice(0, SESSION_ROWS).map(sessionRow),
     focus: focusOf(windowed, windowGames[0] ?? null, windowGames.length > 1 ? mergeGameSummaries(windowGames.slice(1)) : null),
   };

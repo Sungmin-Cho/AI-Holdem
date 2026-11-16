@@ -489,42 +489,53 @@ export async function startAppServer({
   // finished games stay cached for the next one), while a request waits only `progressWaitMs`. The
   // last finished result is kept, so a scan that ends after its request answered still reaches the
   // next request; it is reused for `progressFreshMs` while the current game and its state are the same.
+  // A scan started under another game or state answers as pending, so the lobby asks again and the
+  // next request reads the current one. Closing the server drops this route's share of its scan.
   // Not listed for the remote host and not on the participant listener.
-  const progressWork = { running: null, last: null };
+  const progressWork = { running: null, last: null, closed: false };
   const progressKey = () => { const view = manager.snapshot(); return `${view.gameId ?? ''}:${view.state ?? ''}`; };
-  function startProgressScan() {
-    const key = progressKey();
+  function startProgressScan(key) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), progressWorkMs);
     timer.unref?.();
-    const run = (async () => {
+    const work = { key, controller, timer, promise: null };
+    work.promise = (async () => {
       const { report } = await (playReport ?? playReportReader(storeDir)).read({ signal: controller.signal });
       const progress = trainingProgressOf(report);
       if (!progress) throw Object.assign(new Error('PROGRESS_UNAVAILABLE'), { code: 'PROGRESS_UNAVAILABLE' });
       progressWork.last = { progress, key, at: Date.now() };
       return progress;
     })();
-    progressWork.running = run;
-    run.catch(() => {}).finally(() => { clearTimeout(timer); if (progressWork.running === run) progressWork.running = null; });
-    return run;
+    progressWork.running = work;
+    work.promise.catch(() => {}).finally(() => { clearTimeout(timer); if (progressWork.running === work) progressWork.running = null; });
+    return work;
   }
   async function serveTrainingProgress(req, res) {
     if (req.method !== 'GET') { json(res, 405, { code: 'METHOD_NOT_ALLOWED' }); return; }
+    if (progressWork.closed) { json(res, 503, { code: 'PROGRESS_UNAVAILABLE' }); return; }
+    const key = progressKey();
     const last = progressWork.last;
-    const fresh = last && last.key === progressKey() && Date.now() - last.at < progressFreshMs;
-    const run = progressWork.running ?? (fresh ? null : startProgressScan());
-    if (!run) { json(res, 200, { ok: true, progress: last.progress }); return; }
+    const fresh = last && last.key === key && Date.now() - last.at < progressFreshMs;
+    const work = progressWork.running ?? (fresh ? null : startProgressScan(key));
+    if (!work) { json(res, 200, { ok: true, progress: last.progress }); return; }
     let timer;
     try {
-      const done = await Promise.race([run.then((progress) => ({ progress })),
+      const done = await Promise.race([work.promise.then((progress) => ({ progress })),
         new Promise((resolve) => { timer = setTimeout(resolve, progressWaitMs, null); })]);
-      if (done) json(res, 200, { ok: true, progress: done.progress });
+      if (done && work.key === key) json(res, 200, { ok: true, progress: done.progress });
       else json(res, 200, { ok: true, progress: progressWork.last?.progress ?? null, pending: true });
     } catch {
       json(res, 503, { code: 'PROGRESS_UNAVAILABLE' });
     } finally {
       clearTimeout(timer);
     }
+  }
+  function closeProgressWork() {
+    progressWork.closed = true;
+    const work = progressWork.running;
+    if (!work) return;
+    clearTimeout(work.timer);
+    work.controller.abort();
   }
   const committedCache = new Map();
   const readCommitFile = name => {
@@ -1166,6 +1177,7 @@ export async function startAppServer({
     remoteHosts = new Set();
   let publicReloader = null;
   const closeAll = async () => {
+    closeProgressWork();
     clearInterval(remoteSweep);
     remoteReloader?.stop();
     publicReloader?.stop();

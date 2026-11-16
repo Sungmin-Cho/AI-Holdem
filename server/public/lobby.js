@@ -881,11 +881,11 @@ function paintPreset() {
 }
 // Comparable-hand progress (#351), from the app's host-only GET /api/training-progress. Asked when the
 // setup screen comes into view (not on every poll or render), one chain at a time; a pending answer
-// (the scan is still running) is asked again a few times while the screen stays. A remote host page
-// does not ask (the route is loopback-only); any failure, an older app service's 404 or an odd answer
-// leaves no line.
+// (the scan is still running) is asked again while the screen stays, for longer than the route keeps
+// its scan (60 s), so a scan that finishes is shown. A remote host page does not ask (the route is
+// loopback-only); any failure, an older app service's 404 or an odd answer leaves no line.
 const PROGRESS_RETRY_MS = 5000;
-const PROGRESS_TRIES = 6;
+const PROGRESS_TRIES = 10;
 let progressSeq = 0;
 let progressTries = 0;
 let progressTimer = null;
@@ -895,6 +895,11 @@ function watchTrainingProgress() {
   if (shown && !setupShown) {
     progressTries = 0;
     void askTrainingProgress();
+  } else if (!shown && setupShown) {
+    // Leaving the setup screen ends the chain: no scheduled retry, no answer still on its way.
+    clearTimeout(progressTimer);
+    progressTimer = null;
+    progressSeq += 1;
   }
   setupShown = shown;
 }
@@ -909,7 +914,7 @@ async function askTrainingProgress() {
   if (seq !== progressSeq) return;
   paintTrainingProgress(answer?.progress ?? null);
   if (answer?.pending === true && progressTries < PROGRESS_TRIES && !$("setup").hidden)
-    progressTimer = setTimeout(() => void askTrainingProgress(), PROGRESS_RETRY_MS);
+    progressTimer = setTimeout(() => { if (!$("setup").hidden) void askTrainingProgress(); }, PROGRESS_RETRY_MS);
 }
 function paintTrainingProgress(progress) {
   const line = typeof progress?.line === "string" ? progress.line.slice(0, 200) : "";
