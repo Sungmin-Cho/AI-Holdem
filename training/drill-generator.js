@@ -22,13 +22,26 @@ const SUPPORTED_SPOT_SET = new Set([...SUPPORTED_SPOTS,...preflopKeys(),...V3_PR
 const spotsForSource = source => sameReferenceSource(source,V3_REFERENCE_SOURCE) ? V3_PRACTICE_SPOTS
   : sameReferenceSource(source,V2_REFERENCE_SOURCE) ? preflopKeys() : SUPPORTED_SPOTS;
 // The answer row set of a v3 context; sizes are the v3 tree's (push is all-in).
+function v3LegalActions({ context, stackBb }) {
+  return context === 'rfi-unopened' ? ['fold', 'raise:2.5'] : context === 'vs-single-raise' ? ['fold', 'call', 'raise:8.5']
+    : context === 'vs-3bet' ? ['fold', 'call', 'raise:20'] : context === 'push' ? ['fold', `raise:${stackBb}`] : ['fold', 'call'];
+}
 function v3Prompt(parsed) {
-  const { context, stackBb } = parsed;
+  const { context } = parsed;
   return {
     actionHistory: context === 'vs-3bet' ? ['raise', 'raise'] : ['vs-single-raise', 'vs-shove'].includes(context) ? ['raise'] : [],
-    legalActions: context === 'rfi-unopened' ? ['fold', 'raise:2.5'] : context === 'vs-single-raise' ? ['fold', 'call', 'raise:8.5']
-      : context === 'vs-3bet' ? ['fold', 'call', 'raise:20'] : context === 'push' ? ['fold', `raise:${stackBb}`] : ['fold', 'call'],
+    legalActions: v3LegalActions(parsed),
   };
+}
+const legacyLegalActions = (parsed) => (parsed.context === 'vs-single-raise' ? ['fold', 'call', 'raise:8.5'] : ['fold', 'raise:2.5']);
+
+/** The actions a question on this spot offers (the drill's prompt `legalActions`), from the key
+ * alone and whether or not the drill practises the spot; null for a key that is not a spot. */
+export function legalActionsFor(spotKey) {
+  const v3 = parsePreflopKeyV3(spotKey);
+  if (v3) return v3LegalActions(v3);
+  const parsed = parsePreflopKey(spotKey);
+  return parsed ? legacyLegalActions(parsed) : null;
 }
 const RANKS = 'AKQJT98765432'.split('');
 const HAND_CLASSES = [
@@ -93,6 +106,12 @@ export function reenteredAfterGraduation(item) {
   return Boolean(item?.graduatedAt) && at(item.lastSeenAt) > Math.max(at(item.graduatedAt), at(item.lastReviewedAt));
 }
 
+/** Due in the study room's count: a graduated item only when it was missed again, any other
+ * item once its scheduled time has come. */
+export function dueForReview(item, now) {
+  return item?.graduatedAt ? reenteredAfterGraduation(item) : Date.parse(item?.nextReviewAt) <= Date.parse(now);
+}
+
 function validateSelection(spotKey, handClass, source, admits) {
   if (spotKey !== undefined && (!isPreflopSpotKey(spotKey) || !(source ? spotsForSource(source).includes(spotKey) : SUPPORTED_SPOT_SET.has(spotKey)))) {
     throw coded('UNSUPPORTED_SPOT', 'selected spot is unavailable in the reference dataset');
@@ -142,9 +161,7 @@ function questionFrom({ mode, spotKey, handClass, skillKey, nonce, source, candi
       ...(parsed.version === 2 ? {seated:parsed.seated,openerPosition:parsed.openerPosition,referenceKind:'native-practice'} : {}),
       spotKey,
       actionHistory: parsed.context === 'vs-single-raise' ? ['raise'] : [],
-      legalActions: parsed.context === 'vs-single-raise'
-        ? ['fold', 'call', 'raise:8.5']
-        : ['fold', 'raise:2.5'],
+      legalActions: legacyLegalActions(parsed),
     },
     answerPolicy: {
       providerId: source.id,

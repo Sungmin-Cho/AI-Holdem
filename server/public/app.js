@@ -21,7 +21,7 @@ async function appFetch(endpoint, options) {
 if (remoteHostTable && !authToken()) goToLogin();
 import { createHintState, formatHint, hintPotPercent } from './hint-format.js';
 import { applyTrainingAnnotation, excludedFromAssessment, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
-import { QUIZ_NOTE, paintQuiz, quizCandidates, quizErrorText, quizQuestions, quizRequest } from './review-quiz.js';
+import { QUIZ_NOTE, paintQuiz, quizAnswerErrorText, quizCandidates, quizErrorText, quizNeedsReopen, quizQuestions, quizRequest } from './review-quiz.js';
 import { formatReplay, actionVerbs } from './replay-format.js';
 import { buildReplaySteps, replaySeatOrder } from './replay-model.js';
 import { mountReplayer } from './replayer.js';
@@ -1726,8 +1726,9 @@ function paintReview(view) {
 
 // End-of-game review quiz: this game's own compared preflop spots, asked again. Only on the
 // host's local table of a game that ended here (not a participant, a spectator, the remote
-// host or a past record), and only after the host asks for it: opening it is recorded in the
-// study store as a chart view, by the app server, before any reference is shown.
+// host or a past record), and only after the host asks for it. Each answer goes to the app
+// server, which records the spot as a chart view in the study store before it sends the
+// reference (and records a mistake-bank review for a due item); a refused answer shows none.
 const quiz={phase:'idle',questions:[],state:null,error:'',painted:null};
 const quizPool=()=>quizCandidates(ui.training,{titleOf:item=>formatTrainingCard(item).title});
 function paintFinalQuiz(hidden) {
@@ -1747,8 +1748,22 @@ function paintFinalQuiz(hidden) {
   else if(quiz.phase==='error')status.textContent=quiz.error;
   else if(quiz.phase==='empty')status.textContent='지금 열 수 있는 복습 문제가 없습니다.';
   else status.textContent=QUIZ_NOTE;
-  if(quiz.phase==='open')quiz.state=paintQuiz(body,quiz.questions,{doc:document,state:quiz.state??undefined}).state;
+  if(quiz.phase==='open')quiz.state=paintQuiz(body,quiz.questions,{doc:document,state:quiz.state??undefined,submit:submitQuizAnswer,onRefused:quizRefused}).state;
   else body.replaceChildren();
+}
+async function submitQuizAnswer(question,action) {
+  try {
+    const response=await appFetch('quiz-answer',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({spotKey:question.spotKey,handClass:question.handClass,action}),signal:AbortSignal.timeout(8000)});
+    const answer=await response.json().catch(()=>null);
+    return response.ok&&answer?.ok===true?{ok:true,body:answer}:{ok:false,code:answer?.code};
+  } catch {return {ok:false,code:undefined};}
+}
+// The asked set or the game changed: only reopening helps, so the quiz goes back to its open button.
+function quizRefused(code) {
+  if(!quizNeedsReopen(code)||quiz.phase!=='open')return;
+  Object.assign(quiz,{phase:'error',error:quizAnswerErrorText(code),questions:[],state:null});
+  paintFinalQuiz(false);
 }
 async function openFinalQuiz() {
   if(quiz.phase==='loading'||quiz.phase==='open')return;
