@@ -1572,3 +1572,6 @@ body.embedded {grid-template-rows:minmax(0,1fr);}
 .quiz-feedback.is-same .quiz-verdict { color: var(--pos-ink); font-weight: 600; }
 .quiz-feedback.is-different .quiz-verdict { color: var(--c-info-text); font-weight: 600; }
 .quiz-done { margin: 0; font-weight: 600; }
+/* The mistake-bank line under an answer, and the notice for a refused answer (no reference with it). */
+.quiz-record { margin: 0; font-size: 13px; color: var(--c-text-2); }
+.quiz-notice { margin: 0; font-size: 13px; color: var(--c-info-text); }
