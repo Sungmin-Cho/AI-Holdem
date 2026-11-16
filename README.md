@@ -121,6 +121,10 @@ The study room suggests one explicit next step from your verified summary: due r
 
 New sessions use preflop reference v3: opens, facing an open and facing a 3-bet at 80–150BB for 2–9 players, plus push/fold and calling a shove at 15BB or less (earlier sessions keep reference v1/v2). Unsupported spots are not treated as solved. Scores and frequency comparisons do not establish profitability or poker skill. See the [training data notes](training/data/README.md) for coverage and provenance.
 
+The study room's **play report** counts frequencies and patterns to look at over every finished hand (tournaments, LLM and multiplayer games included): entries and raises by table size, your actions against what the v3 reference does with the hands you actually held, entries at ten big blinds or less that were not all-in, open limps, and, for decisions where a call ends the betting, required equity against an estimated equity. It is not a score and feeds no goal, review queue or assessment. The estimated range is uncalibrated, and a pattern is not an established mistake. The luck of the cards dealt after the last bet is shown separately; a per-100-hands figure exists only for cash training played alone against the same local policy at one table size and depth, from 200 hands. The same patterns reach the in-game coach and the final review: the coach explains a decision a check caught first and passes a plain preflop fold in one sentence.
+
+When a game ends, the host's final screen offers a **review of this game**: its compared spots asked again, then the reference. Opening it records those spots as chart views in the study record and is refused while an assessment, retest or transfer run is open; the answers are not saved as scores.
+
 To observe a learner's change under rules fixed in advance, use the consented, sealed-schedule evaluation (`npm run learning-eval -- enroll --store /absolute/store --consent`). Its result is a personal observation of agreement with the heuristic reference, not evidence of a coaching effect, skill or profit. See [learning effect evaluation](docs/implementation/learning-effect-evaluation.md) (Korean).
 
 ## How it works

@@ -21,6 +21,7 @@ async function appFetch(endpoint, options) {
 if (remoteHostTable && !authToken()) goToLogin();
 import { createHintState, formatHint, hintPotPercent } from './hint-format.js';
 import { applyTrainingAnnotation, excludedFromAssessment, formatTrainingCard, mergeTrainingItems, verifyTrainingDetail } from './training-format.js';
+import { QUIZ_NOTE, paintQuiz, quizCandidates, quizErrorText, quizQuestions, quizRequest } from './review-quiz.js';
 import { formatReplay, actionVerbs } from './replay-format.js';
 import { buildReplaySteps, replaySeatOrder } from './replay-model.js';
 import { mountReplayer } from './replayer.js';
@@ -33,7 +34,7 @@ import { DISPLAY_KEYS, currentDisplaySettings, saveDisplaySetting } from './disp
 import { decisionAid, decisionAidText, heroHandLabel } from './decision-aid.js';
 import { compactLayout, onCompactChange } from './layout-mode.js';
 import { compareGuesses, GUESS_CHOICES, hudLine, readOpponentNotes, saveOpponentNote } from './opponent-notes.js';
-import { levelSecondsLeft, formatLevelSeconds, clampRaiseTo, snapRaiseTo, stepRaiseTo, potRaiseTo, bbRaiseTo, defaultRaiseTo, reviewDismissalAfterUpdate, studyLink, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
+import { levelSecondsLeft, formatLevelSeconds, clampRaiseTo, snapRaiseTo, stepRaiseTo, potRaiseTo, bbRaiseTo, defaultRaiseTo, reviewDismissalAfterUpdate, studyLink, bigDecision, formatTurnDeadline, formatNarration, retainTurnDeadline, serverClockOffset, primaryVerb, PRIMARY_VERB_LABEL } from './table-controls.js';
 import { createActionController, formatActionNotice } from './action-controller.js';
 import {formatAmount, formatSignedAmount, readPreference} from './chip-format.js';
 import {seatPresentation, participantSummary, mobileSeatSlot, blindPositions, ovalPoint, viewerId, isSpectating, lastActionsBySeat} from './seat-format.js';
@@ -937,6 +938,14 @@ function adoptDecision(legal, view = ui.view) {
     const intent = $('intent-note');
     if (intent) intent.value = '';
     for (const tag of document.querySelectorAll('.intent-tag.is-on')) tag.classList.remove('is-on');
+    // A big decision is the one worth a word of intent: the folded memo control says so.
+    // Only its colour and label change, never its size or place.
+    const toggle = $('intent-note-toggle');
+    if (toggle) {
+      const big = bigDecision(view, legal);
+      toggle.classList.toggle('is-nudge', big);
+      toggle.textContent = big ? '의도 태그' : '메모 추가';
+    }
   }
 }
 
@@ -1659,6 +1668,8 @@ function paintReview(view) {
   reopen.hidden=!state.open;
   reopen.textContent='결과 다시 보기'+(overlay.dataset.dismissed==='true' && ui.review && ui.review!==reviewSeen?' ·':'');
   if(state.open)void loadFinalSummary();
+  // The quiz belongs to one final screen: when the screen is gone (a new game on this page) it starts over.
+  else if(quiz.phase!=='idle'&&quiz.phase!=='loading')Object.assign(quiz,{phase:'idle',questions:[],state:null,error:'',painted:null});
   const show=state.open && overlay.dataset.dismissed!=='true' && (!dialogs.active || dialogs.active===overlay);
   overlay.hidden=!show;
   if(!show){if(dialogs.active===overlay)dialogs.close();return;}
@@ -1706,6 +1717,52 @@ function paintReview(view) {
   }
   const study=$('final-study');study.hidden=!authenticatedStudyUrl||participantMode||spectator;
   if(!study.hidden)study.href=authenticatedStudyUrl;
+  // The daily review queue of the study room, one click away (the run starts there).
+  const reviewHref=study.hidden?null:studyLink(authenticatedStudyUrl,{mode:'daily'});
+  const reviewLink=$('final-study-review');reviewLink.hidden=!reviewHref;
+  if(reviewHref)reviewLink.href=reviewHref;
+  paintFinalQuiz(participantMode||spectator);
+}
+
+// End-of-game review quiz: this game's own compared preflop spots, asked again. Only on the
+// host's local table of a game that ended here (not a participant, a spectator, the remote
+// host or a past record), and only after the host asks for it: opening it is recorded in the
+// study store as a chart view, by the app server, before any reference is shown.
+const quiz={phase:'idle',questions:[],state:null,error:'',painted:null};
+const quizPool=()=>quizCandidates(ui.training,{titleOf:item=>formatTrainingCard(item).title});
+function paintFinalQuiz(hidden) {
+  const section=$('final-quiz');
+  const allowed=!hidden&&Boolean(appGameId)&&!remoteHostTable&&!terminalRecord;
+  const count=allowed?quizPool().length:0;
+  if(!allowed||(!count&&quiz.phase==='idle')){section.hidden=true;return;}
+  section.hidden=false;
+  const key=`${quiz.phase}:${count}:${quiz.error}`;
+  if(quiz.painted===key)return;
+  quiz.painted=key;
+  const status=$('final-quiz-status'),start=$('final-quiz-start'),body=$('final-quiz-body');
+  start.hidden=!['idle','error'].includes(quiz.phase);
+  start.textContent=quiz.phase==='error'?'다시 열기':'복습 문제 열기';
+  if(quiz.phase==='idle')status.textContent=`이번 게임에서 기준표와 비교된 결정 ${count}개를 다시 풀어 봅니다. ${QUIZ_NOTE}`;
+  else if(quiz.phase==='loading')status.textContent='복습 문제를 준비하고 있습니다…';
+  else if(quiz.phase==='error')status.textContent=quiz.error;
+  else if(quiz.phase==='empty')status.textContent='지금 열 수 있는 복습 문제가 없습니다.';
+  else status.textContent=QUIZ_NOTE;
+  if(quiz.phase==='open')quiz.state=paintQuiz(body,quiz.questions,{doc:document,state:quiz.state??undefined}).state;
+  else body.replaceChildren();
+}
+async function openFinalQuiz() {
+  if(quiz.phase==='loading'||quiz.phase==='open')return;
+  const candidates=quizPool();
+  if(!candidates.length)return;
+  quiz.phase='loading';paintFinalQuiz(false);
+  try {
+    const response=await appFetch('quiz',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify(quizRequest(candidates)),signal:AbortSignal.timeout(8000)});
+    const answer=await response.json().catch(()=>null);
+    if(!response.ok){quiz.phase='error';quiz.error=quizErrorText(answer?.code);}
+    else {quiz.questions=quizQuestions(candidates,answer);quiz.state=null;quiz.phase=quiz.questions.length?'open':'empty';}
+  } catch {quiz.phase='error';quiz.error=quizErrorText();}
+  paintFinalQuiz(false);
 }
 
 function paint({ keepMotion = false } = {}) {
@@ -2199,6 +2256,7 @@ $('review-reopen').addEventListener('click', () => {
   $('review-close').focus();
 });
 // The memo stays folded until asked for, then stays open for later decisions.
+$('final-quiz-start').addEventListener('click', () => { void openFinalQuiz(); });
 $('intent-note-toggle').addEventListener('click', () => {
   $('intent-note').closest('.intent-note-wrap').classList.add('is-open');
   $('intent-note-toggle').setAttribute('aria-expanded', 'true');

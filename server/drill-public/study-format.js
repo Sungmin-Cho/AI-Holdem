@@ -598,6 +598,41 @@ export function formatTrends(trends = {}) {
   return { series: [...series.values()].map((entry) => ({ label: entry.label, rows: entry.rows.slice(-12) })),
     game: [...games].map(([label, rows]) => ({ label, rows: rows.slice(-12) })) };
 }
+/** Display model of GET /api/report, or null when there is nothing to show: an
+ * older running service has no such route (404), or the answer is not the
+ * expected shape. Text is taken as text only and cut to a bound. */
+export function formatPlayReport(response) {
+  const scope = response?.report?.scope;
+  if (response?.ok !== true || !scope || typeof scope !== 'object' || !Array.isArray(response.view?.sections) || !Array.isArray(response.view.focus)) return null;
+  const text = (value, max) => (typeof value === 'string' ? value.slice(0, max) : '');
+  const count = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : 0);
+  const hands = count(scope.heroHands);
+  const partial = [
+    count(scope.unreadableGames) || count(scope.unreadableHands) ? `읽지 못한 기록: 게임 ${count(scope.unreadableGames)} · 핸드 ${count(scope.unreadableHands)}` : null,
+    scope.truncated === true ? '기록이 많아 일부만 읽었습니다' : null,
+    count(scope.biasedHands) ? `유리한 딜 ${count(scope.biasedHands)}핸드 제외` : null,
+  ].filter(Boolean);
+  // No hand in the report: either none is finished yet, or none could be read. The
+  // second is not an empty store, and reading again may get further.
+  const unread = count(scope.unreadableGames) || count(scope.unreadableHands) || scope.truncated === true;
+  if (hands === 0) {
+    const scopeText = unread ? ['플레이 기록을 리포트에 담지 못했습니다', ...partial].join(' · ')
+      : count(scope.biasedHands) ? `끝난 ${count(scope.biasedHands)}핸드가 모두 유리한 딜이라 리포트에서 뺐습니다. 유리한 딜을 끈 게임의 핸드가 쌓이면 여기에 보입니다.`
+        : '끝난 핸드가 쌓이면 여기에 플레이 리포트가 보입니다.';
+    return { empty: true, retry: Boolean(unread), focus: [], sections: [], scope: scopeText };
+  }
+  return {
+    empty: false,
+    retry: false,
+    scope: [`최근 ${count(scope.games)}게임에서 내가 받은 ${hands}핸드 기준(전체 ${count(scope.totalGames)}게임)`, ...partial].join(' · '),
+    focus: response.view.focus.slice(0, 3).map((item) => ({ title: text(item?.title, 80), detail: text(item?.detail, 600) })).filter((item) => item.title),
+    sections: response.view.sections.slice(0, 8).map((section) => ({
+      title: text(section?.title, 40), note: text(section?.note, 400),
+      rows: (Array.isArray(section?.rows) ? section.rows : []).slice(0, 40)
+        .map((row) => ({ label: text(row?.label, 120), value: text(row?.value, 600) })).filter((row) => row.label),
+    })).filter((section) => section.title && section.rows.length),
+  };
+}
 export function drillRequest(pathname, authToken, { method = 'GET', body, signal } = {}) {
   const headers = { 'x-drill-token': authToken };
   if (body) headers['Content-Type'] = 'application/json';

@@ -2,11 +2,12 @@
 // fact lines for the coach/review prompts, and process detectors plus coach-note
 // digests for the machine review. Nothing here is a strategy verdict.
 import fs from 'node:fs';
-import { chipFacts, equityFacts, factsLineKo, handFacts } from '../shared/decision-facts.js';
+import { chipFacts, closureOf, drawOdds, equityFacts, factsLineKo, handFacts, priceVerdict } from '../shared/decision-facts.js';
 import { coachEquityRanges, estimateCoachRanges } from '../training/ranges/coach-estimate.js';
 import { buildProcessInput } from '../training/process-review.js';
 
 const HOST = 'user';
+export const RANGE_MIN_DEALT = 500;
 
 function userDecisions(record) {
   return (record?.decisions ?? []).filter((snap) => snap?.actorId === HOST && snap.decisionId);
@@ -37,7 +38,8 @@ function buildDecisionFacts(snap) {
     rangeMeta = { acted: estimate.acted.length, excluded, reason };
     if (ranges) {
       try {
-        equityRange = equityFacts(snap, { ranges });
+        // A third of the attempts must be compatible deals, or the number is not reported.
+        equityRange = equityFacts(snap, { ranges, minDealt: RANGE_MIN_DEALT });
       } catch {
         rangeMeta.reason = 'equity-failed';
       }
@@ -56,7 +58,11 @@ function buildDecisionFacts(snap) {
       { status: row.status, reasons: row.reasons, appliedActions: row.appliedActions, actedThisStreet: row.actedThisStreet }])),
     equityOmitted: equityRange === null ? rangeMeta.reason : null,
   };
+  const closure = closureOf(snap);
   return { chips, hand: handFacts(snap), equityRandom, equityRange, rangeEstimate,
+    closure,
+    priceVerdict: priceVerdict({ chips, closure, action: snap.chosenAction?.action, equityRange }),
+    drawOdds: drawOdds(snap),
     line: factsLineKo(snap, { equityRandom, equityRange, rangeMeta }) };
 }
 
@@ -116,12 +122,8 @@ export function processDetectors(records) {
   return out;
 }
 
-// Reference ranges for a full-ring/6-max cash game; tournaments run tighter late.
-export function vpipBand(seated) {
-  if (seated <= 2) return { vpip: [55, 85], pfr: [45, 80] };
-  if (seated <= 6) return { vpip: [20, 30], pfr: [15, 24] };
-  return { vpip: [15, 24], pfr: [11, 19] };
-}
+// Reference ranges for a full-ring/6-max cash game (one definition, shared with the play report).
+export { vpipBand } from '../training/play-report.js';
 
 // Published per-hand coach notes (skipping unavailable placeholders), newest last. #290: a
 // note the caller withholds (one the host must not see) is left out.

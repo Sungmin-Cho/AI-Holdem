@@ -7,7 +7,10 @@
 // Participant and spectator routes never call these.
 import { aggressionFactor, preflopRates } from '../engine/views.js';
 import { isHumanSeat, seatLabel } from '../shared/seat-roles.js';
-import { detectorLinesKo, processDetectors } from './review-facts.js';
+import { replayRecord } from '../shared/hand-replay.js';
+import { gameCheckLinesKo, mergeGameSummaries, summarizeGame } from '../training/play-report.js';
+import { toProcessReview } from '../training/process-review.js';
+import { decisionFacts, detectorLinesKo, processDetectors } from './review-facts.js';
 import { openContained } from './training-store.js';
 
 const STATE_MAX = 2 * 1024 * 1024;
@@ -38,13 +41,46 @@ export function hudFromState(state) {
   };
 }
 
-export function reportFromRecords(records) {
+// One game's play-report checks (short-stack entries, open limps, closed-decision
+// price comparisons), kept per completed hand: a finished hand never changes, so a
+// new hand costs one hand's work however long the game is. The reducer sees only
+// the host's own view of each hand (the replay projection and the host's snapshots).
+const handChecks = { key: null, byHand: new Map() };
+
+export function gameChecksOf(records, { seats = [], reveal = 'showdown', key = '' } = {}) {
+  if (handChecks.key !== key) { handChecks.key = key; handChecks.byHand = new Map(); }
+  const humanIds = seats.filter((seat) => isHumanSeat(seat)).map((seat) => seat.playerId);
+  if (!humanIds.includes('user')) humanIds.push('user');
+  const summaries = [];
+  for (const record of records) {
+    const handNo = record?.handNo;
+    if (!Number.isSafeInteger(handNo)) continue;
+    let summary = handChecks.byHand.get(handNo);
+    if (!summary) {
+      try {
+        summary = summarizeGame({}, [{ replay: replayRecord(record, { reveal, humanIds }), decisions: toProcessReview(record).decisions }],
+          { dataset: null, factsOf: decisionFacts, checksOnly: true });
+      } catch {
+        continue;
+      }
+      handChecks.byHand.set(handNo, summary);
+    }
+    summaries.push(summary);
+  }
+  return mergeGameSummaries(summaries);
+}
+
+export function reportFromRecords(records, context) {
   const found = processDetectors(records);
+  let extra = [];
+  if (context) {
+    try { extra = gameCheckLinesKo(gameChecksOf(records, context)); } catch { extra = []; }
+  }
   return {
     schemaVersion: 1,
     hands: records.length,
     decisions: found.decisions,
-    checks: detectorLinesKo(found),
+    checks: [...detectorLinesKo(found), ...extra],
     biggestLosses: found.biggestLosses.map(({ handNo, lost }) => ({ handNo, lost })),
   };
 }
@@ -84,7 +120,11 @@ export function readReport(sessionDir) {
       else unreadable += 1;
     }
   }
-  return { ...reportFromRecords(records), unreadable };
+  return { ...reportFromRecords(records, {
+    seats: Array.isArray(state?.seats) ? state.seats : [],
+    reveal: state?.config?.replayReveal === 'all' ? 'all' : 'showdown',
+    key: `${sessionDir}\u0000${typeof state?.sessionToken === 'string' ? state.sessionToken : ''}`,
+  }), unreadable };
 }
 
 export function readReveal(sessionDir, phase) {

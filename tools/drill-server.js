@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startDrill, nextQuestion, answerQuestion, readDrillSession, readSpotChart } from './drill-cli.js';
 import { readStudySummary } from './study-summary.js';
+import { playReportReader } from './play-report-store.js';
 import { KNOWN_REFERENCE_SOURCES } from '../shared/reference.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -133,7 +134,7 @@ const ANSWER_FIELDS = {
 
 /** Shared HTTP adapter. Store and hooks are trusted startup configuration only. */
 export function createDrillHandler({ storeDir, token, onActivity = () => {}, beforeRequest = () => {},
-  health = {}, parentRegistry, replayLibrary, replayEnabled = true, staticAssets } = {}) {
+  health = {}, parentRegistry, replayLibrary, replayEnabled = true, staticAssets, playReport } = {}) {
   if (typeof storeDir !== 'string' || !storeDir || typeof token !== 'string' || !token) {
     throw new TypeError('storeDir and token required');
   }
@@ -175,7 +176,7 @@ export function createDrillHandler({ storeDir, token, onActivity = () => {}, bef
         return;
       }
       if (req.method === 'GET' && url.pathname === '/api/health') {
-        sendJson(res, 200, { ok: true, protocolVersion: 1, ...health, capabilities: { ...health.capabilities, study: true, ...(replayEnabled ? { replayLibrary: 1 } : {}) } }); return;
+        sendJson(res, 200, { ok: true, protocolVersion: 1, ...health, capabilities: { ...health.capabilities, study: true, playReport: 1, ...(replayEnabled ? { replayLibrary: 1 } : {}) } }); return;
       }
       if (url.pathname === '/api/replays' || url.pathname.startsWith('/api/replays/')) {
         if (!replayEnabled || req.method !== 'GET') fail('NOT_FOUND');
@@ -204,6 +205,12 @@ export function createDrillHandler({ storeDir, token, onActivity = () => {}, bef
       }
       if (req.method === 'GET' && url.pathname === '/api/summary') {
         sendJson(res, 200, { ok: true, summary: await readStudySummary(storeDir) }); return;
+      }
+      if (req.method === 'GET' && url.pathname === '/api/report') {
+        // The play report: frequencies and checks over the store's finished hands
+        // (training/play-report.js). Not a score; nothing is written.
+        const { report, view } = await (playReport ?? playReportReader(storeDir)).read();
+        sendJson(res, 200, { ok: true, report, view }); return;
       }
       if (req.method === 'GET' && url.pathname === '/api/spot') {
         await beforeRequest();

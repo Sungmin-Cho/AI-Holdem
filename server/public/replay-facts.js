@@ -28,6 +28,9 @@ export function replayDecisionSnapshot(model, replay, viewer, index) {
   return {
     decisionId: recorded?.decisionId ?? `replay-${replay.handNo ?? 0}-${index}`,
     actorId: viewer,
+    // The street and each seat's bet on it let the fact line tell a closed decision
+    // (no betting after the call) and name the draw chance, as the coach's line does.
+    street: action.street ?? step.street,
     blinds,
     holeCards: holes,
     board: prev.board,
@@ -39,6 +42,7 @@ export function replayDecisionSnapshot(model, replay, viewer, index) {
     publicSeats: players.map((playerId) => ({
       playerId,
       stack: prev.stacks[playerId],
+      bet: prev.bets[playerId] ?? 0,
       contribution: (start[playerId] ?? 0) - prev.stacks[playerId],
       folded: prev.folded.includes(playerId),
       allIn: prev.allIn.includes(playerId),

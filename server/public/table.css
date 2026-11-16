@@ -928,6 +928,7 @@ main {
   text-underline-offset: 3px;
   cursor: pointer;
 }
+.intent-note-toggle.is-nudge { color: var(--c-action-text); font-weight: 700; }
 .intent-note-wrap:not(.is-open) .intent-note-field { display: none; }
 .intent-note-wrap.is-open .intent-note-toggle { display: none; }
 /* Quick intent tags sit under the memo field and show with it. */
@@ -1555,3 +1556,19 @@ body.embedded {grid-template-rows:minmax(0,1fr);}
 /* ---- Tokens for the SVG sprite chip (the sprite lives in index.html) ---- */
 .chip-face { fill: var(--c-chip); }
 .chip-ring { stroke: var(--c-chip-ring); }
+
+/* End-of-game review quiz (host only): one question at a time inside the final overlay. */
+.final-quiz[hidden] { display: none; }
+.final-quiz-status { margin: 0 0 8px; font-size: 13px; color: var(--c-text-2); }
+.final-quiz-body { display: grid; gap: 8px; margin-top: 8px; }
+.quiz-progress { margin: 0; font-size: 12px; color: var(--c-text-2); }
+.quiz-title { margin: 0; font-weight: 600; }
+.quiz-prompt { margin: 0; font-size: 14px; }
+.quiz-choices { display: flex; flex-wrap: wrap; gap: 8px; }
+.quiz-choice { min-height: 44px; min-width: 88px; }
+.quiz-choice.is-picked { border-color: var(--c-action); }
+.quiz-feedback { padding: 10px 12px; border: 1px solid var(--c-line-strong); border-radius: 8px; font-size: 13px; }
+.quiz-feedback p { margin: 0 0 4px; }
+.quiz-feedback.is-same .quiz-verdict { color: var(--pos-ink); font-weight: 600; }
+.quiz-feedback.is-different .quiz-verdict { color: var(--c-info-text); font-weight: 600; }
+.quiz-done { margin: 0; font-weight: 600; }

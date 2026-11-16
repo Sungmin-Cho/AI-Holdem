@@ -105,7 +105,10 @@ import { modelsFromPlayers } from '../training/exploit/policy-model.js';
 import { buildProcessInput } from '../training/process-review.js';
 import { coachingClaimAllowed, sanitizeCoachingText } from '../shared/reference.js';
 import { coachNotesDigest, decisionFactsLines, detectorLinesKo, processDetectors, vpipBand } from './review-facts.js';
-import { applyProspectiveNoteContract, buildProspectiveCoachPrompt, selectCoachTarget } from './coach-prompt.js';
+import { applyProspectiveNoteContract, buildProspectiveCoachPrompt, selectCoachTarget, targetIntentNote } from './coach-prompt.js';
+import { playReportReader } from './play-report-store.js';
+import { focusLinesKo, gameCheckLinesKo } from '../training/play-report.js';
+import { gameChecksOf } from './host-insights.js';
 import { preserveReviewFailure, sanitizeReviewDiagnostic } from './review-diagnostics.js';
 import { killGroup as killSolverGroup, readPersistedSolver } from './solver-runtime.js';
 import {
@@ -4923,16 +4926,41 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return `과정 판정 불가: ${hands.length ? `핸드 ${hands.join(', ')}` : '일부 결정'}의 결정 시점 증거가 없거나 올바르지 않아 해당 결정은 평가에서 제외했습니다.`;
   };
 
-  // The coach prompt is prospective: one target decision chosen by committed cost, its own
-  // validated snapshot and facts (tools/coach-prompt.js). The completed redacted/replay
-  // captures stay on disk for validation and publication but are never model input.
-  const buildCoachPrompt = ({ handNo, selection, overfoldReserved, retry = false }) => buildProspectiveCoachPrompt({
+  // The coach prompt is prospective: one target decision chosen by what it can teach and by
+  // committed cost, its own validated snapshot and facts (tools/coach-prompt.js). The completed
+  // redacted/replay captures stay on disk for validation and publication; the only thing a
+  // prompt takes from the replay capture is the intent memo the host wrote on the target
+  // decision itself.
+  const buildCoachPrompt = ({ handNo, selection, overfoldReserved, retry = false, intentNote = null, focusLines = [] }) => buildProspectiveCoachPrompt({
     handNo,
     selection,
     practiceFocus: processPracticeFocus(readInstalledPracticeFocus(root) ?? 'null'),
     overfoldReserved,
     retry,
+    intentNote,
+    focusLines,
   });
+
+  // The store's play report (training/play-report.js): its focus lines tell the coach which
+  // patterns earlier games repeated. Advisory only — no score, goal or practice-focus file is
+  // touched. The scan is started once while the loop boots, before a hand is played, and a
+  // coach prompt takes the lines only if they are ready by then: it never waits for the scan
+  // and never starts one, so a store too large to read in time simply gives no lines.
+  let playFocus = [];
+  let playFocusStarted = false;
+  const preparePlayFocus = () => {
+    if (!storeDir || playFocusStarted) return;
+    playFocusStarted = true;
+    void (async () => {
+      try {
+        const { report } = await playReportReader(storeDir).read();
+        playFocus = focusLinesKo(report).slice(0, 3);
+      } catch {
+        playFocus = [];
+      }
+    })();
+  };
+  const playFocusLines = () => playFocus;
 
   // D9: drop out-of-bounds sentences from a fresh model note before it is
   // validated, sealed and proved; a decision row left empty is dropped.
@@ -5957,6 +5985,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         reason: 'process-evidence-unavailable', fallbackEnvelopePath: descriptor.exactEnvelopePath });
       return;
     }
+    let intentNote = null;
+    try { intentNote = targetIntentNote(parseCapturedHand(inputs.replay.raw), coachSelection.decision.decisionId); } catch { intentNote = null; }
+    const focusLines = playFocusLines();
     for (let attempt = Number(descriptor.attempt ?? 1); attempt <= 2; attempt += 1) {
       const currentDescriptor = descriptor;
       if (attempt > 1 && !coachReplacementAllowed()) {
@@ -5975,6 +6006,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         selection: coachSelection,
         overfoldReserved: currentDescriptor.overfoldReserved === true,
         retry: attempt === 2,
+        intentNote,
+        focusLines,
       });
       let handle = null;
       let record = null;
@@ -7116,6 +7149,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     ...(factsLines.length ? factsLines : ['(없음)']),
     '',
     '중요한 결정마다 사실 카드의 수치(필요 승률·SPR·에퀴티·선택 크기)를 근거로 과정을 평가하라.',
+    '사실 카드에 "가격 비교(칩 기준 …)" 문장이 있는 결정(콜 뒤에 베팅이 없는 닫힌 결정)은 그 문장을 "추정 레인지 기준"이라는 단서와 함께 인용할 수 있다. 그 밖의 결정에서는 필요 승률과 에퀴티를 직접 견주어 판정하지 마라. "드로 아웃이 나올 확률"은 이길 확률이 아니다.',
     '검증된 최적·GTO 정답·확정 누수를 주장하지 마라. 기대값(EV)은 숫자 없이 개념으로만 쓴다.',
     '출력은 비어 있지 않은 한국어 과정 평가 본문만 작성하라.',
   ].join('\n');
@@ -7144,12 +7178,12 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return out;
   };
 
-  const buildSynthesizerPrompt = ({ evaluator, result, outcomeRecords, playersRaw, exploitRaw, selfOpponentsRaw }) => [
+  const buildSynthesizerPrompt = ({ evaluator, result, outcomeRecords, playersRaw, exploitRaw, selfOpponentsRaw, playBlock = null }) => [
     '역할: 종합자',
     '아래 인라인 입력만 사용하고 파일·도구·네트워크를 조회하지 마라.',
     'evaluator의 결과 독립적 과정 평가를 보존한 뒤 게임 결과와 실제 AI 아키타입을 분리해 해석하라.',
     '결과가 좋았다고 나쁜 과정을 칭찬하거나 결과가 나쁘다고 좋은 과정을 비난하지 마라.',
-    '검증된 최적·GTO 정답·확정 누수를 주장하지 마라. 기대값(EV)은 숫자 없이 개념으로만 쓰고, 수치는 evaluator output에 있는 값만 인용한다.',
+    '검증된 최적·GTO 정답·확정 누수를 주장하지 마라. 기대값(EV)은 숫자 없이 개념으로만 쓰고, 수치는 evaluator output과 play report에 있는 값만 인용한다.',
     '',
     'evaluator output:',
     evaluator,
@@ -7169,6 +7203,9 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     'selfOpponents:',
     selfOpponentsRaw ?? 'null',
     '',
+    'play report (결정론 집계 — 이번 게임의 점검과 최근 게임들의 누적 패턴. 점수가 아니며 evaluator는 보지 않았다):',
+    playBlock ?? '없음',
+    '',
     "self-mirror 좌석이 있으면 '각 AI의 실제 아키타입 공개' 절에서 어느 좌석이 사용자 복제였는지와 사용자가 그것을 알아챘을 만한 단서를 평가하라. 수치는 selfOpponents의 것만 인용하고 유사도를 실력으로 해석하지 마라.",
     '',
     '마크다운 본문에 다음 네 heading을 모두 그대로 포함하라:',
@@ -7177,9 +7214,11 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     '## 각 AI의 실제 아키타입 공개 + 읽기 평가',
     '## 다음 게임에서 연습할 것',
     '마지막 항목에는 다음 게임에서 연습할 것 1~2가지를 제시하라.',
+    "play report가 있으면 '다음 게임에서 연습할 것'은 그 패턴과 이번 게임의 근거에 묶어 쓴다. play report에 '직전 게임'과 '그 전'의 비교가 적혀 있으면 한 줄로 옮기고, 없으면 비교를 만들지 마라.",
+    "play report의 '살펴볼 패턴'을 확정된 실수로 바꿔 쓰지 말고, '추정 레인지'·'기준표 대조' 수치에는 그것이 참고값이라는 단서를 유지하라.",
   ].join('\n');
 
-  const machineReview = ({ statsRaw, players, result, evaluator = null, records = [], notes = [], seats = 6 }) => {
+  const machineReview = ({ statsRaw, players, result, evaluator = null, records = [], notes = [], seats = 6, gameLines = [], playLines = [] }) => {
     const stats = JSON.parse(statsRaw).perPlayer;
     const user = stats?.user;
     const count = (value) => Number.isSafeInteger(value) && value >= 0 ? String(value) : '확인 불가';
@@ -7232,13 +7271,14 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       '### 칩 손실이 컸던 핸드', '',
       ...(losses.length ? losses : ['- 칩을 잃은 핸드가 없습니다.']), '',
       '### 결정 점검(엔진 계산)', '',
-      ...(checks.length ? checks : ['- 자동 점검에서 두드러진 패턴이 없었습니다.']), '',
+      ...(checks.length || gameLines.length ? [...checks, ...gameLines] : ['- 자동 점검에서 두드러진 패턴이 없었습니다.']), '',
       ...(notes.length ? [REVIEW_COACH_HEADING, '', ...notes.map((note) => `- ${note}`), ''] : []),
       '## 각 AI의 실제 아키타입 공개 + 읽기 평가', '',
       '설정된 성향은 게임 시작 시의 정책 설정입니다. 아래 관찰 기록만으로 그 성향이 입증되거나 상대 읽기가 정확했다고 판단할 수는 없습니다.',
       ...(names.length ? names : ['AI 성향 기록을 확인할 수 없습니다.']), '',
       '## 다음 게임에서 연습할 것', '',
       ...practice,
+      ...(playLines.length ? ['', '최근 게임들에서 반복된 패턴(결정론 집계, 점수 아님):', '', ...playLines] : []),
     ].join('\n');
   };
 
@@ -7260,9 +7300,53 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
     return `${withSection}\n\n미완료 학습 평가: ${pending}건`;
   };
 
+  // What the play report adds to a review: this game's own pattern lines and the store's
+  // cumulative focus and reference rows (training/play-report.js). Deterministic, advisory,
+  // never a score. Every part is optional: a missing store, an unreadable archive or a slow
+  // read leaves that part out and the review goes on as before.
+  const reviewPlayInput = async (completed) => {
+    const out = { gameLines: [], focusLines: [], block: null };
+    try {
+      const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
+      const records = [];
+      for (let handNo = 1; handNo <= completed; handNo += 1) {
+        try { const record = fullHandRecord(handNo); if (record) records.push(record); } catch { /* shorter report */ }
+      }
+      out.gameLines = gameCheckLinesKo(gameChecksOf(records, {
+        seats: Array.isArray(engine?.seats) ? engine.seats : [],
+        reveal: engine?.config?.replayReveal === 'all' ? 'all' : 'showdown',
+        key: `${root}\u0000${typeof engine?.sessionToken === 'string' ? engine.sessionToken : ''}`,
+      }));
+    } catch { out.gameLines = []; }
+    let cumulative = null;
+    if (storeDir) {
+      // The scan gives the loop back after every hand; at the deadline it is told to stop
+      // and the review goes on without the cumulative part.
+      const deadline = new AbortController();
+      const timer = setTimeout(() => deadline.abort(), 10_000);
+      timer.unref?.();
+      try {
+        cumulative = await playReportReader(storeDir).read({ signal: deadline.signal });
+      } catch { cumulative = null; } finally { clearTimeout(timer); }
+    }
+    const rows = [];
+    if (cumulative?.report?.scope?.heroHands > 0) {
+      out.focusLines = focusLinesKo(cumulative.report).slice(0, 3);
+      const reference = cumulative.view.sections.find((section) => section.id === 'reference');
+      rows.push(`[최근 ${cumulative.report.scope.games}게임 · 내가 받은 ${cumulative.report.scope.heroHands}핸드의 반복 패턴(살펴볼 패턴)]`,
+        ...(out.focusLines.length ? out.focusLines : ['- 표본과 비율 기준을 넘긴 반복 패턴 없음']));
+      if (reference) rows.push(`[기준표 대조 — ${reference.note}]`, ...reference.rows.slice(0, 6).map((row) => `- ${row.label}: ${row.value}`));
+    }
+    if (out.gameLines.length || rows.length) {
+      out.block = ['[이번 게임 점검(엔진 계산, 살펴볼 패턴)]', ...(out.gameLines.length ? out.gameLines : ['- 두드러진 패턴 없음']), ...rows].join('\n');
+    }
+    return out;
+  };
+
   const generateReview = async ({ completed, statsRaw }) => {
     // The outcome-blind evaluator text, once produced, backs the fallback review.
     let evaluatorText = null;
+    const playInput = await reviewPlayInput(completed);
     const fallback = (reason) => {
       const engine = readJsonOptional(engineStatePath, 'ENGINE_STATE');
       const players = readJsonOptional(playersPath, 'PLAYERS');
@@ -7308,6 +7392,8 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
           withhold: (note) => coachHostTextLeaks(note, note.handNo, { event: 'review-coach-note-withheld' }),
         }),
         seats: engine.seats?.length ?? 6,
+        gameLines: playInput.gameLines,
+        playLines: playInput.focusLines,
       })), { requireHeadings: true });
       appendNotice('LLM 종합 리뷰를 제공할 수 없어 이번 세션의 관찰 기록으로 기계 리뷰를 작성했습니다.');
       log('review-machine-fallback', { reason });
@@ -7380,6 +7466,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
             return 'null';
           }
         })(),
+        playBlock: playInput.block,
       });
       const synthesized = await runReviewStage({
         stage: 'synthesizer',
@@ -8828,6 +8915,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
         practiceFocusFile,
         onNotice: appendNotice,
       });
+      preparePlayFocus();
       if (opponentRuntimeOf() === 'llm') {
         markBootStage('player-warmup');
         await warmPlayers();
@@ -9322,6 +9410,7 @@ export function createGameLoop({ gameDir, lockDir = gameDir, initialLockHandle =
       // begin-owner가 seal/Q에 없는 핸드만 새 descriptor로 돌려주므로, 살아 있는
       // generation이 없는 크래시 재개에서만 그 핸드를 다시 스폰한다.
       if (resumed.phase === 'playing') {
+        preparePlayFocus();
         await beginCoachOwner(Number(engineState.lastHand?.handNo ?? 0));
         await reconcileTrainingNow();
         resumed = readLoopState();
