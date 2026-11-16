@@ -99,7 +99,9 @@ LLM 모드 게임을 재개하면 그 시점의 최신 모델로 다시 해석�
 
 진단 `metrics`는 최근 5,000건을 보존하고 `metricsDropped`에 폐기 개수를 누적한다. relay 화면 로그는 1 MiB를 넘으면 오래된 핸드 단위로 줄이되 마지막 핸드는 단독으로 1 MiB를 넘어도 보존하므로 하드 상한은 아니다. 새로고침 후 잘린 과거 핸드의 로그 복기 진입점은 사라질 수 있다. 전체 결과 요약은 화면 로그가 아닌 완료 아카이브에서 계산한다. 진단 이력은 기존 loop-state로 재개하면 유지된다. loop-state가 없어 재구성한 경우에는 `metrics`와 `metricsDropped`가 0부터 시작하므로, 폐기 누계가 0이어도 게임 전체 표본이라고 단정하지 않는다. 참가 요청 주소 목록은 1,024개 초과 시 60초가 지난 항목을 청소하며 활성 주소 수의 하드 상한은 아니다.
 
-relay는 stdio 없이 뜨므로 저장 문제를 게임 폴더의 `relay-diagnostics.json`(최근 32건)에 남긴다. `persist-failed`는 `PERSIST_FAILED`(500)로 답한 게시의 단계(`receipt-check`·`ui-commit`·`receipt-acknowledge`·`receipt-reconcile`)·`code`·`syscall`·rename 시도 횟수(`attempts`)이고, `rename-retried`는 다른 프로세스가 파일을 열고 있어(Windows) rename을 다시 시도한 끝에 성공한 쓰기의 파일 이름·`code`·횟수다. relay는 이런 충돌을 25ms 간격으로 최대 20번 다시 시도하고, 그래도 거절되면 전과 같이 `PERSIST_FAILED`로 답한다(루프는 relay를 다시 확인하고 같은 게시를 묶어 재전송한다). 목록 밖의 값은 `OTHER`이고 경로·메시지 원문은 없다. 이 파일은 어떤 응답에도 실리지 않는다.
+relay는 stdio 없이 뜨므로 저장 문제를 게임 폴더의 `relay-diagnostics.json`(`{schemaVersion: 1, entries}`, 최근 32건, relay가 다시 떠도 이어 씀)에 남긴다. 항목은 `event`·`at`(시각)과 닫힌 값만 가진다. `persist-failed`는 `PERSIST_FAILED`(500)로 답한 게시의 단계(`stage`: `receipt-check`·`ui-commit`·`receipt-acknowledge`·`receipt-reconcile`)·`code`·`syscall`이고, rename이 실패한 경우 rename 시도 횟수(`attempts`, 첫 시도 포함 최대 21)를, 영수증 판독 실패(`ACTION_RECEIPT_CORRUPT`)면 원인의 `causeCode`·`causeSyscall`을 더한다. `rename-retried`는 다른 프로세스가 파일을 열고 있어(Windows) rename을 다시 시도한 끝에 성공한 relay 쓰기의 파일 이름(`target`)·`code`·횟수다. 목록 밖의 값은 `OTHER`, 없는 값은 `null`이고 경로·메시지 원문은 없다. 이 파일은 어떤 응답에도 실리지 않는다. 읽을 수 없거나 형식이 다른 파일은 다음 기록 때 새로 쓴다.
+
+relay 파일 쓰기는 이런 rename 충돌(`EPERM`·`EBUSY`·`EACCES`)을 25ms 간격으로 최대 20번 다시 시도한다. 그래도 거절되면 그 쓰기는 전과 같이 실패한다. 게시 커밋이면 `PERSIST_FAILED`(500)로 답하고, 루프는 relay를 다시 확인(필요하면 다시 띄움)한 뒤 같은 게시를 기록에 묶어 재전송한다. 액션 접수·전달과 relay 기동의 `lock.json` 쓰기는 전과 같은 자기 오류로 끝난다.
 
 ## 시작하기
 
