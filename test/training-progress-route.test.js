@@ -310,6 +310,36 @@ test('a scan the game loop started is joined but not trusted: the next request r
   assert.deepEqual(await ask(), { ok: true, progress: { hands: 5, target: 200, line: '비교 가능한 핸드 5 / 200 (6인 · 100BB · 정책 v3)' } });
 });
 
+test('a joined scan that ends after the deadline is still not reused: the next requests read afresh', async (t) => {
+  const store = createOwnedTempDir('training-progress-joined-late');
+  ensureSessionStore(store);
+  presetGame(store, 3);
+  const held = gatedReader(store);
+  t.after(() => held.release());
+  const boot = held.reader.read();
+  await held.entered;
+  presetGame(store, 2);
+  const app = await startAppServer({ manager: { current: null, snapshot: () => ({ gameId: null, state: 'lobby' }) }, token: 'host',
+    storeDir: store, publicPort: 0, playReport: held.reader, progressWaitMs: 20 });
+  t.after(() => app.close());
+  const ask = async () => (await fetch(app.origin + ROUTE, { headers: { authorization: 'Bearer host', connection: 'close' } })).json();
+  assert.deepEqual(await ask(), { ok: true, progress: null, pending: true }, 'joined the held scan, past the deadline');
+  held.release();
+  assert.equal((await boot).report.scope.heroHands, 3);
+  // Ask as the lobby does until an answer is final: the joined scan's count may show while pending,
+  // but the final answer comes from the route's own scan.
+  const seen = [];
+  for (let n = 0; n < 200; n += 1) {
+    const answer = await ask();
+    seen.push(answer);
+    if (!answer.pending) break;
+    await new Promise((resolve) => { setTimeout(resolve, 10); });
+  }
+  const final = seen.at(-1);
+  assert.deepEqual(final, { ok: true, progress: { hands: 5, target: 200, line: '비교 가능한 핸드 5 / 200 (6인 · 100BB · 정책 v3)' } });
+  assert.ok(seen.slice(0, -1).every((answer) => answer.pending === true), 'every earlier answer was pending');
+});
+
 test('closing the server while it waits on the loop\'s scan leaves that scan to the loop', async (t) => {
   const store = createOwnedTempDir('training-progress-close');
   ensureSessionStore(store);
