@@ -52,6 +52,7 @@ import {
 export { projectForSeat };
 import { openContained } from '../tools/training-store.js';
 import { createActionReceiptStore, createRelayRootOwner, writeRelayJsonAtomic } from './action-receipts.js';
+import { recordPersistFailure, recordRenameRetries } from './relay-diagnostics.js';
 
 const MAX_BODY = MAX_PUBLISH_BODY_BYTES;
 const HAND_REPLAY_KEEP = 200;
@@ -1199,6 +1200,8 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
   fs.mkdirSync(root, { recursive: true });
 
   const owner = createRelayRootOwner(root);
+  // #347: a write that had to wait out a Windows rename collision is noted in the relay's diagnostics record.
+  recordRenameRetries(owner);
   const state = loadUiState(root, token, assertNoStudyCapability);
   assertNoStudyCapability(state);
   owner.assert();
@@ -1608,6 +1611,8 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       bySeat[id] = projectForSeat({ ...payload, views: next.views }, id);
     }
 
+    // #347: the stage a failure below happened in, for the relay's persist diagnostics.
+    let stage = 'receipt-check';
     try {
       // This is the single commit owner: UI anchor -> terminal receipt -> memory.
       if (!boundAck && body.view !== undefined
@@ -1616,14 +1621,19 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
         // is retained; obsolete correction history leaves with its old decision.
         next.lastActionAck = undefined;
       }
+      stage = 'ui-commit';
       publishCheckpoint('before-ui-commit');
       persistUiStateAtomic(owner, next);
+      stage = 'receipt-acknowledge';
       publishCheckpoint('after-ui-commit');
       if (boundAck) receiptStore.acknowledgeDurable(boundAck, boundAckPublishId);
+      stage = 'receipt-reconcile';
       receiptStore.reconcile({ legal: next.decision }, next.lastActionAck, next.publishId);
       publishCheckpoint('after-receipt-commit');
-    } catch {
+    } catch (error) {
       recoveryRequired = true;
+      // Best effort and closed fields only (relay-diagnostics.js); the answer stays exactly this.
+      recordPersistFailure(owner, stage, error);
       sendJson(res, 500, { ok: false, code: 'PERSIST_FAILED' });
       return;
     }
