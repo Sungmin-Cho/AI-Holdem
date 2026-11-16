@@ -13,6 +13,8 @@ import { createSessionSummaryCache } from "./session-summary.js";
 import { RelayDenied } from "./relay-access.js";
 import { readHud, readReport, readReveal } from "./host-insights.js";
 import { readSpotChart } from "./drill-cli.js";
+import { playReportReader } from "./play-report-store.js";
+import { trainingProgressOf } from "../training/play-report.js";
 import { rankPlayers } from "../server/public/final-summary.js";
 import { HOST_ID } from "../shared/seat-roles.js";
 import { statExact } from "../shared/exact-stat.js";
@@ -286,6 +288,10 @@ export async function startAppServer({
   summaryCache = createSessionSummaryCache(),
   remoteHost = null,
   tlsReloadMs = 10 * 60 * 1000,
+  playReport = null,
+  progressWaitMs = 2500,
+  progressWorkMs = 60_000,
+  progressFreshMs = 15_000,
 }) {
   if ((tlsCert && !tlsKey) || (!tlsCert && tlsKey)) {
     usage("--tls-cert와 --tls-key는 함께 필요합니다.");
@@ -475,6 +481,65 @@ export async function startAppServer({
     // the answers are not sent.
     if(!currentGame()) {json(res,409,{code:'STALE_GAME'});return;}
     json(res,200,{ok:true,items:served});
+  }
+  // Host-only comparable-hand progress for the lobby's training preset (#351): the play report's
+  // preset-population count (training/play-report.js trainingProgressOf), read through the same
+  // per-process reader the game loop uses. One scan at a time is this route's own: it may run for
+  // `progressWorkMs` (its share is dropped then; a scan another caller still waits on goes on, and
+  // finished games stay cached for the next one), while a request waits only `progressWaitMs`. The
+  // last finished result is kept, so a scan that ends after its request answered still reaches the
+  // next request; it is reused for `progressFreshMs` while the current game and its state are the same.
+  // A scan started under another game or state answers as pending, so the lobby asks again and the
+  // next request reads the current one; so does a scan this route only joined (another caller of the
+  // reader — the game loop — started it, possibly before the hands just played), and its result is
+  // not reused. Closing the server drops this route's share of its scan.
+  // Not listed for the remote host and not on the participant listener.
+  const progressWork = { running: null, last: null, closed: false };
+  const progressKey = () => { const view = manager.snapshot(); return `${view.gameId ?? ''}:${view.state ?? ''}`; };
+  function startProgressScan(key) {
+    const reader = playReport ?? playReportReader(storeDir);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), progressWorkMs);
+    timer.unref?.();
+    const work = { key, inherited: reader.scanning?.() === true, controller, timer, promise: null };
+    work.promise = (async () => {
+      const { report } = await reader.read({ signal: controller.signal });
+      const progress = trainingProgressOf(report);
+      if (!progress) throw Object.assign(new Error('PROGRESS_UNAVAILABLE'), { code: 'PROGRESS_UNAVAILABLE' });
+      // A joined scan's result is shown but never matches a key, so the next request reads afresh.
+      progressWork.last = { progress, key: work.inherited ? null : key, at: Date.now() };
+      return progress;
+    })();
+    progressWork.running = work;
+    work.promise.catch(() => {}).finally(() => { clearTimeout(timer); if (progressWork.running === work) progressWork.running = null; });
+    return work;
+  }
+  async function serveTrainingProgress(req, res) {
+    if (req.method !== 'GET') { json(res, 405, { code: 'METHOD_NOT_ALLOWED' }); return; }
+    if (progressWork.closed) { json(res, 503, { code: 'PROGRESS_UNAVAILABLE' }); return; }
+    const key = progressKey();
+    const last = progressWork.last;
+    const fresh = last && last.key === key && Date.now() - last.at < progressFreshMs;
+    const work = progressWork.running ?? (fresh ? null : startProgressScan(key));
+    if (!work) { json(res, 200, { ok: true, progress: last.progress }); return; }
+    let timer;
+    try {
+      const done = await Promise.race([work.promise.then((progress) => ({ progress })),
+        new Promise((resolve) => { timer = setTimeout(resolve, progressWaitMs, null); })]);
+      if (done && work.key === key && !work.inherited) json(res, 200, { ok: true, progress: done.progress });
+      else json(res, 200, { ok: true, progress: progressWork.last?.progress ?? null, pending: true });
+    } catch {
+      json(res, 503, { code: 'PROGRESS_UNAVAILABLE' });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  function closeProgressWork() {
+    progressWork.closed = true;
+    const work = progressWork.running;
+    if (!work) return;
+    clearTimeout(work.timer);
+    work.controller.abort();
   }
   const committedCache = new Map();
   const readCommitFile = name => {
@@ -762,6 +827,13 @@ export async function startAppServer({
     if (req.method === "POST" && pathname === "/api/study") {
       const service = await ensureStudyService(storeDir);
       json(res, 200, { url: service.studyUrl });
+      return;
+    }
+    if (pathname === "/api/training-progress") {
+      // Loopback only: remoteRouteOf already answers 404 there; this keeps the reader out of reach
+      // even if the remote allow-list ever changed.
+      if (remote) { json(res, 404, { code: "NOT_FOUND" }); return; }
+      await serveTrainingProgress(req, res);
       return;
     }
     if (req.method === "POST" && pathname === "/api/stop") {
@@ -1109,6 +1181,7 @@ export async function startAppServer({
     remoteHosts = new Set();
   let publicReloader = null;
   const closeAll = async () => {
+    closeProgressWork();
     clearInterval(remoteSweep);
     remoteReloader?.stop();
     publicReloader?.stop();

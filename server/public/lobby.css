@@ -60,6 +60,13 @@
 .seat-dots .seat { fill: var(--c-text-3); }
 .seat-dots .seat.me { fill: var(--c-action); }
 .opponent-help { padding: var(--sp-3) var(--sp-4); border-radius: var(--r-card); background: var(--c-surface-1); border: 1px solid var(--c-line); }
+/* Training preset (#351): one button that fills the fields of a comparable solo cash game. */
+.training-preset { padding: var(--sp-4); border-radius: var(--r-card); background: var(--c-surface-1); border: 1px solid var(--c-line); }
+.training-preset__row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-3); }
+.training-preset__text { display: grid; gap: var(--sp-1); flex: 1 1 240px; min-width: 0; }
+.training-preset__text .ui-help, .training-preset > .ui-help { margin: 0; }
+.training-preset .ui-btn[aria-pressed="true"] { border-color: var(--c-action); }
+.training-progress { margin: 0; color: var(--c-text); font-weight: 600; }
 .lobby-details .ui-accordion__value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .detail-group { display: grid; gap: var(--sp-3); }
 /* The pace select keeps its bare markup (pinned by a contract test). */
