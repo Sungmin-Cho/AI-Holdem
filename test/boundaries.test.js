@@ -188,7 +188,9 @@ test('the server writes only its UI, receipt and lock files, never its security 
     const source = fs.readFileSync(file, 'utf8');
     if (/\bwriteContained\b/.test(source)) offenders.push(`${relative} -> writeContained`);
     const relayTargets = relative === 'server/server.js' ? new Set(['ui-snapshot.json', 'lock.json'])
-      : relative === 'server/action-receipts.js' ? new Set(['ui-action-receipt.json', 'ui-action-cancellations.json']) : new Set();
+      : relative === 'server/action-receipts.js' ? new Set(['ui-action-receipt.json', 'ui-action-cancellations.json'])
+      // #347: the relay's own closed-field record of a publish it could not persist.
+      : relative === 'server/relay-diagnostics.js' ? new Set(['relay-diagnostics.json']) : new Set();
     for (const call of source.matchAll(/\bwriteRelayJsonAtomic\(([^\n]*)/g)) {
       if (source.slice(Math.max(0, call.index - 16), call.index).endsWith('function ')) {
         if (relative !== 'server/action-receipts.js') offenders.push(`${relative} -> unowned writer declaration`);
@@ -198,7 +200,7 @@ test('the server writes only its UI, receipt and lock files, never its security 
       if (!relayTargets.has(target)) offenders.push(`${relative} -> unapproved relay destination`);
     }
     if (relative === 'server/action-receipts.js') {
-      assert.ok(source.includes("const RELAY_FILES = new Set(['ui-action-receipt.json', 'ui-action-cancellations.json', 'ui-snapshot.json', 'lock.json']);"));
+      assert.ok(source.includes("const RELAY_FILES = new Set(['ui-action-receipt.json', 'ui-action-cancellations.json', 'ui-snapshot.json', 'lock.json', 'relay-diagnostics.json']);"));
       assert.ok(source.includes("const CANCELLATION_FILE = 'ui-action-cancellations.json';"));
       assert.ok(source.includes('!owners.has(owner) || !RELAY_FILES.has(name)'));
     }

@@ -11,6 +11,7 @@ import {createGameLoop, parseGameLoopArgs} from '../tools/game-loop.js';
 import {cliModeDefaults} from '../shared/game-setup.js';
 import {blindsForLevel} from '../engine/hand.js';
 import {createOwnedTempDir} from './helpers/owned-fixtures.mjs';
+import {relayRenameFault} from './helpers/relay-rename-fault.mjs';
 
 const MINUTE = 60_000;
 const readJson = (root, name) => JSON.parse(fs.readFileSync(path.join(root, name), 'utf8'));
@@ -29,6 +30,14 @@ const publishedClock = (value) => {
   return {levelMs: Number(levelMs), remainingMs: Number(remainingMs), at, running: running === '1', nextBlinds: blinds.split('/').map(Number)};
 };
 const sha256 = (text) => createHash('sha256').update(text).digest('hex');
+// #347: the relay's own closed-field record (relay-diagnostics.json): a publish it answered
+// PERSIST_FAILED (stage, code, syscall, attempts) and a rename it had to retry (file name, code,
+// attempts), each with its time. Failure messages carry it, so a refusal names its reason without
+// a rerun; every timed test also prints it as a TAP diagnostic, so a Windows run that passes still
+// shows whether the relay met a rename collision. Only these closed keys are ever printed.
+const RELAY_DIAGNOSTIC_KEYS = ['event', 'stage', 'target', 'code', 'syscall', 'attempts', 'causeCode', 'causeSyscall', 'at'];
+const relayDiagnostics = (root) => (peekJson(root, 'relay-diagnostics.json')?.entries ?? [])
+  .map((entry) => Object.fromEntries(RELAY_DIAGNOSTIC_KEYS.filter((key) => key in entry).map((key) => [key, entry[key]])));
 
 // A resend carries the recorded body only, never a fresh clock (#319). The drain after
 // ATTEMPT_PENDING names no body, so it carries no clock at all. The automatic resend after a
@@ -236,7 +245,12 @@ async function timedFixture(t, {managed = false, stepMs = 20_000.6, stopAtHand =
     fs.writeFileSync(path.join(root, 'state.json'), JSON.stringify(state));
   }
   const driver = userTurnDriver(root, loop, {stopAtHand, control, onTick: onDriverTick});
-  t.after(async () => { driver.clear(); await loop.requestStop().catch(() => {}); });
+  t.after(async () => {
+    driver.clear();
+    await loop.requestStop().catch(() => {});
+    const entries = relayDiagnostics(root);
+    if (entries.length) t.diagnostic(`#347 relay diagnostics: ${JSON.stringify(entries)}`);
+  });
   const stop = () => driver.stop();
   return {root, loop, clock, control, publishes, attempts, injected, recovery, transport, stop, stoppedOn: driver.stoppedOn};
 }
@@ -342,9 +356,11 @@ function assertBoundResendAfterTransportFailure(f) {
   assert.equal(argAfter(resend, '--level-clock'), argAfter(original, '--level-clock'), 'the resend repeats the failed invocation\'s arguments, clock included');
   assert.deepEqual(shownAfterResend, recorded.levelClock, 'the relay shows the recorded clock');
   assert.ok(handLevels(f.root).length >= 3, 'the game went on after the resend');
-  // The diagnostics tell a transport failure from a refusal: the relay check, no refusal.
-  assert.ok(f.recovery.some((row) => row.event === 'server-recovery-verified' || row.event === 'server-recovered'), JSON.stringify(f.recovery));
-  assert.equal(f.recovery.some((row) => row.event === 'publish-refused'), false, JSON.stringify(f.recovery));
+  // The diagnostics tell a transport failure from a refusal: the relay check, no refusal. A refusal
+  // brings the relay's own record of why it could not persist (#347).
+  const detail = () => JSON.stringify({recovery: f.recovery, relayDiagnostics: relayDiagnostics(f.root)});
+  assert.ok(f.recovery.some((row) => row.event === 'server-recovery-verified' || row.event === 'server-recovered'), detail());
+  assert.equal(f.recovery.some((row) => row.event === 'publish-refused'), false, detail());
   assertResendsCarryNoFreshClock(f);
 }
 
@@ -359,6 +375,41 @@ test('a POST dropped before the relay reads it still fails as PUBLISH_FAILED and
   const f = await timedFixture(t, {transportFailOnce: 'before-request'});
   await f.loop.run();
   assertBoundResendAfterTransportFailure(f);
+});
+
+// #347: the refusal the two tests above met on Windows (11-09, 11-16) — a publish refused 500
+// PERSIST_FAILED, then the relay check and the bound resend. Windows refuses a rename onto a file
+// another process holds open (EPERM, EBUSY, EACCES), and ui-snapshot.json is read around every
+// publish. The relay waits such a collision out a bounded number of times (as engine/state.js
+// commitTmp does) and notes it; only a collision that outlasts the cap is still refused.
+const RELAY_RENAME_ATTEMPTS = 21; // server/action-receipts.js: the first rename and RELAY_RENAME_RETRIES more
+
+test('#347 one refused snapshot replacement in the relay is waited out: no refusal, and the relay notes the retry', {timeout: 120000}, async (t) => {
+  const fault = relayRenameFault(t, {target: 'ui-snapshot.json', code: 'EPERM', after: 6, times: 1});
+  const f = await timedFixture(t, {});
+  await f.loop.run();
+  const detail = () => JSON.stringify({refused: fault.refused(), recovery: f.recovery, relayDiagnostics: relayDiagnostics(f.root)});
+  assert.equal(fault.refused().length, 1, `the relay met one refused replacement: ${detail()}`);
+  assert.deepEqual(f.recovery, [], detail());
+  assert.deepEqual(relayDiagnostics(f.root).map(({at, ...rest}) => rest),
+    [{event: 'rename-retried', target: 'ui-snapshot.json', code: 'EPERM', attempts: 2}], detail());
+  assert.ok(handLevels(f.root).length >= 5, 'the game went on');
+});
+
+test('#347 a snapshot replacement refused past the cap is the PERSIST_FAILED refusal the loop recovers from', {timeout: 120000}, async (t) => {
+  const fault = relayRenameFault(t, {target: 'ui-snapshot.json', code: 'EPERM', after: 6, times: RELAY_RENAME_ATTEMPTS});
+  const f = await timedFixture(t, {});
+  await f.loop.run();
+  const detail = () => JSON.stringify({refused: fault.refused().length, recovery: f.recovery, relayDiagnostics: relayDiagnostics(f.root)});
+  assert.equal(fault.refused().length, RELAY_RENAME_ATTEMPTS, `every rename of that publish was refused: ${detail()}`);
+  assert.deepEqual(f.recovery, [
+    {event: 'publish-refused', code: 'PUBLISH_REJECTED', httpStatus: 500, serverCode: 'PERSIST_FAILED', retry: false, bound: false, retire: false},
+    {event: 'server-recovery-verified'},
+  ], detail());
+  assert.deepEqual(relayDiagnostics(f.root).map(({at, ...rest}) => rest),
+    [{event: 'persist-failed', stage: 'ui-commit', code: 'EPERM', syscall: 'rename', attempts: RELAY_RENAME_ATTEMPTS}], detail());
+  assert.ok(handLevels(f.root).length >= 5, 'the game went on after the recovery');
+  assertResendsCarryNoFreshClock(f);
 });
 
 test('paused time does not count toward the level and the clock resumes after the park', {timeout: 120000}, async (t) => {

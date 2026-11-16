@@ -12,7 +12,7 @@ const RECEIPT_FILE = 'ui-action-receipt.json';
 // #235: requests the pause gate refused with durable proof. Only the current
 // decision's entries are kept; a new decision's first entry replaces the file.
 const CANCELLATION_FILE = 'ui-action-cancellations.json';
-const RELAY_FILES = new Set(['ui-action-receipt.json', 'ui-action-cancellations.json', 'ui-snapshot.json', 'lock.json']);
+const RELAY_FILES = new Set(['ui-action-receipt.json', 'ui-action-cancellations.json', 'ui-snapshot.json', 'lock.json', 'relay-diagnostics.json']);
 export const ACTION_RECEIPT_MAX_BYTES = 4096;
 export const ACTION_REJECTION_LIMIT = 16;
 export const ACTION_CANCELLATION_LIMIT = 16;
@@ -29,6 +29,9 @@ const DIGEST = /^[0-9a-f]{64}$/;
 const REASON = /^[A-Z][A-Z0-9_]{0,63}$/;
 const coded = (code) => Object.assign(new Error(code), { code });
 const fail = () => coded('ACTION_RECEIPT_CORRUPT');
+// #347: a read keeps answering ACTION_RECEIPT_CORRUPT, and carries what made it fail as its cause
+// for the relay's persist diagnostics (relay-diagnostics.js reads only the cause's code and syscall).
+const failFrom = (cause) => (cause?.code === 'ACTION_RECEIPT_CORRUPT' ? cause : Object.assign(fail(), { cause }));
 const owners = new WeakMap();
 
 // The UI and receipt must use this same lifetime identity, never a freshly pinned
@@ -55,9 +58,29 @@ export function createRelayRootOwner(root) {
   return owner;
 }
 
+// #347: Windows refuses a rename onto a file another process holds open (EPERM, EBUSY or EACCES):
+// the publisher, the app server, the loop and a test's driver read ui-snapshot.json around every
+// publish. As engine/state.js commitTmp does for the engine's files, that collision is waited out
+// a bounded number of times before the write fails. The wait is synchronous: every reader of these
+// files inside the relay is synchronous too (its only asynchronous reads are other files), so no
+// reader of its own can be left holding a target while it waits. Worst case 20 x 25 ms.
+export const RELAY_RENAME_RETRIES = 20;
+const RENAME_RETRY_MS = 25;
+const RENAME_COLLISIONS = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const sleepCell = new Int32Array(new SharedArrayBuffer(4));
+const sleepSync = (ms) => { Atomics.wait(sleepCell, 0, 0, ms); };
+const renameObservers = new WeakMap();
+
+/** Called after a write whose rename succeeded only after collisions: ({target, code, attempts}). */
+export function observeRelayRenameRetries(owner, observer) {
+  if (!owners.has(owner) || typeof observer !== 'function') throw coded('RELAY_ROOT_CHANGED');
+  renameObservers.set(owner, observer);
+}
+
 // Closed server-owned destinations only. Check the lifetime owner at every path
 // mutation and fsync boundary; open file descriptors still refer to our own inode.
-export function writeRelayJsonAtomic(owner, name, value) {
+// A failed rename carries `renameAttempts` (how many were made) for the relay's diagnostics.
+export function writeRelayJsonAtomic(owner, name, value, { renameRetries = RELAY_RENAME_RETRIES } = {}) {
   if (!owners.has(owner) || !RELAY_FILES.has(name)) throw coded('RELAY_ROOT_CHANGED');
   owner.assert();
   const file = path.join(owner.root, name);
@@ -73,6 +96,7 @@ export function writeRelayJsonAtomic(owner, name, value) {
   const tmp = path.join(owner.root, `.${name}.${process.pid}.${randomBytes(12).toString('hex')}.tmp`);
   let fd;
   let temporary;
+  let collision = null;
   try {
     owner.assert();
     fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o600);
@@ -81,28 +105,44 @@ export function writeRelayJsonAtomic(owner, name, value) {
     fs.writeFileSync(fd, bytes, 'utf8');
     owner.assert();
     fs.fsyncSync(fd);
-    inspectTarget();
-    owner.assert();
-    // The pathname can be replaced while the original fd remains valid. Keep that
-    // fd open and compare both identities immediately before the rename.
-    const opened = fstatExact(fd);
-    const named = lstatExact(tmp);
-    if (!opened.isFile() || opened.nlink !== 1 || !named.isFile() || named.isSymbolicLink() || named.nlink !== 1
-      || opened.dev !== temporary.dev || opened.ino !== temporary.ino
-      || named.dev !== opened.dev || named.ino !== opened.ino) throw coded('UNSAFE_PATH');
-    fs.renameSync(tmp, file);
+    for (let attempt = 1; ; attempt += 1) {
+      // Every attempt, the first and each one after a collision, re-proves the root and the target.
+      inspectTarget();
+      owner.assert();
+      // The pathname can be replaced while the original fd remains valid. Keep that
+      // fd open and compare both identities immediately before the rename.
+      const opened = fstatExact(fd);
+      const named = lstatExact(tmp);
+      if (!opened.isFile() || opened.nlink !== 1 || !named.isFile() || named.isSymbolicLink() || named.nlink !== 1
+        || opened.dev !== temporary.dev || opened.ino !== temporary.ino
+        || named.dev !== opened.dev || named.ino !== opened.ino) throw coded('UNSAFE_PATH');
+      try {
+        fs.renameSync(tmp, file);
+        if (attempt > 1) collision.attempts = attempt;
+        break;
+      } catch (error) {
+        if (error && typeof error === 'object') {
+          try { error.renameAttempts = attempt; } catch { /* a frozen error keeps its own fields */ }
+        }
+        if (attempt > renameRetries || !RENAME_COLLISIONS.has(error?.code)) throw error;
+        collision ??= { code: error.code };
+        sleepSync(RENAME_RETRY_MS);
+      }
+    }
     owner.assert();
     fs.closeSync(fd);
     fd = undefined;
     // Node cannot open/fsync directories on Windows. File bytes were flushed
     // before atomic rename; directory crash durability is unavailable there.
-    if (process.platform === 'win32') { owner.assert(); return; }
-    fd = fs.openSync(owner.root, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
-    owner.assert(fd);
-    try { fs.fsyncSync(fd); } catch (error) {
-      if (!['EINVAL', 'ENOTSUP', 'EOPNOTSUPP'].includes(error.code)) throw error;
+    if (process.platform === 'win32') owner.assert();
+    else {
+      fd = fs.openSync(owner.root, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+      owner.assert(fd);
+      try { fs.fsyncSync(fd); } catch (error) {
+        if (!['EINVAL', 'ENOTSUP', 'EOPNOTSUPP'].includes(error.code)) throw error;
+      }
+      owner.assert(fd);
     }
-    owner.assert(fd);
   } catch (error) {
     try {
       owner.assert();
@@ -111,6 +151,10 @@ export function writeRelayJsonAtomic(owner, name, value) {
     } catch { /* do not unlink anything through a replaced root */ }
     throw error;
   } finally { if (fd !== undefined) fs.closeSync(fd); }
+  // Only a write that completed reports its collisions; the observer cannot change its outcome.
+  if (collision) {
+    try { renameObservers.get(owner)?.({ target: name, code: collision.code, attempts: collision.attempts }); } catch { /* best effort */ }
+  }
 }
 
 function rejectionEntry(row, reason, publishId) {
@@ -211,7 +255,7 @@ export function createActionReceiptStore(root, gameEpoch, { checkpoint = () => {
       const row = validate(JSON.parse(bytes.toString('utf8')));
       observedReceipt = true;
       return row;
-    } catch { throw fail(); }
+    } catch (error) { throw failFrom(error); }
   };
   const validateCancellations = (ledger) => {
     if (!ledger || typeof ledger !== 'object' || Array.isArray(ledger)
@@ -250,7 +294,7 @@ export function createActionReceiptStore(root, gameEpoch, { checkpoint = () => {
       const ledger = validateCancellations(JSON.parse(bytes.toString('utf8')));
       observedCancellations = true;
       return ledger;
-    } catch { throw fail(); }
+    } catch (error) { throw failFrom(error); }
   };
   const cancelledEntry = (decisionId, requestId) => {
     const ledger = readCancellations();
