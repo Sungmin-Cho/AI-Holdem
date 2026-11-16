@@ -13,7 +13,7 @@ import { createBrowserWorkspace, runOwnedCommand, hashTree } from '../helpers/le
 
 export const requiredJourneyChecks = [
   'login-redirect', 'wrong-password', 'login-lobby', 'remote-play', 'study-link-hidden',
-  'expired-relogin', 'standalone-table-relogin', 'logout', 'participant-no-login', 'real-user-store-unchanged', 'owned-cleanup',
+  'expired-relogin', 'standalone-table-relogin', 'logout', 'expired-after-logout', 'participant-no-login', 'real-user-store-unchanged', 'owned-cleanup',
 ];
 const FIXTURES = fileURLToPath(new URL('../fixtures/remote-host-tls/', import.meta.url));
 const CERT = path.join(FIXTURES, 'a.crt'), KEY = path.join(FIXTURES, 'a.key');
@@ -144,6 +144,15 @@ export async function runRemoteHostJourney(outDir) {
     await wait(() => atLogin(), 'logout returns to login');
     assert.equal(await evaluate("sessionStorage.getItem('holdem-app-token')===null"), true);
     checks.push('logout');
+
+    // The logout's mark leaves with the page that set it (#347): signed in again in the same tab, a
+    // session the server then ends is still told it expired.
+    await signIn(PASSWORD);
+    await wait(inLobby, 'lobby after logging out');
+    const nextToken = await evaluate("sessionStorage.getItem('holdem-app-token')");
+    assert.equal(await hostRequest('/api/host/logout', { method: 'POST', token: nextToken }), 200);
+    await wait(() => atLogin('?expired=1'), 'expired session after a logout returns to login');
+    checks.push('expired-after-logout');
 
     for (const target of ['/login.html', '/login.js', '/lobby.html'])
       assert.equal((await fetch(`${app.publicOrigin}${target}`)).status, 404, target);
