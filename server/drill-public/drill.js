@@ -604,6 +604,16 @@ async function mountStudy() {
     } catch { formatted = null; }
     $('play-report-focus').replaceChildren();
     $('play-report-sections').replaceChildren();
+    // The comparable-hand progress line (#351) sits under the scope line. It is built here, not in
+    // drill.html, and reused on every refresh; a failed read or an older service leaves it empty.
+    let progressLine = document.getElementById('play-report-progress');
+    if (!progressLine) {
+      progressLine = node('p', '', 'assessments-note report-progress');
+      progressLine.id = 'play-report-progress';
+      $('play-report-scope').after(progressLine);
+    }
+    progressLine.textContent = formatted?.progress ?? '';
+    progressLine.hidden = !progressLine.textContent;
     section.hidden = missing;
     $('play-report-retry').hidden = missing || (formatted !== null && !formatted.retry);
     if (!formatted) { $('play-report-scope').textContent = missing ? '' : '플레이 리포트를 불러오지 못했습니다. 기록이 많으면 준비에 시간이 걸립니다.'; return; }

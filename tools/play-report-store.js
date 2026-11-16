@@ -131,7 +131,9 @@ export function createPlayReportReader(storeDir, options = {}) {
     });
   }
 
-  return { read, cachedGames: () => cache.size };
+  // `scanning()` says whether a read now would join a scan already under way (one another caller
+  // started, which may have read some games before the caller's moment).
+  return { read, cachedGames: () => cache.size, scanning: () => inflight !== null };
 }
 
 const readers = new Map();
