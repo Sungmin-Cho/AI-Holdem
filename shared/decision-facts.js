@@ -95,14 +95,99 @@ export function handFacts(snapshot) {
 
 // Equity against `opponents` hands. `ranges` (one per opponent, null = any two
 // cards) lets a caller supply estimated ranges; the default is random hands.
-export function equityFacts(snapshot, { ranges = null, samples = 1500 } = {}) {
+export function equityFacts(snapshot, { ranges = null, samples = 1500, minDealt = 1 } = {}) {
   const chips = chipFacts(snapshot);
   if (!chips || chips.opponents < 1) return null;
   const count = Math.min(chips.opponents, 8);
   const opponentRanges = ranges ?? Array(count).fill(null);
   const equity = equityVs({ holeCards: snapshot.holeCards, boardCards: snapshot.board ?? [],
-    ranges: opponentRanges, samples, seed: seedFrom(`${snapshot.decisionId}:${count}:${ranges ? 'ranges' : 'random'}`) });
+    ranges: opponentRanges, samples, minDealt, seed: seedFrom(`${snapshot.decisionId}:${count}:${ranges ? 'ranges' : 'random'}`) });
   return round(100 * equity);
+}
+
+// ---- closed decisions -----------------------------------------------------
+// Required equity against showdown equity describes a call or a fold only when
+// no betting can follow the call: hero closes the action (every opponent with
+// chips has matched the bet) and either it is the river, or at most one player
+// still has chips once hero has called (the rest of the board is then dealt
+// without betting, to the same contestants). Two opponents with chips can still
+// bet each other out of hero's pot, so an all-in call against them is not
+// closed. Several pots with different prices have no single required equity.
+// The comparison is in chips: it says nothing about tournament survival or
+// about whether a raise would have been better.
+
+/** Reporting threshold in percentage points. The range is an uncalibrated
+ * estimate and this is not a bound on its error: a smaller gap is simply
+ * reported as near the price. */
+export const PRICE_MARGIN = 10;
+
+export function closureOf(snapshot) {
+  const hero = seatOf(snapshot, snapshot?.actorId);
+  const bb = snapshot?.blinds?.[1];
+  const toCall = snapshot?.toCall ?? 0;
+  if (!hero || !(bb > 0) || !(toCall > 0)) return null;
+  const live = (snapshot.publicSeats ?? []).filter((seat) => seat.playerId !== snapshot.actorId && !seat.folded && !seat.out);
+  if (!live.length) return null;
+  if (potStructure(snapshot, hero.contribution + toCall).multiPot) return null;
+  const currentBet = snapshot.currentBet ?? 0;
+  const withChips = live.filter((seat) => !seat.allIn);
+  if (!withChips.every((seat) => Number.isSafeInteger(seat.bet) && seat.bet === currentBet)) return null;
+  // A call of the big blind leaves a blind with chips its option to raise.
+  if (snapshot.street === 'preflop' && !(currentBet > bb) && withChips.length) return null;
+  const heroAllIn = toCall >= hero.stack;
+  if (withChips.length + (heroAllIn ? 0 : 1) <= 1) return { kind: withChips.length ? 'hero-all-in' : 'opponents-all-in' };
+  return snapshot.street === 'river' ? { kind: 'river' } : null;
+}
+
+/** Comparison of a closed call or fold with the estimated-range equity, or
+ * null: an open decision, no single price, a raise, or no range equity.
+ * Equities are percentages. It is an observation conditional on the range
+ * estimate, never a statement of the correct play. */
+export function priceVerdict({ chips, closure, action, equityRange = null } = {}) {
+  const required = chips?.requiredEquity;
+  if (!closure || !Number.isFinite(required) || !(required > 0) || (action !== 'call' && action !== 'fold')
+    || !Number.isFinite(equityRange)) return null;
+  const low = equityRange <= required - PRICE_MARGIN;
+  const high = equityRange >= required + PRICE_MARGIN;
+  const verdict = action === 'call' ? (low ? 'call-below-price' : high ? 'call-above-price' : 'near-price')
+    : (high ? 'fold-above-price' : low ? 'fold-below-price' : 'near-price');
+  return { closure: closure.kind, basis: 'range', required, equity: equityRange, verdict };
+}
+
+/** Facing a bet with nothing but a draw: the chance that the draw completes.
+ * It is not the chance to win (other cards can win, a completed draw can lose).
+ * One card, or both when the call is followed by no more betting on the flop. */
+export function drawOdds(snapshot) {
+  const chips = chipFacts(snapshot);
+  const street = snapshot?.street;
+  if (!chips || !Number.isFinite(chips.requiredEquity) || !(chips.requiredEquity > 0) || (street !== 'flop' && street !== 'turn')) return null;
+  const hand = handFacts(snapshot);
+  if (!hand || hand.madeCategory !== 0 || !(hand.outs > 0)) return null;
+  // Cards hero cannot see at the decision: 47 on the flop, 46 on the turn.
+  const unseen = 52 - 2 - snapshot.board.length;
+  const both = street === 'flop' && closureOf(snapshot) !== null;
+  const miss = both ? ((unseen - hand.outs) * (unseen - hand.outs - 1)) / (unseen * (unseen - 1)) : (unseen - hand.outs) / unseen;
+  return { outs: hand.outs, cards: both ? 2 : 1, hit: round(100 * (1 - miss)), required: chips.requiredEquity };
+}
+
+const VERDICT_KO = Object.freeze({
+  'call-below-price': '필요 승률에 못 미친 콜',
+  'call-above-price': '필요 승률을 넘긴 콜',
+  'fold-above-price': '필요 승률을 넘겼던 폴드',
+  'fold-below-price': '필요 승률에 못 미친 폴드',
+  'near-price': '필요 승률과 비슷함',
+});
+
+/** "가격 비교: …" for a verdict, in wording the coaching filter accepts. */
+export function priceVerdictKo(verdict) {
+  if (!verdict) return null;
+  return `가격 비교(칩 기준 · 추정 레인지는 보정되지 않은 참고값): 필요 승률 ${verdict.required}% · 추정 승률 ${verdict.equity}% — ${VERDICT_KO[verdict.verdict]}`;
+}
+
+/** "드로 완성 확률 …" for a draw facing a price. */
+export function drawOddsKo(odds) {
+  if (!odds) return null;
+  return `드로 완성 확률(승률과 다름): ${odds.cards === 2 ? '남은 두 장' : '다음 카드'} ${odds.hit}% · 필요 승률 ${odds.required}%`;
 }
 
 // Why a range equity was left out, in Korean (reasons come from the coaching estimator).
@@ -148,6 +233,14 @@ export function factsLineKo(snapshot, { equityRandom = null, equityRange = null,
   if (equityRange !== null) parts.push(`추정 레인지 대비 에퀴티 ${equityRange}%${rangeMeta ? ` ${rangeLabelKo(rangeMeta, equityRange)}` : ''}`);
   else if (rangeMeta) parts.push(rangeLabelKo(rangeMeta, null));
   if (chips.chosenPctOfPot !== undefined) parts.push(`선택 크기 ${chips.chosenPutBb}BB(팟의 ${chips.chosenPctOfPot}%)${chips.chosenAllIn ? ' 올인' : ''}`);
+  const closure = closureOf(snapshot);
+  if (closure) {
+    parts.push('닫힌 결정(콜하면 이후 베팅 없음)');
+    const verdict = priceVerdictKo(priceVerdict({ chips, closure, action: snapshot.chosenAction?.action, equityRange }));
+    if (verdict) parts.push(verdict);
+  }
+  const odds = drawOddsKo(drawOdds(snapshot));
+  if (odds) parts.push(odds);
   if (equityRandom !== null || equityRange !== null) parts.push(EQUITY_CAVEAT_KO);
   return parts.join(', ');
 }

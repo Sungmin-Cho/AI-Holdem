@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { projectDealSelection } from '../shared/deal-selection.js';
 import { canonicalHandReplayJson, HAND_REPLAY_SCHEMA_VERSION, replayRecord } from '../shared/hand-replay.js';
 import { openContained } from './training-store.js';
 import { lstatExact } from '../shared/exact-stat.js';
+import { toProcessReview } from '../training/process-review.js';
 
 // Bounded, read-only view of the finished hands in .session-store/sessions/<gameId>
 // (design §5/§6). It never prepares, commits, resumes or rebuilds a session, never
@@ -26,6 +28,8 @@ const GAMES_READ_BYTES = 16 * 1024 * 1024;
 const HANDS_READ_BYTES = 32 * 1024 * 1024;
 const TEXT_BYTES = 4096;
 const YIELD_EVERY = 25;
+const PLAYERS_BYTES = 512 * 1024;
+const REPORT_READ_BYTES = 128 * 1024 * 1024;
 const MAX_CONCURRENT = 2;
 const GAME_PAGE = { fallback: 25, max: 50, maxOffset: MAX_SESSIONS };
 const HAND_PAGE = { fallback: 50, max: 100, maxOffset: MAX_HAND_NO };
@@ -194,9 +198,31 @@ function parseState(raw) {
     if (raw.handNo !== lastHand.handNo && raw.handNo !== lastHand.handNo + 1) throw unavailable();
     completed = lastHand.handNo;
   }
+  // Play-report context: closed values only, never a reason to refuse the game.
+  const opponent = ['policy', 'llm', 'jev'].includes(config.opponentRuntime) ? config.opponentRuntime : 'unknown';
+  const bigBlind = Array.isArray(config.blinds0) && isChips(config.blinds0[1]) && config.blinds0[1] > 0 ? config.blinds0[1] : null;
+  const stackBb = Number.isFinite(config.startStackBb) && config.startStackBb > 0 ? config.startStackBb
+    : bigBlind && isChips(config.startStack) && config.startStack > 0 ? config.startStack / bigBlind : null;
   return {
-    mode, reveal, status, seats, completed, lastHand, handNo: raw.handNo,
+    mode, reveal, status, seats, completed, lastHand, handNo: raw.handNo, opponent, stackBb,
   };
+}
+
+// The opponent identity of a policy game: the policy versions of its AI seats,
+// or null when any seat has none (an LLM or JEV table, an older record) or is a
+// policy derived from the host's own play. The archetype line-up is drawn per
+// game from the same catalog and is part of the population, not of the identity.
+function policyIdentity(rows, seats) {
+  if (!Array.isArray(rows)) return null;
+  const versions = new Set();
+  for (const seat of seats) {
+    if (seat.kind !== 'ai') continue;
+    const row = rows.find((player) => isObject(player) && player.playerId === seat.playerId);
+    if (!row || typeof row.policyId !== 'string' || !/^[a-z0-9-]{1,64}$/.test(row.policyId) || row.policyId.startsWith('self-')
+      || typeof row.policyVersion !== 'string' || !/^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$/.test(row.policyVersion)) return null;
+    versions.add(row.policyVersion);
+  }
+  return versions.size ? [...versions].sort().join('+') : null;
 }
 
 function gameRow(gameId, savedAtMs, info) {
@@ -682,5 +708,67 @@ export function createReplayLibrary(storeDir, options = {}) {
     });
   }
 
-  return { listGames, listHands, readHand };
+  // ---- play report (design D3) ----------------------------------------------
+  // Read-only inputs for the play report, one game at a time. A hand leaves this
+  // module only as the validated replay DTO (the host's own view) plus the host's
+  // own validated decision snapshots: a participant's hidden cards are in neither.
+  // The caller owns the byte budget across games and reduces each game at once.
+
+  async function listReportGames() {
+    const root = rootDir();
+    return root ? enumerateSessions(root) : [];
+  }
+
+  /** identity names the state file read; `known` equal to it skips the hands. */
+  async function readReportGame(gameId, { budget, known = null } = {}) {
+    if (typeof gameId !== 'string' || !UUID_RE.test(gameId)) throw badRequest();
+    const root = rootDir();
+    if (!root) throw notFound();
+    try {
+      const chain = inspectChain(root, [CATALOG, SESSIONS, gameId]);
+      if (chain.missing) throw notFound();
+      await yieldTurn();
+      const read = readLeaf(root, [CATALOG, SESSIONS, gameId], 'state.json', { maxBytes: STATE_BYTES, budget });
+      if (!read) throw unavailable();
+      const info = parseState(parseJson(read.bytes));
+      if (info.completed > MAX_HAND_NO) throw overLimit();
+      const stat = read.stat;
+      const identity = [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs, info.completed, info.status].join(':');
+      const meta = {
+        gameId, savedAt: savedAtOf(stat.mtimeMs), mode: info.mode, opponent: info.opponent, status: info.status,
+        solo: info.seats.every((seat) => seat.kind === 'ai' || seat.playerId === 'user'),
+        seats: info.seats.length, stackBb: info.stackBb, policy: null,
+      };
+      if (known !== null && known === identity) return { identity, meta, reused: true };
+      if (info.opponent === 'policy') {
+        // A missing or unreadable players file only leaves the identity unknown.
+        try {
+          const players = readLeaf(root, [CATALOG, SESSIONS, gameId], 'players.json', { maxBytes: PLAYERS_BYTES, budget });
+          if (players) meta.policy = policyIdentity(parseJson(players.bytes), info.seats);
+        } catch (error) {
+          if (error?.fatal) throw error;
+        }
+      }
+      const game = { gameId, info };
+      const hands = [];
+      let unreadable = 0;
+      for (let handNo = 1; handNo <= info.completed; handNo += 1) {
+        try {
+          const record = await loadRecord(root, game, handNo, budget);
+          const replay = projectReplay(record, contextFor(game, handNo));
+          let biased = false;
+          try { biased = Object.hasOwn(record, 'dealSelection') && projectDealSelection(record.dealSelection).mode !== 'off'; } catch { biased = true; }
+          hands.push({ replay, decisions: toProcessReview(record).decisions, biased });
+        } catch (error) {
+          if (error?.fatal) throw error;
+          unreadable += 1;
+        }
+      }
+      return { identity, meta, hands, unreadable, final: info.status !== 'unfinished' };
+    } catch (error) {
+      throw normalizeError(error);
+    }
+  }
+
+  return { listGames, listHands, readHand, listReportGames, readReportGame, reportReadBytes: tighten('reportReadBytes', REPORT_READ_BYTES) };
 }

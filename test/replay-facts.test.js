@@ -4,7 +4,7 @@ import { createGame, startHand, applyAction, legalFor } from '../engine/hand.js'
 import { replayRecord } from '../shared/hand-replay.js';
 import { buildReplaySteps } from '../server/public/replay-model.js';
 import { replayDecisionSnapshot, replayFactsLine } from '../server/public/replay-facts.js';
-import { chipFacts, equityFacts, handFacts } from '../shared/decision-facts.js';
+import { chipFacts, closureOf, drawOdds, equityFacts, handFacts } from '../shared/decision-facts.js';
 
 function play(game, pick) {
   let state = startHand(game).state;
@@ -28,6 +28,7 @@ const pick = (legal, turn) => {
 
 test('replay fact cards match the engine decision snapshots for every user decision', () => {
   let priced = 0;
+  let closed = 0;
   for (let seed = 0; seed < 6; seed += 1) {
     const game = createGame({ aiCount: 2, startStack: 3000, levelEvery: 50 });
     game.button = seed % 3;
@@ -45,11 +46,16 @@ test('replay fact cards match the engine decision snapshots for every user decis
     rebuilt.forEach((snapshot, at) => {
       assert.deepEqual(chipFacts(snapshot), chipFacts(engine[at]), `seed ${seed} decision ${at}`);
       assert.deepEqual(handFacts(snapshot), handFacts(engine[at]));
+      // The closed-decision mark and the draw chance read the street and the seats' bets.
+      assert.deepEqual(closureOf(snapshot), closureOf(engine[at]), `seed ${seed} decision ${at}`);
+      assert.deepEqual(drawOdds(snapshot), drawOdds(engine[at]));
+      closed += closureOf(engine[at]) ? 1 : 0;
       assert.equal(snapshot.decisionId, engine[at].decisionId);
       if (seed < 2) assert.equal(equityFacts(snapshot), equityFacts(engine[at]), 'the same simulation as the coach');
     });
   }
   assert.ok(priced > 0, 'some postflop decisions faced a bet');
+  assert.ok(closed > 0, 'some decisions were closed');
 });
 
 test('only the viewer\'s own action steps with known cards get a fact line', () => {

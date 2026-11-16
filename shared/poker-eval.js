@@ -400,7 +400,7 @@ export function rangeWeights(range) {
 
 // Share of the pot won by hero (ties split) against opponents dealt from
 // `ranges` (null entry = any two cards), over `samples` random runouts.
-export function equityVs({ holeCards, boardCards = [], ranges = [null], samples = 2000, seed = 1 }) {
+export function equityVs({ holeCards, boardCards = [], ranges = [null], samples = 2000, seed = 1, minDealt = 1 }) {
   const hole = toCardInts(holeCards);
   const board = toCardInts(boardCards);
   if (hole.length !== 2 || board.length > 5 || !ranges.length || ranges.length > 8) throw new TypeError('invalid equity input');
@@ -449,6 +449,8 @@ export function equityVs({ holeCards, boardCards = [], ranges = [null], samples 
     if (heroBest) won += 1 / tied;
     dealt += 1;
   }
-  if (!dealt) throw new RangeError('no compatible deal for these ranges');
+  // Deals in which range opponents share a card are skipped, so the accepted
+  // sample can be far smaller than `samples`.
+  if (dealt < Math.max(1, minDealt)) throw new RangeError('no compatible deal for these ranges');
   return won / dealt;
 }
