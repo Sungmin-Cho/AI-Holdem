@@ -33,7 +33,12 @@ test('an older service, a failure or a malformed answer shows nothing', () => {
 
 test('no hands yet, partial reads and text bounds', () => {
   const empty = formatPlayReport({ ok: true, report: buildPlayReport([]), view: playReportView(buildPlayReport([])) });
-  assert.deepEqual(empty, { empty: true, scope: '끝난 핸드가 쌓이면 여기에 플레이 리포트가 보입니다.', focus: [], sections: [] });
+  assert.deepEqual(empty, { empty: true, retry: false, scope: '끝난 핸드가 쌓이면 여기에 플레이 리포트가 보입니다.', focus: [], sections: [] });
+  // Nothing could be read (a cut scan, a store too large to list): not an empty store, and worth another try.
+  const unread = { ok: true, report: buildPlayReport([], { truncated: true, unreadable: { games: 2, hands: 0 } }), view: { focus: [], sections: [] } };
+  assert.deepEqual(formatPlayReport(unread), { empty: true, retry: true, focus: [], sections: [],
+    scope: '플레이 기록을 리포트에 담지 못했습니다 · 읽지 못한 기록: 게임 2 · 핸드 0 · 기록이 많아 일부만 읽었습니다' });
+  assert.equal(formatPlayReport(response()).retry, false);
   const partial = response();
   Object.assign(partial.report.scope, { unreadableGames: 1, unreadableHands: 2, truncated: true, biasedHands: 4 });
   assert.equal(formatPlayReport(partial).scope,
@@ -43,6 +48,7 @@ test('no hands yet, partial reads and text bounds', () => {
   hostile.view.sections = [{ title: 'a', note: null, rows: [{ label: 'l'.repeat(999), value: {} }, { label: 3 }] }, { title: 'empty', rows: [] }];
   const cut = formatPlayReport(hostile);
   assert.deepEqual(cut.focus, [{ title: 'x'.repeat(80), detail: '' }]);
+  assert.equal(cut.retry, false);
   assert.deepEqual(cut.sections, [{ title: 'a', note: '', rows: [{ label: 'l'.repeat(120), value: '' }] }]);
 });
 
@@ -55,4 +61,5 @@ test('the page has a place for the report and asks for it apart from the summary
   const script = fs.readFileSync(new URL('../server/drill-public/drill.js', import.meta.url), 'utf8');
   assert.match(script, /api\('\/api\/report'\)/);
   assert.match(script, /missing = response\.httpStatus === 404/);
+  assert.match(script, /\$\('play-report-retry'\)\.hidden = missing \|\| \(formatted !== null && !formatted\.retry\);/);
 });

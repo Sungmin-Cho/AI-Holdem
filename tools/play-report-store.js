@@ -10,6 +10,8 @@ import { createReplayLibrary } from './replay-library.js';
 import { decisionFacts } from './review-facts.js';
 
 const MAX_GAMES = 1000;
+/** The code of a scan its callers gave up on (the library's own abort code). */
+export const PLAY_REPORT_ABORTED = 'REPLAY_ABORTED';
 
 let pinnedDataset;
 /** The v3 reference used as the report's yardstick; null when it cannot be loaded. */
@@ -34,13 +36,16 @@ export function createPlayReportReader(storeDir, options = {}) {
   // One hand at a time, giving the event loop back in between: a hand can cost an
   // all-in simulation and a closed-decision equity, and this runs in processes
   // that are also playing a game. An aborted signal ends the scan at the next hand.
+  const abortedError = () => Object.assign(new Error(PLAY_REPORT_ABORTED), { code: PLAY_REPORT_ABORTED, fatal: true });
+  const stopIfAborted = (signal) => { if (signal.aborted) throw abortedError(); };
   async function reduce(meta, hands, signal) {
     const summary = emptyGameSummary(meta);
     for (const hand of hands) {
-      if (signal?.aborted) throw Object.assign(new Error('PLAY_REPORT_ABORTED'), { code: 'PLAY_REPORT_ABORTED', fatal: true });
+      stopIfAborted(signal);
       addGameSummary(summary, summarizeGame(meta, [hand], { dataset, factsOf }));
       await yieldTurn();
     }
+    stopIfAborted(signal);
     return summary;
   }
 
@@ -59,11 +64,12 @@ export function createPlayReportReader(storeDir, options = {}) {
       truncated = true;
     }
     for (const entry of entries) {
+      stopIfAborted(signal);
       seen.add(entry.gameId);
       if (entry.code) { unreadable.games += 1; continue; }
       const cached = cache.get(entry.gameId);
       try {
-        const game = await library.readReportGame(entry.gameId, { budget, known: cached?.identity ?? null });
+        const game = await library.readReportGame(entry.gameId, { budget, known: cached?.identity ?? null, signal });
         if (game.reused) { summaries.push(cached.summary); continue; }
         const summary = await reduce(game.meta, game.hands, signal);
         unreadable.hands += game.unreadable;
@@ -72,7 +78,7 @@ export function createPlayReportReader(storeDir, options = {}) {
         else cache.delete(entry.gameId);
         summaries.push(summary);
       } catch (error) {
-        if (error?.code === 'PLAY_REPORT_ABORTED') throw error;
+        if (error?.code === PLAY_REPORT_ABORTED) throw error;
         // A fatal limit (the read budget) ends the scan: what was read so far is a partial
         // report, and what is already known about this game stays.
         if (error?.fatal) { truncated = true; break; }
@@ -80,6 +86,7 @@ export function createPlayReportReader(storeDir, options = {}) {
         unreadable.games += 1;
       }
     }
+    stopIfAborted(signal);
     // A game that is gone from the store leaves the cache; after a cut scan the games it did
     // not reach are simply unknown and stay.
     if (!truncated) for (const gameId of [...cache.keys()]) if (!seen.has(gameId)) cache.delete(gameId);
@@ -87,12 +94,41 @@ export function createPlayReportReader(storeDir, options = {}) {
     return { report, view: playReportView(report), summaries };
   }
 
-  /** { report, view, summaries }; concurrent callers share one scan. `signal`
-   * (of the caller that starts the scan) stops it between hands: finished games
-   * already reduced stay cached, so a later read resumes from there. */
-  function read({ signal } = {}) {
-    inflight ??= scan(signal).finally(() => { inflight = null; });
-    return inflight;
+  /**
+   * { report, view, summaries }. Concurrent callers share one scan, and each waits
+   * on its own terms: a caller whose `signal` aborts is rejected at once
+   * (PLAY_REPORT_ABORTED) whatever the others do. The scan itself is stopped only
+   * when every caller that was waiting has given up — a caller without a signal
+   * never gives up — and it then ends at the next hand. Finished games already
+   * reduced stay cached, so a later read resumes from there.
+   */
+  function read({ signal = null } = {}) {
+    if (!inflight) {
+      const run = { controller: new AbortController(), waiting: 0, promise: null };
+      run.promise = scan(run.controller.signal).finally(() => { if (inflight === run) inflight = null; });
+      // A scan every caller left is rejected with nobody listening.
+      run.promise.catch(() => {});
+      inflight = run;
+    }
+    const run = inflight;
+    run.waiting += 1;
+    if (!signal) return run.promise;
+    return new Promise((resolve, reject) => {
+      const leave = () => {
+        run.waiting -= 1;
+        if (run.waiting > 0) return;
+        // Nobody is waiting: stop the scan and let the next read start a new one.
+        run.controller.abort();
+        if (inflight === run) inflight = null;
+      };
+      const onAbort = () => { leave(); reject(abortedError()); };
+      if (signal.aborted) { onAbort(); return; }
+      signal.addEventListener('abort', onAbort, { once: true });
+      run.promise.then(
+        (value) => { signal.removeEventListener('abort', onAbort); resolve(value); },
+        (error) => { signal.removeEventListener('abort', onAbort); reject(error); },
+      );
+    });
   }
 
   return { read, cachedGames: () => cache.size };

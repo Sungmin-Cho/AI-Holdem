@@ -53,6 +53,8 @@ const unavailable = () => fail('REPLAY_UNAVAILABLE');
 const unsupported = () => fail('REPLAY_UNSUPPORTED');
 const busy = () => fail('REPLAY_BUSY');
 const overLimit = (fatal = false) => fail('REPLAY_LIMIT_EXCEEDED', fatal);
+// The caller of a play-report scan gave up: ends the whole scan, like a fatal limit.
+const aborted = () => fail('REPLAY_ABORTED', true);
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isChips = (value) => Number.isSafeInteger(value) && value >= 0;
@@ -719,7 +721,7 @@ export function createReplayLibrary(storeDir, options = {}) {
   }
 
   /** identity names the state file read; `known` equal to it skips the hands. */
-  async function readReportGame(gameId, { budget, known = null } = {}) {
+  async function readReportGame(gameId, { budget, known = null, signal = null } = {}) {
     if (typeof gameId !== 'string' || !UUID_RE.test(gameId)) throw badRequest();
     const root = rootDir();
     if (!root) throw notFound();
@@ -727,6 +729,7 @@ export function createReplayLibrary(storeDir, options = {}) {
       const chain = inspectChain(root, [CATALOG, SESSIONS, gameId]);
       if (chain.missing) throw notFound();
       await yieldTurn();
+      if (signal?.aborted) throw aborted();
       const read = readLeaf(root, [CATALOG, SESSIONS, gameId], 'state.json', { maxBytes: STATE_BYTES, budget });
       if (!read) throw unavailable();
       const info = parseState(parseJson(read.bytes));
@@ -746,6 +749,7 @@ export function createReplayLibrary(storeDir, options = {}) {
       const versions = new Set();
       let proved = info.opponent === 'policy';
       for (let handNo = 1; handNo <= info.completed; handNo += 1) {
+        if (signal?.aborted) throw aborted();
         try {
           const record = await loadRecord(root, game, handNo, budget);
           const replay = projectReplay(record, contextFor(game, handNo));

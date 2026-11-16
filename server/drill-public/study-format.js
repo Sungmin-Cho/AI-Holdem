@@ -607,14 +607,21 @@ export function formatPlayReport(response) {
   const text = (value, max) => (typeof value === 'string' ? value.slice(0, max) : '');
   const count = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : 0);
   const hands = count(scope.heroHands);
-  if (hands === 0) return { empty: true, scope: '끝난 핸드가 쌓이면 여기에 플레이 리포트가 보입니다.', focus: [], sections: [] };
   const partial = [
     count(scope.unreadableGames) || count(scope.unreadableHands) ? `읽지 못한 기록: 게임 ${count(scope.unreadableGames)} · 핸드 ${count(scope.unreadableHands)}` : null,
     scope.truncated === true ? '기록이 많아 일부만 읽었습니다' : null,
     count(scope.biasedHands) ? `유리한 딜 ${count(scope.biasedHands)}핸드 제외` : null,
   ].filter(Boolean);
+  // No hand in the report: either none is finished yet, or none could be read. The
+  // second is not an empty store, and reading again may get further.
+  const unread = count(scope.unreadableGames) || count(scope.unreadableHands) || scope.truncated === true;
+  if (hands === 0) {
+    return { empty: true, retry: Boolean(unread), focus: [], sections: [],
+      scope: unread ? ['플레이 기록을 리포트에 담지 못했습니다', ...partial].join(' · ') : '끝난 핸드가 쌓이면 여기에 플레이 리포트가 보입니다.' };
+  }
   return {
     empty: false,
+    retry: false,
     scope: [`최근 ${count(scope.games)}게임에서 내가 받은 ${hands}핸드 기준(전체 ${count(scope.totalGames)}게임)`, ...partial].join(' · '),
     focus: response.view.focus.slice(0, 3).map((item) => ({ title: text(item?.title, 80), detail: text(item?.detail, 600) })).filter((item) => item.title),
     sections: response.view.sections.slice(0, 8).map((section) => ({

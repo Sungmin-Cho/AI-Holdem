@@ -24,7 +24,8 @@ async function fixture(t, over = {}) {
   room.open({ totalSeats: 3 });
   const guest = room.join({ code: room.load().joinCode, name: 'Guest', addr: '1' });
   // The route answers only for a game that is over (its committed engine state says so).
-  const writeState = (gameOver) => fs.writeFileSync(path.join(root, 'state.json'), JSON.stringify({ gameOver, at: Math.random() }));
+  let writes = 0;
+  const writeState = (gameOver, dir = root) => fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ gameOver, revision: writes += 1 }));
   writeState(over.gameOver ?? true);
   let checks = 0;
   const manager = { room, current: { gameId, sessionDir: root },
@@ -36,7 +37,7 @@ async function fixture(t, over = {}) {
   const ledger = () => {
     try { return JSON.parse(fs.readFileSync(path.join(root, '.training', 'grid-exposure-log.json'), 'utf8')).rows.map((row) => row.spotKey); } catch { return []; }
   };
-  return { app, root, guest, headers, post, ledger, writeState, resetChecks: () => { checks = 0; } };
+  return { app, root, guest, headers, post, ledger, writeState, manager, resetChecks: () => { checks = 0; } };
 }
 const items = [{ spotKey: SPOT, handClass: 'KTo' }, { spotKey: RFI, handClass: '64o' }, { spotKey: SPOT, handClass: 'AA' }];
 
@@ -97,6 +98,23 @@ test('a game still being played gets no answers, and a game replaced mid-request
   assert.equal(late.status, 409);
   assert.deepEqual(await late.json(), { code: 'STALE_GAME' });
   assert.equal(replacedLate.ledger().length, 2, 'the conservative side: the view is on record');
+});
+
+test('the committed state the route reads is the current session\'s, also after the session changed', async (t) => {
+  const f = await fixture(t);
+  assert.equal((await f.post({ items })).status, 200, 'the first game is over');
+  // The app moves on to another session directory whose game is still being played.
+  const next = createOwnedTempDir('quiz-route-next');
+  f.writeState(false, next);
+  f.manager.current = { gameId, sessionDir: next };
+  const refused = await f.post({ items });
+  assert.equal(refused.status, 409);
+  assert.deepEqual(await refused.json(), { code: 'GAME_NOT_OVER' }, 'the cached state of the old session is not reused');
+  f.writeState(true, next);
+  assert.equal((await f.post({ items })).status, 200);
+  // A session without a readable state file gets no answers.
+  f.manager.current = { gameId, sessionDir: createOwnedTempDir('quiz-route-empty') };
+  assert.equal((await f.post({ items })).status, 409);
 });
 
 test('while an assessment is open no question is served and nothing is recorded', async (t) => {

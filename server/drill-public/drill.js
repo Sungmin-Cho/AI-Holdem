@@ -605,7 +605,7 @@ async function mountStudy() {
     $('play-report-focus').replaceChildren();
     $('play-report-sections').replaceChildren();
     section.hidden = missing;
-    $('play-report-retry').hidden = formatted !== null || missing;
+    $('play-report-retry').hidden = missing || (formatted !== null && !formatted.retry);
     if (!formatted) { $('play-report-scope').textContent = missing ? '' : '플레이 리포트를 불러오지 못했습니다. 기록이 많으면 준비에 시간이 걸립니다.'; return; }
     $('play-report-scope').textContent = formatted.scope;
     for (const item of formatted.focus) {

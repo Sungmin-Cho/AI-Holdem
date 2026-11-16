@@ -116,6 +116,21 @@ test('a watchdog fold before the flop is not a flop the host saw', () => {
   assert.deepEqual(summarizeGame(meta(), [handOf(record)], options).postflop.wtsd, { k: 0, n: 0 });
 });
 
+test('a flop the host had a turn on counts, whether the host then folds or is all-in', () => {
+  // Calls before the flop, folds to a bet on the flop: a flop seen, no showdown.
+  const foldsFlop = play(setup3(5000, 5000, 5000),
+    (legal, state) => (legal.canCheck ? ['check'] : state.hand.street === 'preflop' ? ['call'] : ['fold']),
+    (legal, state) => (state.hand.street === 'flop' && legal.toAct === 'p1' && legal.canRaise ? ['raise', legal.minRaiseTo] : legal.canCheck ? ['check'] : ['call']));
+  assert.ok(foldsFlop.folded.includes('user') && foldsFlop.board.length >= 3, 'fixture: the host folded after the flop');
+  assert.deepEqual(summarizeGame(meta(), [handOf(foldsFlop)], options).postflop.wtsd, { k: 0, n: 1 });
+  // All-in on the flop and called: a flop seen and a showdown.
+  const jamsFlop = play(setup3(1500, 5000, 5000),
+    (legal, state) => (state.hand.street === 'preflop' ? (legal.canCheck ? ['check'] : ['call']) : legal.canRaise ? ['raise', legal.maxRaiseTo] : ['call']),
+    checkOrCall);
+  assert.ok(jamsFlop.allIn.includes('user') && jamsFlop.showdown, 'fixture: the host was all-in after the flop and shown down');
+  assert.deepEqual(summarizeGame(meta(), [handOf(jamsFlop)], options).postflop.wtsd, { k: 1, n: 1 });
+});
+
 test('a game reduced hand by hand adds up to the game reduced at once; checks-only skips the rest', () => {
   const hands = [
     handOf(play(setup3(5000, 5000, 5000), checkOrCall, checkOrCall)),
@@ -249,11 +264,12 @@ test('only comparable fixed-policy cash play gets a per-100 figure, and only wit
   // mean 0.2, variance 25.04 - 0.04 = 25, sd 5, se 0.25 per hand over 400 hands.
   assert.ok(Math.abs(row.per100.high - (20 + 1.96 * 25)) < 1e-6, String(row.per100.high));
   assert.ok(Math.abs(row.per100.low - (20 - 1.96 * 25)) < 1e-6);
-  assert.equal(Object.hasOwn(row, 'adjSqBb'), false);
+  assert.deepEqual(Object.keys(row).sort(), ['allIns', 'games', 'hands', 'luckBb', 'mode', 'opponent', 'per100', 'unrevealed', 'yardstick']);
   // Too few hands: the segment is still a yardstick but states no figure.
   const few = buildPlayReport([cash({}, YARDSTICK_MIN_HANDS - 1)]).results.segments[0];
   assert.ok(few.yardstick);
   assert.equal(few.per100, null);
+  assert.deepEqual(Object.keys(few).sort(), ['allIns', 'games', 'hands', 'luckBb', 'mode', 'opponent', 'per100', 'unrevealed', 'yardstick']);
   // Another human, an unknown policy, a favourable deal or a different table is not the same population.
   for (const over of [{ solo: false }, { policy: null }, { opponent: 'llm' }, { mode: 'tournament' }]) {
     assert.equal(yardstickKey(cash(over)), null, JSON.stringify(over));
