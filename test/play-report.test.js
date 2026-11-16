@@ -214,6 +214,13 @@ test('a preflop all-in is sampled with a fixed seed; side pots count only the po
   assert.deepEqual(a, allInExpectation(preflop, { seed: 7 }));
   // Aces over kings is about 82%.
   assert.ok(a.expected / 2000 > 0.78 && a.expected / 2000 < 0.86, String(a.expected / 2000));
+  // A shown folded hand in a sampled run-out: its cards never come, whatever the order of the
+  // projection's keys, and the same seed gives the same figure.
+  const shown = { ...preflop, folded: ['p2'], holes: { p2: ['Ks', 'Kc'], user: ['Ah', 'Ad'], p1: ['Kh', 'Kd'] } };
+  const reordered = { ...shown, holes: { user: ['Ah', 'Ad'], p1: ['Kh', 'Kd'], p2: ['Ks', 'Kc'] } };
+  const drawnDead = allInExpectation(shown, { seed: 7 });
+  assert.deepEqual(drawnDead, allInExpectation(reordered, { seed: 7 }));
+  assert.ok(drawnDead.expected > a.expected, 'with both other kings dead the aces win more often');
   const side = replayOf({
     startStacks: { user: 500, p1: 1000, p2: 1000 }, endStacks: { user: 0, p1: 2500, p2: 0 },
     holes: { user: ['Ah', 'Ad'], p1: ['Kh', 'Kd'], p2: ['Qh', 'Qd'] },
