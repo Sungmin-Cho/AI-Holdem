@@ -169,7 +169,7 @@ test('the prompt separates price arithmetic from heuristic equity and hand stren
   assert.match(prompt, /같은 근거로 합치거나 콜의 EV로 환산하지 마라/);
   assert.match(prompt, /메이드 핸드 강도·드로는 사실이다\. 그것이 곧 이 액션의 EV는 아니다/);
   assert.match(prompt, /결정 사실 카드\(엔진 계산/);
-  assert.match(prompt, /가장 비싼\(결정적인\) 결정 1개\(d-1-flop-4\)/);
+  assert.match(prompt, /결과와 무관하게 고른 결정 1개\(d-1-flop-4\)/);
   assert.match(prompt, /outcome 필드는 쓰지 마라/);
   assert.ok(!/"outcome"/.test(prompt.split('출력은 JSON 한 줄만:')[1].split('\n')[0]), 'the JSON shape does not ask for an outcome');
 });

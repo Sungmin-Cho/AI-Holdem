@@ -132,10 +132,13 @@ export function closureOf(snapshot) {
   const currentBet = snapshot.currentBet ?? 0;
   const withChips = live.filter((seat) => !seat.allIn);
   if (!withChips.every((seat) => Number.isSafeInteger(seat.bet) && seat.bet === currentBet)) return null;
-  // A call of the big blind leaves a blind with chips its option to raise.
-  if (snapshot.street === 'preflop' && !(currentBet > bb) && withChips.length) return null;
+  // Who can still bet once hero has called. With one player or none the rest of
+  // the board is dealt without betting. That also covers the blinds: a big blind
+  // keeps its option only while someone else has chips to be raised.
   const heroAllIn = toCall >= hero.stack;
   if (withChips.length + (heroAllIn ? 0 : 1) <= 1) return { kind: withChips.length ? 'hero-all-in' : 'opponents-all-in' };
+  // Otherwise only the last call of the hand is closed. (Before the flop two
+  // players with chips always leave betting to come: the blind's option, the flop.)
   return snapshot.street === 'river' ? { kind: 'river' } : null;
 }
 
@@ -154,9 +157,10 @@ export function priceVerdict({ chips, closure, action, equityRange = null } = {}
   return { closure: closure.kind, basis: 'range', required, equity: equityRange, verdict };
 }
 
-/** Facing a bet with nothing but a draw: the chance that the draw completes.
- * It is not the chance to win (other cards can win, a completed draw can lose).
- * One card, or both when the call is followed by no more betting on the flop. */
+/** Facing a bet with nothing but a draw: the chance that one of the present outs
+ * falls. It is not the chance to win (other cards can win, a completed draw can
+ * lose) nor every way to improve. One card, or both when the call is followed by
+ * no more betting on the flop. */
 export function drawOdds(snapshot) {
   const chips = chipFacts(snapshot);
   const street = snapshot?.street;
@@ -184,10 +188,12 @@ export function priceVerdictKo(verdict) {
   return `가격 비교(칩 기준 · 추정 레인지는 보정되지 않은 참고값): 필요 승률 ${verdict.required}% · 추정 승률 ${verdict.equity}% — ${VERDICT_KO[verdict.verdict]}`;
 }
 
-/** "드로 완성 확률 …" for a draw facing a price. */
+/** "드로 아웃이 나올 확률 …" for a draw facing a price. With two cards to come it
+ * is the chance that at least one of the present outs falls, not every way the
+ * hand can improve by the river. */
 export function drawOddsKo(odds) {
   if (!odds) return null;
-  return `드로 완성 확률(승률과 다름): ${odds.cards === 2 ? '남은 두 장' : '다음 카드'} ${odds.hit}% · 필요 승률 ${odds.required}%`;
+  return `드로 아웃이 나올 확률(승률과 다름): ${odds.cards === 2 ? '남은 두 장 중 한 장 이상' : '다음 카드'} ${odds.hit}% · 필요 승률 ${odds.required}%`;
 }
 
 // Why a range equity was left out, in Korean (reasons come from the coaching estimator).

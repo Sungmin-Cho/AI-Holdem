@@ -63,7 +63,7 @@ test('D9/D10 the coach prompt is grounded in facts and an out-of-bounds sentence
   await stopRun(loop, running);
   assert.match(upper.prompts[0], /결정 사실 카드\(엔진 계산/);
   assert.match(upper.prompts[0], /d-1-[a-z]+-\d+: 팟 [\d.]+BB/);
-  assert.match(upper.prompts[0], /가장 비싼\(결정적인\) 결정 1개/);
+  assert.match(upper.prompts[0], /결과와 무관하게 고른 결정 1개/);
   assert.doesNotMatch(upper.prompts[0], /무난한 폴드/);
   assert.equal(note.text, '체크 후 레이즈는 팟을 키웠습니다. 기대값이 낮은 라인은 아닙니다.');
 });

@@ -113,58 +113,83 @@ function effectiveBb(decision) {
   return Math.min(total(hero), Math.max(...others.map(total))) / decision.blinds[1];
 }
 
-function addChecks(summary, decision, factsOf) {
-  if (decision.forced) return;
-  const checks = summary.checks;
-  const handNo = decision.handNo;
+/** What one decision snapshot shows, read at decision time only. `verdict` is
+ * the closed-decision price comparison for it, when one was made. Patterns are
+ * things to look at, never established mistakes. */
+function inspectDecision(decision, verdict = null) {
   const { action, amount } = decision.chosenAction;
   const raise = action === 'raise' || action === 'bet';
-  checks.decisions += 1;
-  if (action === 'fold' && decision.legal.canCheck) checks.foldWhenCheck.push(handNo);
-  if (raise) {
-    checks.raises += 1;
-    if (amount === decision.minRaiseTo && decision.minRaiseTo < decision.maxRaiseTo) checks.minRaises += 1;
-  }
+  const hero = decision.publicSeats.find((seat) => seat.playerId === decision.actorId);
+  const out = { patterns: [], raise, minRaise: raise && amount === decision.minRaiseTo && decision.minRaiseTo < decision.maxRaiseTo,
+    shortEntry: false, unopenedDeep: false };
+  if (action === 'fold' && decision.legal.canCheck) out.patterns.push('fold-when-check');
   if (decision.street === 'preflop') {
     const seated = decision.publicSeats.filter((seat) => !seat.out).length;
     const unopened = !decision.priorActions.some((prior) => prior.street === 'preflop' && (prior.action === 'raise' || prior.action === 'call'));
     const eff = effectiveBb(decision);
-    const hero = decision.publicSeats.find((seat) => seat.playerId === decision.actorId);
-    // A stack of a big blind or less has no choice to judge.
+    // A stack of a big blind or less has no choice to look at.
     if (unopened && seated >= 3 && decision.position !== 'BB' && decision.toCall > 0 && eff !== null && eff > 1 && hero) {
       if (eff <= SHORT_STACK_BB) {
         if (action !== 'fold') {
-          checks.shortEntries += 1;
+          out.shortEntry = true;
           // A call for the whole stack is all-in, not a limp.
-          if ((action === 'call' && decision.toCall < hero.stack) || (raise && amount < decision.maxRaiseTo)) checks.shortNonAllIn.push(handNo);
+          if ((action === 'call' && decision.toCall < hero.stack) || (raise && amount < decision.maxRaiseTo)) out.patterns.push('short-non-all-in');
         }
       } else if (decision.position !== 'SB') {
-        checks.unopenedDeep += 1;
-        if (action === 'call') checks.openLimp.push(handNo);
+        out.unopenedDeep = true;
+        if (action === 'call') out.patterns.push('open-limp');
       }
     }
-  }
-  const closure = closureOf(decision);
-  if (closure && (action === 'call' || action === 'fold')) {
-    checks.closed += 1;
-    if (action === 'call') checks.closedCalls += 1;
-    let verdict = null;
-    try { verdict = factsOf(decision)?.priceVerdict?.verdict ?? null; } catch { verdict = null; }
-    if (verdict) checks.compared += 1;
-    if (verdict === 'call-below-price') checks.callBelowPrice.push(handNo);
-    if (verdict === 'fold-above-price') checks.foldAbovePrice.push(handNo);
-  }
-  if (action === 'call') {
+  } else if (hero && ((action === 'call' && decision.toCall > 0 && decision.toCall >= hero.stack) || (raise && amount >= decision.maxRaiseTo))) {
     // Putting the rest of the stack in after the flop with less than top pair and no strong draw.
-    const hero = decision.publicSeats.find((seat) => seat.playerId === decision.actorId);
-    if (decision.street !== 'preflop' && hero && decision.toCall >= hero.stack) addWeakStackOff(checks, decision);
-  } else if (raise && decision.street !== 'preflop' && amount >= decision.maxRaiseTo) addWeakStackOff(checks, decision);
+    const hand = handFacts(decision);
+    const strong = hand && (hand.madeCategory >= 2 || ['탑페어', '오버페어'].includes(hand.madeDetail));
+    if (hand && !strong && (hand.outs ?? 0) < 8) out.patterns.push('weak-stack-off');
+  }
+  if (verdict === 'call-below-price' || verdict === 'fold-above-price') out.patterns.push(verdict);
+  return out;
 }
 
-function addWeakStackOff(checks, decision) {
-  const hand = handFacts(decision);
-  const strong = hand && (hand.madeCategory >= 2 || ['탑페어', '오버페어'].includes(hand.madeDetail));
-  if (hand && !strong && (hand.outs ?? 0) < 8) checks.weakStackOff.push(decision.handNo);
+/** Pattern ids of one validated, deliberate decision (see inspectDecision). */
+export function decisionPatterns(decision, verdict = null) {
+  if (!decision || decision.processStatus !== 'available' || decision.forced) return [];
+  return inspectDecision(decision, verdict).patterns;
+}
+
+const PATTERN_KO = Object.freeze({
+  'short-non-all-in': `유효 스택 ${SHORT_STACK_BB}BB 이하에서 올인이 아닌 진입`,
+  'open-limp': '아무도 들어오지 않은 팟에 콜로 진입',
+  'fold-when-check': '체크할 수 있는데 폴드',
+  'weak-stack-off': '탑페어 미만·강한 드로 없이 남은 스택 투입',
+  'call-below-price': '콜하면 베팅이 끝나는 결정에서 추정 승률이 필요 승률에 못 미친 콜(추정 레인지는 보정되지 않은 참고값)',
+  'fold-above-price': '콜하면 베팅이 끝나는 결정에서 추정 승률이 필요 승률을 넘겼던 폴드(추정 레인지는 보정되지 않은 참고값)',
+});
+/** Korean names of pattern ids, for the coach prompt. */
+export function patternLinesKo(ids) {
+  return (Array.isArray(ids) ? ids : []).map((id) => PATTERN_KO[id]).filter(Boolean).map((text) => `- ${text}`);
+}
+
+function addChecks(summary, decision, factsOf) {
+  if (decision.forced) return;
+  const checks = summary.checks;
+  const handNo = decision.handNo;
+  const { action } = decision.chosenAction;
+  let verdict = null;
+  if (closureOf(decision) && (action === 'call' || action === 'fold')) {
+    checks.closed += 1;
+    if (action === 'call') checks.closedCalls += 1;
+    try { verdict = factsOf(decision)?.priceVerdict?.verdict ?? null; } catch { verdict = null; }
+    if (verdict) checks.compared += 1;
+  }
+  const seen = inspectDecision(decision, verdict);
+  checks.decisions += 1;
+  if (seen.raise) checks.raises += 1;
+  if (seen.minRaise) checks.minRaises += 1;
+  if (seen.shortEntry) checks.shortEntries += 1;
+  if (seen.unopenedDeep) checks.unopenedDeep += 1;
+  const lists = { 'fold-when-check': 'foldWhenCheck', 'short-non-all-in': 'shortNonAllIn', 'open-limp': 'openLimp',
+    'weak-stack-off': 'weakStackOff', 'call-below-price': 'callBelowPrice', 'fold-above-price': 'foldAbovePrice' };
+  for (const id of seen.patterns) checks[lists[id]].push(handNo);
 }
 
 // ---- frequencies from public actions ---------------------------------------

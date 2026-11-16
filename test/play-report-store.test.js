@@ -137,26 +137,37 @@ test('a participant\'s hidden hole cards cannot change any number or line', asyn
   assert.equal(handed.meta.solo, false);
 });
 
-test('the opponent identity of a policy game comes from its players file', async () => {
+test('the opponent identity of a policy game is proved by the policy named on each AI action', async () => {
   const store = makeStore();
-  const game = createReplayGame(store, { aiCount: 2, hands: 1 });
+  const game = createReplayGame(store, { aiCount: 2, hands: 2 });
   const statePath = path.join(game.sessionDir, 'state.json');
   const state = readJson(statePath);
   state.config.opponentRuntime = 'policy';
   writeJson(statePath, state);
   const library = createReplayLibrary(store);
   const read = async () => (await library.readReportGame(game.gameId, { budget: { used: 0, limit: library.reportReadBytes } })).meta;
-  assert.equal((await read()).policy, null, 'no players file: the identity is unknown');
-  const players = (rows) => writeJson(path.join(game.sessionDir, 'players.json'), rows);
-  players([{ playerId: 'p1', policyId: 'tag-v3', policyVersion: '3.0.0' }, { playerId: 'p2', policyId: 'nit-v3', policyVersion: '3.0.0' }]);
+  assert.equal((await read()).policy, null, 'actions without a policy record: the identity is unknown');
+  const stamp = (handNo, mark) => {
+    const record = readJson(game.handPath(handNo));
+    for (const action of record.actions) if (action.playerId !== 'user') Object.assign(action, mark(action));
+    writeJson(game.handPath(handNo), record);
+  };
+  const v3 = () => ({ policyId: 'tag-v3', policyVersion: '3.0.0' });
+  stamp(1, v3); stamp(2, v3);
   const meta = await read();
   assert.deepEqual({ opponent: meta.opponent, policy: meta.policy, solo: meta.solo, seats: meta.seats, stackBb: meta.stackBb, mode: meta.mode },
     { opponent: 'policy', policy: '3.0.0', solo: true, seats: 3, stackBb: 100, mode: 'cash-training' });
-  players([{ playerId: 'p1', policyId: 'tag-v3', policyVersion: '3.0.0' }, { playerId: 'p2', policyId: 'self-mirror-v1', policyVersion: '1.0.0' }]);
+  // A game resumed under a newer policy is not one population.
+  stamp(2, () => ({ policyId: 'tag-v3', policyVersion: '3.1.0' }));
+  assert.equal((await read()).policy, null, 'two versions');
+  stamp(2, (action) => (action.playerId === 'p2' ? { policyId: 'self-mirror-v1', policyVersion: '3.0.0' } : v3()));
   assert.equal((await read()).policy, null, 'a seat derived from the host is not a fixed opponent');
-  players([{ playerId: 'p1', policyId: 'tag-v3', policyVersion: '3.0.0' }]);
-  assert.equal((await read()).policy, null, 'every AI seat needs an identity');
-  // The identity read is skipped when the caller already holds this state.
+  stamp(2, v3);
+  assert.equal((await read()).policy, '3.0.0');
+  // An unread hand could hide another version.
+  fs.writeFileSync(game.handPath(1), '{ not json');
+  assert.equal((await read()).policy, null);
+  // The hands are skipped when the caller already holds this state.
   const known = (await library.readReportGame(game.gameId, { budget: { used: 0, limit: library.reportReadBytes } })).identity;
   const reused = await library.readReportGame(game.gameId, { budget: { used: 0, limit: library.reportReadBytes }, known });
   assert.equal(reused.reused, true);

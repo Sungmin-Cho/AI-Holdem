@@ -296,3 +296,14 @@
 
 #replay-entry {display:flex;align-items:center;flex-wrap:wrap;gap:8px;max-width:100%;min-width:0}
 #replay-entry-status {max-width:55ch;white-space:normal}
+
+/* Play report: focus cards and collapsible sections of label/value rows. */
+.play-report { margin-top: var(--sp-4); display: grid; gap: var(--sp-2); }
+.report-focus { padding: var(--sp-3) var(--sp-4); border: 1px solid var(--c-line-strong); border-radius: var(--r-panel); background: var(--c-surface-2); margin-top: var(--sp-2); }
+.report-focus-title { margin: 0 0 var(--sp-1); font-size: var(--fs-14); }
+.report-focus-detail { margin: 0; font-size: var(--fs-13); color: var(--c-text-2); }
+.report-section { margin-top: var(--sp-2); border-top: 1px solid var(--c-line); padding-top: var(--sp-2); }
+.report-section > summary { cursor: pointer; font-size: var(--fs-14); font-weight: 600; }
+.report-rows { display: grid; grid-template-columns: minmax(96px, 34%) 1fr; gap: var(--sp-1) var(--sp-3); margin: var(--sp-2) 0 0; font-size: var(--fs-13); }
+.report-rows dt { color: var(--c-text-2); }
+.report-rows dd { margin: 0; overflow-wrap: anywhere; }

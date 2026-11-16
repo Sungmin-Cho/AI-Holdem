@@ -1,5 +1,5 @@
 import {KNOWN_REFERENCE_SOURCES} from '../../shared/reference.js';
-import { STUDY_MODES, STUDY_MODE_HELP, formatQuestion, formatFeedback, formatFeedbackStep, formatSummary, formatStudyError, unfinishedRun, nextStepView, cardGate, completionGuidance, formatSource, formatSourceShort, formatTrends, readStudyEntry, drillRequest, spotDiagram, handCards, feedbackBars, runProgress, modeAvailability, nextEnrollmentBoundary, enrollmentBoundaryCrossed, boundaryDelay, ENROLLMENT_CHANGED_NOTICE } from './study-format.js';
+import { STUDY_MODES, STUDY_MODE_HELP, formatQuestion, formatFeedback, formatFeedbackStep, formatSummary, formatStudyError, unfinishedRun, nextStepView, cardGate, completionGuidance, formatSource, formatSourceShort, formatTrends, readStudyEntry, drillRequest, formatPlayReport, spotDiagram, handCards, feedbackBars, runProgress, modeAvailability, nextEnrollmentBoundary, enrollmentBoundaryCrossed, boundaryDelay, ENROLLMENT_CHANGED_NOTICE } from './study-format.js';
 import { createChartPanel, renderSpotChart } from './spot-chart.js';
 import { mountPotOddsDrill } from './pot-odds-drill.js';
 import { helpButton, openHelp } from '../public/help-panel.js';
@@ -591,6 +591,38 @@ async function mountStudy() {
       if (enrollmentStale()) void refreshSummary();
     } catch { $('summary-status').textContent = '학습 요약을 불러오지 못했습니다. 상태 확인을 눌러 주세요.'; summary = null; summaryState = 'failed'; dropEnrollmentGuidance(); paintNextStep(); }
   }
+  // The play report is its own request: an older running service has no such route
+  // and the rest of the study room must work without it. It never changes a run.
+  async function refreshReport() {
+    const section = $('play-report');
+    let formatted = null;
+    let missing = false;
+    try {
+      const response = await api('/api/report');
+      missing = response.httpStatus === 404;
+      formatted = formatPlayReport(response);
+    } catch { formatted = null; }
+    $('play-report-focus').replaceChildren();
+    $('play-report-sections').replaceChildren();
+    section.hidden = missing;
+    $('play-report-retry').hidden = formatted !== null || missing;
+    if (!formatted) { $('play-report-scope').textContent = missing ? '' : '플레이 리포트를 불러오지 못했습니다. 기록이 많으면 준비에 시간이 걸립니다.'; return; }
+    $('play-report-scope').textContent = formatted.scope;
+    for (const item of formatted.focus) {
+      const card = node('div', '', 'report-focus');
+      card.append(node('h3', item.title, 'report-focus-title'), node('p', item.detail, 'report-focus-detail'));
+      $('play-report-focus').append(card);
+    }
+    if (!formatted.empty && !formatted.focus.length) $('play-report-focus').append(node('p', '표본과 비율 기준을 넘긴 반복 패턴은 아직 없습니다.', 'assessments-note'));
+    formatted.sections.forEach((group, at) => {
+      const details = node('details', '', 'report-section');
+      details.open = at === 0;
+      const list = node('dl', '', 'report-rows');
+      for (const row of group.rows) list.append(node('dt', row.label), node('dd', row.value));
+      details.append(node('summary', group.title), node('p', group.note, 'assessments-note'), list);
+      $('play-report-sections').append(details);
+    });
+  }
   function paintTrends(trends) {
     const box = $('trends'); box.replaceChildren();
     for (const series of trends.series) {
@@ -662,6 +694,8 @@ async function mountStudy() {
     $('recover').addEventListener('click', async () => { await controller.restore(); await refreshSummary(); });
     $('retry').addEventListener('click', async () => { await controller.retry(); await refreshSummary(); });
     await controller.restore(); await refreshSummary();
+    $('play-report-retry').addEventListener('click', () => { void refreshReport(); });
+    void refreshReport();
     const heartbeat = setInterval(async () => {
       if (!authenticated || document.visibilityState === 'hidden') return;
       try { const response = await api('/api/heartbeat', { method: 'POST', body: {} }); if (!response.ok) $('status').textContent = formatStudyError(response); }

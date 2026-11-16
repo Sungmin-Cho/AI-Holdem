@@ -68,6 +68,12 @@ test('before the river a call is closed only when at most one player keeps chips
     publicSeats: [seat('user', { position: 'SB', bet: 50, contribution: 50 }),
       seat('p1', { position: 'BB', bet: 100, contribution: 100, stack: 0, allIn: true })] });
   assert.deepEqual(closureOf(shortBlind), { kind: 'opponents-all-in' });
+  // Heads-up, the small blind calls all-in for less than the big blind: the blind
+  // has chips but nobody to raise, so the board runs out.
+  const shortSmallBlind = river({ street: 'preflop', board: [], decisionId: 'd-1-preflop-0', currentBet: 100, toCall: 25, potBefore: 150, maxRaiseTo: 75,
+    publicSeats: [seat('user', { position: 'BTN/SB', bet: 50, contribution: 50, stack: 25 }),
+      seat('p1', { position: 'BB', bet: 100, contribution: 100, stack: 4900 })] });
+  assert.deepEqual(closureOf(shortSmallBlind), { kind: 'hero-all-in' });
 });
 
 test('side pots have no single price, so no closure', () => {
@@ -136,10 +142,10 @@ test('the fact line states the closure, the comparison and the draw chance in al
   const open = factsLineKo(river({ street: 'flop', decisionId: 'd-1-flop-4', holeCards: ['Ah', '5h'], board: ['Kh', '9h', '2c'] }),
     { equityRandom: 50, equityRange: 10 });
   assert.doesNotMatch(open, /닫힌 결정|가격 비교\(칩 기준/);
-  assert.match(open, /드로 완성 확률\(승률과 다름\): 다음 카드 19\.1% · 필요 승률 25%/);
+  assert.match(open, /드로 아웃이 나올 확률\(승률과 다름\): 다음 카드 19\.1% · 필요 승률 25%/);
   // The added phrases are what a coach may repeat: they must pass the coaching filter.
   for (const line of [closed, open]) {
-    for (const part of line.split(', ').filter((text) => /닫힌 결정|가격 비교\(칩 기준|드로 완성 확률/.test(text))) {
+    for (const part of line.split(', ').filter((text) => /닫힌 결정|가격 비교\(칩 기준|드로 아웃이 나올 확률/.test(text))) {
       assert.equal(referenceClaimAllowed(part), true, part);
       assert.equal(coachingClaimAllowed(part), true, part);
     }

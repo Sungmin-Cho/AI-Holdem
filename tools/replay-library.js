@@ -28,7 +28,6 @@ const GAMES_READ_BYTES = 16 * 1024 * 1024;
 const HANDS_READ_BYTES = 32 * 1024 * 1024;
 const TEXT_BYTES = 4096;
 const YIELD_EVERY = 25;
-const PLAYERS_BYTES = 512 * 1024;
 const REPORT_READ_BYTES = 128 * 1024 * 1024;
 const MAX_CONCURRENT = 2;
 const GAME_PAGE = { fallback: 25, max: 50, maxOffset: MAX_SESSIONS };
@@ -208,21 +207,21 @@ function parseState(raw) {
   };
 }
 
-// The opponent identity of a policy game: the policy versions of its AI seats,
-// or null when any seat has none (an LLM or JEV table, an older record) or is a
-// policy derived from the host's own play. The archetype line-up is drawn per
-// game from the same catalog and is part of the population, not of the identity.
-function policyIdentity(rows, seats) {
-  if (!Array.isArray(rows)) return null;
-  const versions = new Set();
-  for (const seat of seats) {
-    if (seat.kind !== 'ai') continue;
-    const row = rows.find((player) => isObject(player) && player.playerId === seat.playerId);
-    if (!row || typeof row.policyId !== 'string' || !/^[a-z0-9-]{1,64}$/.test(row.policyId) || row.policyId.startsWith('self-')
-      || typeof row.policyVersion !== 'string' || !/^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$/.test(row.policyVersion)) return null;
-    versions.add(row.policyVersion);
+// The opponent identity of a policy game, proved hand by hand: every action of an
+// AI seat names the policy and version that made it, so a game resumed under a
+// newer policy shows both. One version across every AI action of every hand read
+// is the identity; anything else (a seat without a policy record — an LLM or JEV
+// table, an older record — two versions, or a policy derived from the host's own
+// play) is null. The archetype line-up is drawn per game from the same catalog
+// and is part of the population, not of the identity.
+function policyVersionsOf(record, aiIds, versions) {
+  for (const action of record.actions) {
+    if (!isObject(action) || !aiIds.has(action.playerId) || action.forced === true) continue;
+    if (typeof action.policyId !== 'string' || !/^[a-z0-9-]{1,64}$/.test(action.policyId) || action.policyId.startsWith('self-')
+      || typeof action.policyVersion !== 'string' || !/^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$/.test(action.policyVersion)) return false;
+    versions.add(action.policyVersion);
   }
-  return versions.size ? [...versions].sort().join('+') : null;
+  return true;
 }
 
 function gameRow(gameId, savedAtMs, info) {
@@ -740,22 +739,17 @@ export function createReplayLibrary(storeDir, options = {}) {
         seats: info.seats.length, stackBb: info.stackBb, policy: null,
       };
       if (known !== null && known === identity) return { identity, meta, reused: true };
-      if (info.opponent === 'policy') {
-        // A missing or unreadable players file only leaves the identity unknown.
-        try {
-          const players = readLeaf(root, [CATALOG, SESSIONS, gameId], 'players.json', { maxBytes: PLAYERS_BYTES, budget });
-          if (players) meta.policy = policyIdentity(parseJson(players.bytes), info.seats);
-        } catch (error) {
-          if (error?.fatal) throw error;
-        }
-      }
       const game = { gameId, info };
       const hands = [];
       let unreadable = 0;
+      const aiIds = new Set(info.seats.filter((seat) => seat.kind === 'ai').map((seat) => seat.playerId));
+      const versions = new Set();
+      let proved = info.opponent === 'policy';
       for (let handNo = 1; handNo <= info.completed; handNo += 1) {
         try {
           const record = await loadRecord(root, game, handNo, budget);
           const replay = projectReplay(record, contextFor(game, handNo));
+          if (proved) proved = policyVersionsOf(record, aiIds, versions);
           let biased = false;
           try { biased = Object.hasOwn(record, 'dealSelection') && projectDealSelection(record.dealSelection).mode !== 'off'; } catch { biased = true; }
           hands.push({ replay, decisions: toProcessReview(record).decisions, biased });
@@ -764,6 +758,8 @@ export function createReplayLibrary(storeDir, options = {}) {
           unreadable += 1;
         }
       }
+      // An unread hand could have been played under another version.
+      if (proved && unreadable === 0 && versions.size === 1) meta.policy = [...versions][0];
       return { identity, meta, hands, unreadable, final: info.status !== 'unfinished' };
     } catch (error) {
       throw normalizeError(error);

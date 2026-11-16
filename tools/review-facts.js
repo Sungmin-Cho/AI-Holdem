@@ -122,12 +122,8 @@ export function processDetectors(records) {
   return out;
 }
 
-// Reference ranges for a full-ring/6-max cash game; tournaments run tighter late.
-export function vpipBand(seated) {
-  if (seated <= 2) return { vpip: [55, 85], pfr: [45, 80] };
-  if (seated <= 6) return { vpip: [20, 30], pfr: [15, 24] };
-  return { vpip: [15, 24], pfr: [11, 19] };
-}
+// Reference ranges for a full-ring/6-max cash game (one definition, shared with the play report).
+export { vpipBand } from '../training/play-report.js';
 
 // Published per-hand coach notes (skipping unavailable placeholders), newest last. #290: a
 // note the caller withholds (one the host must not see) is left out.
