@@ -34,8 +34,8 @@ async function bounded(start) {
 const readBounded = (root, name, maxBytes, observer) => bounded(lease => readEvidence(root,name,maxBytes,observer,lease));
 
 // An observer judges what this read finds where the read finds it, whether or not its caller is still
-// waiting: `identity({dev, ino})` for every identity it sees of a regular file (the first lstat, the
-// handle's fstat, the lstat after reading), `anomaly()` when the file is replaced, gone or not a small
+// waiting: `identity({dev, ino, size})` for every regular file it sees (the first lstat, the handle's
+// fstat, the lstat after reading), `anomaly()` when the file is replaced, gone or not a small
 // regular file, and `content(evidence)` with the validated content before the file is closed (a slow
 // or failing close cannot hide it). `missingIsAnomaly()`, asked when the file is found missing: the
 // file was seen before, so its absence is a change too.
@@ -44,7 +44,7 @@ async function readEvidence(root, name, maxBytes, observer = {}, lease = { activ
   const anomaly = (code, message) => { observer.anomaly?.(); return coded(code, message); };
   const unsafe = () => anomaly('HINT_EVIDENCE_UNSAFE', 'unsafe hint evidence');
   const changed = () => anomaly('HINT_EVIDENCE_CHANGED', 'changed hint evidence');
-  const seen = stat => observer.identity?.({ dev:stat.dev, ino:stat.ino }, lease);
+  const seen = stat => observer.identity?.({ dev:stat.dev, ino:stat.ino, size:stat.size }, lease);
   // Exact identities (#308): a Number-valued ino past 2^53 (Windows) can match a replacement.
   let before;
   try { before = await lstatExactAsync(file); }
@@ -87,8 +87,8 @@ const unverifiable = () => ({ hint:null, disposition:'unverifiable' });
 const disable = context => { context.ready = false; context.disabled = true; };
 
 // #347 C: the descriptor is written once, by link, when its session is created, and never replaced
-// (tools/reference-source.js). The first identity the relay sees at its path and the first content it
-// reads whole are its pins — even when the read that saw them was no longer awaited: an observation is
+// (tools/reference-source.js). The first identity (dev, ino and size) the relay sees at its path and
+// the first content it reads whole are its pins — even when the read that saw them was no longer awaited: an observation is
 // a fact, and turning hints on is a separate step. Any later identity or content that differs, the
 // file found replaced, gone after it was seen, or not one small regular file is evidence that the
 // session's source changed: hints stay off for this relay's life, from the moment it is seen.
@@ -98,7 +98,7 @@ function descriptorObserver(context) {
     missingIsAnomaly: () => Boolean(context.pinnedIdentity),
     identity: id => {
       if (!context.pinnedIdentity) context.pinnedIdentity = id;
-      else if (id.dev !== context.pinnedIdentity.dev || id.ino !== context.pinnedIdentity.ino) disable(context);
+      else if (id.dev !== context.pinnedIdentity.dev || id.ino !== context.pinnedIdentity.ino || id.size !== context.pinnedIdentity.size) disable(context);
     },
     content: evidence => {
       if (context.pinnedRaw === undefined) context.pinnedRaw = evidence.raw;
