@@ -107,12 +107,31 @@ async function replaceDescriptorAfterRead(f,nth,run) {
  fs.readSync=function(fd,...args){const n=read.call(this,fd,...args);if(descriptors.has(fd)&&++count===nth){const temp=file+'.swap';fs.writeFileSync(temp,JSON.stringify({...original,source:LEGACY_REFERENCE_SOURCE}));fs.renameSync(temp,file);swapped=true;}return n;};
  try{await run();assert.equal(swapped,true,'fault must occur in the source parse window');}finally{fs.openSync=open;fs.readSync=read;}
 }
+// #347 C: the relay parses the descriptor text it captured (asynchronously, observed) and never reads
+// the descriptor again synchronously, so its parse window is the span between that capture and the
+// second capture: a replacement there is the same fault, injected at the asynchronous reads.
+async function replaceDescriptorBetweenCaptures(f,run) {
+ await f.request('health');
+ const file=path.join(f.dir,'reference-source.json'),original=JSON.parse(fs.readFileSync(file));
+ const {LEGACY_REFERENCE_SOURCE}=await import('../shared/reference.js');
+ const lstat=fs.promises.lstat;let count=0,swapped=false;
+ fs.promises.lstat=async function(name,...args){
+  const result=await lstat.call(this,name,...args);
+  // The second stat of the descriptor closes the first capture.
+  if(path.basename(String(name))==='reference-source.json'&&++count===2){const temp=file+'.swap';fs.writeFileSync(temp,JSON.stringify({...original,source:LEGACY_REFERENCE_SOURCE}));fs.renameSync(temp,file);swapped=true;}
+  return result;
+ };
+ try{await run();assert.equal(swapped,true,'fault must occur between the two captures');}finally{fs.promises.lstat=lstat;}
+}
 test('source replacement between parse and descriptor capture disables relay initialization',async t=>{
- if(skipOnWin32(t,'TOCTOU injection via openSync/readSync is POSIX; Windows readFile may not enter those hooks'))return;
  const f=await hintFixture(t),context={};
- await replaceDescriptorAfterRead(f,1,async()=>{
-  assert.deepEqual(await verifyHintPublication({sessionDir:f.dir,token:f.token,context,initialize:true}),{ready:false});
+ const syncOpens=[];const openSync=fs.openSync;
+ await replaceDescriptorBetweenCaptures(f,async()=>{
+  fs.openSync=function(name,...args){if(path.basename(String(name))==='reference-source.json')syncOpens.push(String(name));return openSync.call(this,name,...args);};
+  try{assert.deepEqual(await verifyHintPublication({sessionDir:f.dir,token:f.token,context,initialize:true}),{ready:false});}
+  finally{fs.openSync=openSync;}
  });
+ assert.deepEqual(syncOpens,[],'the relay never reads the descriptor again synchronously');
  assert.equal(context.ready,false);
  assert.deepEqual(f.state().hand.hintExposures,{});
 });
@@ -157,13 +176,40 @@ async function abaDescriptorAtParse(f,nth,run) {
  assert.deepEqual(fs.readFileSync(file),original);
  return {readAfterSwap};
 }
+// #347 C: the relay's parse is its capture, so ABA at the parse is ABA at the asynchronous capture:
+// the descriptor is swapped for another source as the capture opens it and put back after.
+async function abaDescriptorAtCapture(f,run) {
+ await f.request('health');
+ const file=path.join(f.dir,'reference-source.json'),held=file+'.original-inode';
+ const {LEGACY_REFERENCE_SOURCE}=await import('../shared/reference.js');
+ const original=fs.readFileSync(file),open=fs.promises.open;let swapped=false,restored=false;
+ fs.promises.open=async function(name,...args){
+  const target=path.basename(String(name))==='reference-source.json'&&!swapped;
+  if(target){fs.renameSync(file,held);fs.writeFileSync(file,JSON.stringify({schemaVersion:1,source:LEGACY_REFERENCE_SOURCE}));swapped=true;}
+  const handle=await open.call(this,name,...args);
+  if(target){fs.renameSync(held,file);restored=true;}
+  return handle;
+ };
+ try{await run();assert.equal(swapped,true,'the swap must occur at the capture');}
+ finally{fs.promises.open=open;if(!restored&&fs.existsSync(held)){fs.renameSync(held,file);restored=true;}}
+ assert.equal(restored,true,'the original inode is back');
+ assert.deepEqual(fs.readFileSync(file),original);
+}
 test('ABA source replacement cannot pair parsed B with captured A identity',async t=>{
- if(skipOnWin32(t,'TOCTOU injection via openSync/readSync is POSIX; Windows readFile may not enter those hooks'))return;
- for(const kind of ['relay','sidecar'])await t.test(kind,async t=>{
+ await t.test('relay',async t=>{
+  if(skipOnWin32(t,'renaming over a file another handle has open differs on Windows before libuv 1.49'))return;
+  const f=await hintFixture(t),context={};
+  await abaDescriptorAtCapture(f,async()=>{
+   assert.deepEqual(await verifyHintPublication({sessionDir:f.dir,token:f.token,context,initialize:true}),{ready:false});
+  });
+  assert.equal(context.ready,false);
+  assert.deepEqual(f.state().hand.hintExposures,{});
+ });
+ await t.test('sidecar',async t=>{
+  if(skipOnWin32(t,'TOCTOU injection via openSync/readSync is POSIX; Windows readFile may not enter those hooks'))return;
   const f=await hintFixture(t);
-  await abaDescriptorAtParse(f,kind==='relay'?1:2,async()=>{
-   if(kind==='relay')assert.deepEqual(await verifyHintPublication({sessionDir:f.dir,token:f.token,context:{},initialize:true}),{ready:false});
-   else assert.equal((await f.prepare()).hint.code,'HINT_SOURCE_UNAVAILABLE');
+  await abaDescriptorAtParse(f,2,async()=>{
+   assert.equal((await f.prepare()).hint.code,'HINT_SOURCE_UNAVAILABLE');
   });
   assert.deepEqual(f.state().hand.hintExposures,{});
  });
