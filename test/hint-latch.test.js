@@ -1218,3 +1218,51 @@ test('#347 C: a descriptor with a second name is refused, and stays refused once
     { hint: null, disposition: 'unverifiable' });
   assert.equal(context.ready, false);
 });
+
+test('#347 C: a second name the descriptor gets during a read counts at whichever stat sees it, late or not', async (t) => {
+  // `stage`: the second name exists only between the first stat and the last one (so only fstat sees
+  // it), or appears right before the last stat (seen there); `late`: that last stat answers after the
+  // read's deadline.
+  for (const [label, stage, late] of [['seen at fstat', 'fstat', false], ['seen at the last stat', 'after', false], ['seen at the last stat, late', 'after', true]]) {
+    await t.test(label, async (tt) => {
+      let clock = 0;
+      const f = await hintFixture(tt);
+      const prepared = await f.prepare();
+      assert.equal(prepared.hint?.status, 'supported');
+      const context = {};
+      assert.deepEqual(await verifyHintPublication({ sessionDir: f.dir, token: f.token, context, initialize: true, now: () => clock }), { ready: true });
+      const publish = () => verifyHintPublication({ sessionDir: f.dir, token: f.token, context, hint: prepared.hint, view: prepared.view, retry: true });
+      const file = path.join(f.dir, 'reference-source.json'), second = path.join(f.dir, 'reference-source.second');
+      const lstat = fs.promises.lstat;
+      let seen = 0, linked = false, answered = false;
+      const mock = tt.mock.method(fs.promises, 'lstat', async function (target, ...rest) {
+        if (path.basename(String(target)) !== 'reference-source.json') return lstat.call(this, target, ...rest);
+        seen += 1;
+        if (seen === 1 && stage === 'fstat') {
+          const result = await lstat.call(this, target, ...rest);
+          fs.linkSync(file, second); linked = true;
+          return result;
+        }
+        if (seen === 2 && stage === 'fstat') fs.unlinkSync(second);
+        if (seen === 2 && stage === 'after') {
+          fs.linkSync(file, second); linked = true;
+          if (late) await new Promise((resolve) => setTimeout(resolve, HOLD_MS));
+          try { return await lstat.call(this, target, ...rest); } finally { answered = true; }
+        }
+        return lstat.call(this, target, ...rest);
+      });
+      assert.deepEqual(await publish(), { hint: null, disposition: 'unverifiable' });
+      if (late) {
+        assert.equal(answered, false, 'the proof ended at its deadline, before the last stat answered');
+        await new Promise((resolve) => setTimeout(resolve, HOLD_MS));
+        assert.equal(answered, true);
+      }
+      mock.mock.restore();
+      assert.equal(linked, true);
+      assert.equal(context.ready, false, 'off once the second name was seen');
+      fs.rmSync(second, { force: true });
+      clock += RETRY_INTERVAL_MS;
+      assert.deepEqual(await publish(), { hint: null, disposition: 'unverifiable' });
+    });
+  }
+});
