@@ -1099,3 +1099,59 @@ test('#347 C: the retry interval counts from the end of the previous try', async
   assert.deepEqual(await publish(), { hint: prepared.hint, disposition: null });
   assert.equal(attempts, 1);
 });
+
+test('#347 C: a descriptor whose size changes between its first stat and the open read is a change', async (t) => {
+  let clock = 0;
+  const f = await hintFixture(t);
+  const prepared = await f.prepare();
+  assert.equal(prepared.hint?.status, 'supported');
+  const context = {};
+  assert.deepEqual(await verifyHintPublication({ sessionDir: f.dir, token: f.token, context, initialize: true, now: () => clock }), { ready: true });
+  const publish = () => verifyHintPublication({ sessionDir: f.dir, token: f.token, context, hint: prepared.hint, view: prepared.view, retry: true });
+  // The first stat sees the file truncated; its bytes are back (same file) before the open.
+  const file = path.join(f.dir, 'reference-source.json');
+  const original = fs.readFileSync(file);
+  const lstat = fs.promises.lstat;
+  let seen = 0;
+  const mock = t.mock.method(fs.promises, 'lstat', async function (target, ...rest) {
+    if (path.basename(String(target)) !== 'reference-source.json' || ++seen !== 1) return lstat.call(this, target, ...rest);
+    fs.writeFileSync(file, original.subarray(0, original.length - 1));
+    try { return await lstat.call(this, target, ...rest); }
+    finally { fs.writeFileSync(file, original); }
+  });
+  assert.deepEqual(await publish(), { hint: null, disposition: 'unverifiable' });
+  mock.mock.restore();
+  clock += RETRY_INTERVAL_MS;
+  assert.deepEqual(await publish(), { hint: null, disposition: 'unverifiable' });
+  assert.equal(context.ready, false);
+});
+
+test('#347 C: other content read whole is a change even when the stat after reading fails', async (t) => {
+  let clock = 0;
+  const f = await hintFixture(t);
+  const prepared = await f.prepare();
+  assert.equal(prepared.hint?.status, 'supported');
+  const context = {};
+  assert.deepEqual(await verifyHintPublication({ sessionDir: f.dir, token: f.token, context, initialize: true, now: () => clock }), { ready: true });
+  const publish = () => verifyHintPublication({ sessionDir: f.dir, token: f.token, context, hint: prepared.hint, view: prepared.view, retry: true });
+  // Same file, same length, one byte different; the stat after reading it fails for a passing reason.
+  const file = path.join(f.dir, 'reference-source.json');
+  const original = fs.readFileSync(file);
+  const other = Buffer.from(original);
+  const at = other.indexOf(Buffer.from('"schemaVersion"'));
+  other[at + 1] = other[at + 1] === 0x73 ? 0x53 : 0x73;
+  fs.writeFileSync(file, other);
+  const lstat = fs.promises.lstat;
+  let seen = 0;
+  const mock = t.mock.method(fs.promises, 'lstat', function (target, ...rest) {
+    if (path.basename(String(target)) === 'reference-source.json' && ++seen === 2) return Promise.reject(Object.assign(new Error('busy'), { code: 'EBUSY', syscall: 'lstat' }));
+    return lstat.call(this, target, ...rest);
+  });
+  assert.deepEqual(await publish(), { hint: null, disposition: 'unverifiable' });
+  assert.equal(seen, 2, 'the stat after reading failed');
+  mock.mock.restore();
+  fs.writeFileSync(file, original);
+  clock += RETRY_INTERVAL_MS;
+  assert.deepEqual(await publish(), { hint: null, disposition: 'unverifiable' });
+  assert.equal(context.ready, false);
+});

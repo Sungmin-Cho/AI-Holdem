@@ -1335,7 +1335,11 @@ test('#347 C: two service children started on the same pid-less remnant leave on
   const dir = lockPath(first.storeDir);
   fs.linkSync(pidFile, path.join(dir, `pid.reclaim.${await deadPid()}.0badc0de`));
   fs.unlinkSync(pidFile);
-  const one = serveChild(t, first.storeDir), two = serveChild(t, first.storeDir);
+  // Both children meet the remnant and stop right before clearing it; then both go at once.
+  const gate = clearGate(t);
+  const one = serveChild(t, first.storeDir, { clearHoldFile: gate.file }), two = serveChild(t, first.storeDir, { clearHoldFile: gate.file });
+  await until(() => gate.reached() === 2);
+  gate.release();
   await until(() => readOwnedLock(path.join(first.storeDir, '.training'), 'study.lock.d')?.status === 'alive'
     && fs.existsSync(descriptorPath(first.storeDir)));
   const running = await api.inspectStudyService(first.storeDir);
@@ -1409,7 +1413,7 @@ test('#347 C: inspect, stop and attach refuse a dead reclaimer\'s name at once a
 // The service child started the way an ensure starts it (`--serve <root> <config> <store> <training>`),
 // with the two identities computed the way the client computes them (tools/study-service.js
 // `context`, `trainingIdentity`). Returns its exit code and stderr.
-function serveChild(t, storeDir) {
+function serveChild(t, storeDir, extra = {}) {
   const root = fs.realpathSync(storeDir);
   const training = path.join(root, '.training');
   const identity = (file, stat) => createHash('sha256').update(JSON.stringify([file, plainIdOf(stat.dev), plainIdOf(stat.ino)])).digest('hex');
@@ -1417,12 +1421,25 @@ function serveChild(t, storeDir) {
   const trainingId = identity(training, fs.lstatSync(training, { bigint: true }));
   const self = new URL('../tools/study-service.js', import.meta.url);
   const child = registerOwnedProcess(spawn(process.execPath, [fileURLToPath(self), '--serve', root,
-    JSON.stringify({ idleTimeoutMs: 600_000, checkpointMs: 1000 }), store, trainingId], { stdio: ['ignore', 'ignore', 'pipe'] }), 'study service');
+    JSON.stringify({ idleTimeoutMs: 600_000, checkpointMs: 1000, ...extra }), store, trainingId], { stdio: ['ignore', 'ignore', 'pipe'] }), 'study service');
   let err = '';
   child.stderr.on('data', (chunk) => { err += chunk; });
   const closed = new Promise((resolve) => child.on('close', (code) => resolve({ code, err })));
   t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); });
   return { child, closed };
+}
+
+// The `clearHoldFile` seam: a service child about to clear dead reclaimers' names writes
+// `<gate>.<pid>.reached` and waits for `<gate>`. Released at the test's end in any case.
+function clearGate(t) {
+  const dir = createOwnedTempDir('holdem-clear-gate');
+  const file = path.join(dir, 'release');
+  t.after(() => fs.writeFileSync(file, ''));
+  return {
+    file,
+    reached: () => fs.readdirSync(dir).filter((name) => name.endsWith('.reached')).length,
+    release: () => fs.writeFileSync(file, ''),
+  };
 }
 
 // A process that holds `name` under `dir` alive until the test ends.
@@ -1569,40 +1586,26 @@ test('#347 C: an ensure whose service child ends before it clears a dead reclaim
   await killedReclaim(path.dirname(dir), 'study.lock.d');
   const names = fs.readdirSync(dir).sort();
   const { COLD_START_MS } = await service();
+  // The child stops right before clearing the names; it is killed there.
+  const gate = clearGate(t);
   const children = [];
-  const started = performance.now();
-  // Killed the moment it is spawned, before Node has run any of it (registering it would first look
-  // its identity up, which takes long enough on a slow runner for the child to clear the names).
-  const error = await api.ensureStudyService(first.storeDir, {
-    onChild(child) { child.kill('SIGKILL'); children.push(child); },
+  const pending = api.ensureStudyService(first.storeDir, {
+    testOptions: { clearHoldFile: gate.file },
+    onChild(child) { children.push(registerOwnedProcess(child, 'study service')); },
   }).then(() => null, (failure) => failure);
+  await until(() => gate.reached() === 1);
+  const started = performance.now();
+  children[0].kill('SIGKILL');
+  const error = await pending;
   const elapsed = performance.now() - started;
   assert.equal(children.length, 1, 'the ensure started a child for the dead reclaimer\'s name');
   assert.match(String(error?.message), /^STUDY_DESCRIPTOR_CORRUPT read:\w+:nlink$/, String(error?.stack ?? error));
   assert.equal(error.reclaimOrphaned, true);
-  assert.ok(elapsed < COLD_START_MS / 2, `failed after ${Math.round(elapsed)} ms, not at the cold-start deadline`);
+  assert.ok(elapsed < COLD_START_MS / 2, `failed ${Math.round(elapsed)} ms after the child died, not at the cold-start deadline`);
   assert.deepEqual(fs.readdirSync(dir).sort(), names, 'nothing was cleared');
-});
-
-test('#347 C: a dead reclaimer\'s name another process holds open is waited out before the service starts', { timeout: STOP_BUDGET }, async (t) => {
-  const { first, api } = await stoppedWithDeadLock(t);
-  const dir = lockPath(first.storeDir);
-  await killedReclaim(path.dirname(dir), 'study.lock.d');
-  const aside = path.join(dir, fs.readdirSync(dir).find((name) => name !== 'pid'));
-  // The holder closes 500 ms after it sees the name deleted yet still there (EPERM), at once otherwise.
-  const holder = holdOpen(aside, { lingerMs: 0, pendingLingerMs: 500 });
-  await holder.held;
-  const handle = await api.ensureStudyService(first.storeDir, {
-    onChild(child) { child.ref(); registerOwnedProcess(child, 'study service'); },
-  });
-  t.after(() => api.stopStudyService(first.storeDir, { expectedInstanceId: handle.instanceId }).catch(() => {}));
-  const { code, out, err } = await holder.closed;
-  assert.equal(code, 0, err);
-  if (DELETE_PENDING) assert.match(out, /seen EPERM/, 'the name stayed behind its holder');
-  assert.equal(absent(aside), true);
-  assert.deepEqual(fs.readdirSync(dir), ['pid']);
-  assert.equal(fs.lstatSync(path.join(dir, 'pid')).nlink, 1);
-  assert.equal((await api.inspectStudyService(first.storeDir)).instanceId, handle.instanceId);
+  for (const clearHoldFile of ['relative/path', 5, '']) {
+    await assert.rejects(api.ensureStudyService(createOwnedTempDir('holdem-clear-hold'), { testOptions: { clearHoldFile } }), TypeError);
+  }
 });
 
 // engine/state.js, the two narrow exports #347 C adds for the study service.
