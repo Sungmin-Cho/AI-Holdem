@@ -38,7 +38,8 @@ const readBounded = (root, name, maxBytes, observer) => bounded(lease => readEvi
 // fstat, the lstat after reading), `anomaly()` when the file is replaced, gone or not a small
 // regular file, and `content(evidence)` with the validated content before the file is closed (a slow
 // or failing close cannot hide it). `missingIsAnomaly()`, asked when the file is found missing: the
-// file was seen before, so its absence is a change too.
+// file was seen before, so its absence is a change too. `singleLink`: a file with a second name is not
+// the file (the descriptor; the synchronous reader it replaces refused that too, training-store.js).
 async function readEvidence(root, name, maxBytes, observer = {}, lease = { active: true }) {
   const file = path.join(root,name);
   const anomaly = (code, message) => { observer.anomaly?.(); return coded(code, message); };
@@ -49,7 +50,8 @@ async function readEvidence(root, name, maxBytes, observer = {}, lease = { activ
   let before;
   try { before = await lstatExactAsync(file); }
   catch (error) { if (error?.code === 'ENOENT' && observer.missingIsAnomaly?.()) throw changed(); throw error; }
-  if (!before.isFile() || before.isSymbolicLink() || before.size > maxBytes) throw unsafe();
+  const extraLink = stat => observer.singleLink === true && stat.nlink !== 1;
+  if (!before.isFile() || before.isSymbolicLink() || before.size > maxBytes || extraLink(before)) throw unsafe();
   seen(before);
   let handle;
   try { handle = await fs.promises.open(file,fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0)); }
@@ -62,6 +64,7 @@ async function readEvidence(root, name, maxBytes, observer = {}, lease = { activ
     const stat = await handleStatExact(handle);
     if (stat.isFile()) seen(stat);
     if (!stat.isFile() || stat.size > maxBytes || stat.size !== before.size || stat.dev !== before.dev || stat.ino !== before.ino) throw changed();
+    if (extraLink(stat)) throw unsafe();
     const bytes = Buffer.alloc(stat.size+1);
     let bytesRead = 0;
     while (bytesRead < bytes.length) {
@@ -78,6 +81,7 @@ async function readEvidence(root, name, maxBytes, observer = {}, lease = { activ
     catch (error) { if (error?.code === 'ENOENT') throw changed(); throw error; }
     if (after.isFile() && !after.isSymbolicLink()) seen(after);
     if (after.dev !== stat.dev || after.ino !== stat.ino || after.size !== stat.size) throw changed();
+    if (extraLink(after)) throw unsafe();
     return evidence;
   } finally { await handle.close().catch(() => {}); } // a failed close never replaces what the read found
 }
@@ -94,6 +98,7 @@ const disable = context => { context.ready = false; context.disabled = true; };
 // session's source changed: hints stay off for this relay's life, from the moment it is seen.
 function descriptorObserver(context) {
   return {
+    singleLink: true,
     anomaly: () => disable(context),
     missingIsAnomaly: () => Boolean(context.pinnedIdentity),
     identity: id => {
