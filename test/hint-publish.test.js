@@ -116,10 +116,9 @@ async function replaceDescriptorBetweenCaptures(f,run) {
  const {LEGACY_REFERENCE_SOURCE}=await import('../shared/reference.js');
  const lstat=fs.promises.lstat;let count=0,swapped=false;
  fs.promises.lstat=async function(name,...args){
-  const result=await lstat.call(this,name,...args);
-  // The second stat of the descriptor closes the first capture.
-  if(path.basename(String(name))==='reference-source.json'&&++count===2){const temp=file+'.swap';fs.writeFileSync(temp,JSON.stringify({...original,source:LEGACY_REFERENCE_SOURCE}));fs.renameSync(temp,file);swapped=true;}
-  return result;
+  // The third stat of the descriptor opens the second capture: the first one has closed its handle.
+  if(path.basename(String(name))==='reference-source.json'&&++count===3){const temp=file+'.swap';fs.writeFileSync(temp,JSON.stringify({...original,source:LEGACY_REFERENCE_SOURCE}));fs.renameSync(temp,file);swapped=true;}
+  return lstat.call(this,name,...args);
  };
  try{await run();assert.equal(swapped,true,'fault must occur between the two captures');}finally{fs.promises.lstat=lstat;}
 }

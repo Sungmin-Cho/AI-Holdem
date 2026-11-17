@@ -1330,6 +1330,44 @@ test('#347 C: a lock left with no pid file and only a dead reclaimer\'s name get
   assert.equal((await api.inspectStudyService(first.storeDir)).instanceId, handle.instanceId);
 });
 
+test('#347 C: two service children started on the same pid-less remnant leave one service and one lock', { timeout: STOP_BUDGET }, async (t) => {
+  const { first, api, pidFile } = await stoppedWithDeadLock(t);
+  const dir = lockPath(first.storeDir);
+  fs.linkSync(pidFile, path.join(dir, `pid.reclaim.${await deadPid()}.0badc0de`));
+  fs.unlinkSync(pidFile);
+  const one = serveChild(t, first.storeDir), two = serveChild(t, first.storeDir);
+  await until(() => readOwnedLock(path.join(first.storeDir, '.training'), 'study.lock.d')?.status === 'alive'
+    && fs.existsSync(descriptorPath(first.storeDir)));
+  const running = await api.inspectStudyService(first.storeDir);
+  assert.equal(running.status, 'running');
+  assert.ok([one.child.pid, two.child.pid].includes(running.pid), 'one of the two serves');
+  const loser = running.pid === one.child.pid ? two : one;
+  const { code, err } = await loser.closed;
+  assert.equal(code, 1, `the other ends without a service: ${err}`);
+  assert.deepEqual(fs.readdirSync(dir), ['pid']);
+  await api.stopStudyService(first.storeDir, { expectedInstanceId: running.instanceId });
+});
+
+test('#347 C: the last dead name of a pid-less remnant another process holds open is waited out', { timeout: STOP_BUDGET }, async (t) => {
+  const { first, api, pidFile } = await stoppedWithDeadLock(t);
+  const dir = lockPath(first.storeDir);
+  const aside = path.join(dir, `pid.reclaim.${await deadPid()}.0badc0de`);
+  fs.linkSync(pidFile, aside);
+  fs.unlinkSync(pidFile);
+  const holder = holdOpen(aside, { lingerMs: 0, pendingLingerMs: 500 });
+  await holder.held;
+  const handle = await api.ensureStudyService(first.storeDir, {
+    onChild(child) { child.ref(); registerOwnedProcess(child, 'study service'); },
+  });
+  t.after(() => api.stopStudyService(first.storeDir, { expectedInstanceId: handle.instanceId }).catch(() => {}));
+  const { code, out, err } = await holder.closed;
+  assert.equal(code, 0, err);
+  if (DELETE_PENDING) assert.match(out, /seen EPERM/, 'the name stayed behind its holder');
+  assert.equal(absent(aside), true);
+  assert.deepEqual(fs.readdirSync(dir), ['pid']);
+  assert.equal(fs.lstatSync(path.join(dir, 'pid')).nlink, 1);
+});
+
 test('#347 C: a live reclaimer\'s name is waited for and refused as before; no service child starts', { timeout: STOP_BUDGET }, async (t) => {
   const { first, api, pidFile } = await stoppedWithDeadLock(t);
   const aside = path.join(lockPath(first.storeDir), `pid.reclaim.${process.pid}.abcd1234`);
@@ -1533,8 +1571,10 @@ test('#347 C: an ensure whose service child ends before it clears a dead reclaim
   const { COLD_START_MS } = await service();
   const children = [];
   const started = performance.now();
+  // Killed the moment it is spawned, before Node has run any of it (registering it would first look
+  // its identity up, which takes long enough on a slow runner for the child to clear the names).
   const error = await api.ensureStudyService(first.storeDir, {
-    onChild(child) { children.push(registerOwnedProcess(child, 'study service')); child.kill('SIGKILL'); },
+    onChild(child) { child.kill('SIGKILL'); children.push(child); },
   }).then(() => null, (failure) => failure);
   const elapsed = performance.now() - started;
   assert.equal(children.length, 1, 'the ensure started a child for the dead reclaimer\'s name');
@@ -1559,7 +1599,9 @@ test('#347 C: a dead reclaimer\'s name another process holds open is waited out 
   const { code, out, err } = await holder.closed;
   assert.equal(code, 0, err);
   if (DELETE_PENDING) assert.match(out, /seen EPERM/, 'the name stayed behind its holder');
+  assert.equal(absent(aside), true);
   assert.deepEqual(fs.readdirSync(dir), ['pid']);
+  assert.equal(fs.lstatSync(path.join(dir, 'pid')).nlink, 1);
   assert.equal((await api.inspectStudyService(first.storeDir)).instanceId, handle.instanceId);
 });
 

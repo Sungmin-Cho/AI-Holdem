@@ -1002,3 +1002,100 @@ test('#347 C: content changed in place and put back stays off', async (t) => {
   assert.deepEqual(await publish(), { hint: null, disposition: 'unverifiable' });
   assert.equal(context.ready, false);
 });
+
+test('#347 C: a first descriptor stat that answers ENOENT only after a retry pinned the file turns hints off', async (t) => {
+  let clock = 0;
+  const f = await hintFixture(t);
+  const prepared = await f.prepare();
+  assert.equal(prepared.hint?.status, 'supported');
+  const context = {};
+  // The first try's first descriptor stat is held past its deadline and answered later, by hand.
+  const lstat = fs.promises.lstat;
+  let seen = 0, answer;
+  const held = new Promise((_, reject) => { answer = reject; });
+  held.catch(() => {});
+  const mock = t.mock.method(fs.promises, 'lstat', function (file, ...rest) {
+    if (path.basename(String(file)) === 'reference-source.json' && ++seen === 1) return held;
+    return lstat.call(this, file, ...rest);
+  });
+  assert.deepEqual(await verifyHintPublication({ sessionDir: f.dir, token: f.token, context, initialize: true, now: () => clock }), { ready: false });
+  clock += RETRY_INTERVAL_MS;
+  const publish = () => verifyHintPublication({ sessionDir: f.dir, token: f.token, context, hint: prepared.hint, view: prepared.view, retry: true });
+  assert.deepEqual(await publish(), { hint: prepared.hint, disposition: null }, 'the retry pinned the file and proved the hint');
+  assert.equal(context.ready, true);
+  // Now the abandoned stat answers: the file it was asked about was gone.
+  answer(Object.assign(new Error('gone'), { code: 'ENOENT', syscall: 'lstat' }));
+  await new Promise((resolve) => setImmediate(resolve));
+  mock.mock.restore();
+  assert.equal(context.ready, false, 'a pinned descriptor seen missing, late, is a change');
+  assert.deepEqual(await publish(), { hint: null, disposition: 'unverifiable' });
+});
+
+test('#347 C: a descriptor read shorter than its stat is a change even when the stat after it fails', async (t) => {
+  let clock = 0;
+  const f = await hintFixture(t);
+  const prepared = await f.prepare();
+  assert.equal(prepared.hint?.status, 'supported');
+  const context = {};
+  assert.deepEqual(await verifyHintPublication({ sessionDir: f.dir, token: f.token, context, initialize: true, now: () => clock }), { ready: true });
+  const publish = () => verifyHintPublication({ sessionDir: f.dir, token: f.token, context, hint: prepared.hint, view: prepared.view, retry: true });
+  // The handle reads one byte less than the file's size (it was truncated meanwhile), and the stat
+  // after reading then fails for a passing reason.
+  const open = fs.promises.open, lstat = fs.promises.lstat;
+  let shortened = 0, seen = 0;
+  const openMock = t.mock.method(fs.promises, 'open', async function (name, ...rest) {
+    const handle = await open.call(this, name, ...rest);
+    if (path.basename(String(name)) !== 'reference-source.json') return handle;
+    const read = handle.read.bind(handle);
+    let first = true;
+    handle.read = async (buffer, offset, length, position) => {
+      if (!first) return { bytesRead: 0, buffer };
+      first = false;
+      const size = (await handle.stat()).size;
+      shortened += 1;
+      return read(buffer, offset, Math.min(length, size - 1), position);
+    };
+    return handle;
+  });
+  const lstatMock = t.mock.method(fs.promises, 'lstat', function (file, ...rest) {
+    if (path.basename(String(file)) === 'reference-source.json' && ++seen === 2) return Promise.reject(Object.assign(new Error('busy'), { code: 'EBUSY', syscall: 'lstat' }));
+    return lstat.call(this, file, ...rest);
+  });
+  assert.deepEqual(await publish(), { hint: null, disposition: 'unverifiable' });
+  assert.equal(shortened, 1);
+  openMock.mock.restore();
+  lstatMock.mock.restore();
+  clock += RETRY_INTERVAL_MS;
+  assert.deepEqual(await publish(), { hint: null, disposition: 'unverifiable' });
+  assert.equal(context.ready, false);
+});
+
+test('#347 C: the retry interval counts from the end of the previous try', async (t) => {
+  let clock = 0;
+  const f = await hintFixture(t);
+  const prepared = await f.prepare();
+  assert.equal(prepared.hint?.status, 'supported');
+  const context = {};
+  // The first try fails on its state read, which takes a whole interval on the injected clock.
+  const lstat = fs.promises.lstat;
+  let failed = 0;
+  const mock = t.mock.method(fs.promises, 'lstat', function (file, ...rest) {
+    if (path.basename(String(file)) === 'state.json' && failed === 0) {
+      failed += 1;
+      clock += RETRY_INTERVAL_MS;
+      return Promise.reject(Object.assign(new Error('busy'), { code: 'EBUSY', syscall: 'lstat' }));
+    }
+    return lstat.call(this, file, ...rest);
+  });
+  assert.deepEqual(await verifyHintPublication({ sessionDir: f.dir, token: f.token, context, initialize: true, now: () => clock }), { ready: false });
+  mock.mock.restore();
+  const realpath = fs.promises.realpath;
+  let attempts = 0;
+  t.mock.method(fs.promises, 'realpath', function (target, ...rest) { attempts += 1; return realpath.call(this, target, ...rest); });
+  const publish = () => verifyHintPublication({ sessionDir: f.dir, token: f.token, context, hint: prepared.hint, view: prepared.view, retry: true });
+  assert.deepEqual(await publish(), { hint: null, disposition: 'unverifiable' });
+  assert.equal(attempts, 0, 'a whole interval after the try began, but none after it ended');
+  clock += RETRY_INTERVAL_MS;
+  assert.deepEqual(await publish(), { hint: prepared.hint, disposition: null });
+  assert.equal(attempts, 1);
+});
