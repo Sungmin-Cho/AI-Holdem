@@ -4,10 +4,14 @@ import {randomUUID} from 'node:crypto';
 import {openContained} from './training-store.js';
 import {CANONICAL_REFERENCE_SOURCE,LEGACY_REFERENCE_SOURCE,KNOWN_REFERENCE_SOURCES,sameReferenceSource} from '../shared/reference.js';
 import {loadReferenceDataset} from './preflop-dataset.js';
-const fail=(code,message)=>{const e=new Error(message);e.code=code;throw e;};
+const fail=(code,message,fields)=>{const e=new Error(message);e.code=code;if(fields)Object.assign(e,fields);throw e;};
+// #347 C: a refusal to read a file says which one (`evidence`) and why (`cause`, its own code), so a
+// reader can tell a file it could not read from one it found replaced or malformed. The code and the
+// message stay as they were.
+const evidenceOf=(parts,cause)=>({evidence:parts.join('/'),cause});
 function read(root,parts,maxBytes=4*1024*1024){
  try{return JSON.parse(openContained(root,parts,{maxBytes}).toString('utf8'));}
- catch(e){if(e.code==='ENOENT')return null;fail('REFERENCE_SOURCE_INVALID',`Invalid reference evidence: ${e.code??'JSON'}`);}
+ catch(e){if(e.code==='ENOENT')return null;fail('REFERENCE_SOURCE_INVALID',`Invalid reference evidence: ${e.code??'JSON'}`,evidenceOf(parts,e.code??'JSON'));}
 }
 function validateDescriptor(value){
  if(!value||value.schemaVersion!==1||Object.keys(value).sort().join(',')!=='schemaVersion,source'
@@ -23,23 +27,27 @@ function assertHistory(root,source){
   if(s.version!==source.version)fail('REFERENCE_SOURCE_CONFLICT','Session baseline version conflict');
   if(item.detailRef){
    if(!/^[a-f0-9]{64}$/.test(item.detailRef))fail('REFERENCE_SOURCE_INVALID','Invalid detail reference');
-   const d=read(root,['training','details',`${item.detailRef}.json`]);
-   if(!d || d.source?.id!==source.id || d.source?.version!==source.version
+   const detail=['training','details',`${item.detailRef}.json`],d=read(root,detail);
+   if(!d)fail('REFERENCE_SOURCE_CONFLICT','Session baseline detail conflict',evidenceOf(detail,'ENOENT'));
+   if(d.source?.id!==source.id || d.source?.version!==source.version
      || (d.source.contentSha256!==undefined ? d.source.contentSha256!==source.contentSha256 : source.version!=='1.0.0'))fail('REFERENCE_SOURCE_CONFLICT','Session baseline detail conflict');
   }else if(s.version!=='1.0.0')fail('REFERENCE_SOURCE_CONFLICT','Missing versioned detail');
  }
  // Detect a deleted descriptor even before authority recovery from the journal.
  let raw;try{raw=openContained(root,['training','evaluations.jsonl'],{maxBytes:64*1024*1024}).toString('utf8');}
- catch(e){if(e.code!=='ENOENT')fail('REFERENCE_SOURCE_INVALID','Unreadable evaluation history');}
+ catch(e){if(e.code!=='ENOENT')fail('REFERENCE_SOURCE_INVALID','Unreadable evaluation history',evidenceOf(['training','evaluations.jsonl'],e.code??'UNKNOWN'));}
  if(raw)for(const line of raw.split('\n').filter(Boolean)){
-  let row;try{row=JSON.parse(line);}catch{fail('REFERENCE_SOURCE_INVALID','Invalid evaluation history');}
+  let row;try{row=JSON.parse(line);}catch{fail('REFERENCE_SOURCE_INVALID','Invalid evaluation history',evidenceOf(['training','evaluations.jsonl'],'JSON'));}
   if(row.source?.id===source.id && (row.source.version!==source.version
     ||(row.source.contentSha256!==undefined&&row.source.contentSha256!==source.contentSha256)))fail('REFERENCE_SOURCE_CONFLICT','Journal baseline conflict');
  }
 }
-/** Validation-only lookup: never creates or repairs lifecycle state. */
-export function readSessionReference(root,{allowLegacyMissing=false,expectedDescriptor}={}) {
- const descriptor=read(root,['reference-source.json'],4096);
+/** Validation-only lookup: never creates or repairs lifecycle state. `capturedDescriptor` (#347 C): the
+ * descriptor text the caller already read and observed itself, validated instead of reading it again. */
+export function readSessionReference(root,{allowLegacyMissing=false,expectedDescriptor,capturedDescriptor}={}) {
+ let descriptor;
+ if(capturedDescriptor!==undefined){try{descriptor=JSON.parse(capturedDescriptor);}catch{fail('REFERENCE_SOURCE_INVALID','Invalid captured descriptor');}}
+ else descriptor=read(root,['reference-source.json'],4096);
  if(!descriptor&&!allowLegacyMissing)fail('REFERENCE_CONTEXT_UNAVAILABLE','Session reference descriptor missing');
   const source=descriptor?validateDescriptor(descriptor):LEGACY_REFERENCE_SOURCE;
   if(expectedDescriptor!==undefined){

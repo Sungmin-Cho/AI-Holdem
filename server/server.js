@@ -1182,12 +1182,17 @@ function serveStatic(pathname, res) {
 // each busy attempt. `actionControlRetryClock` ({ now, sleep }) times those retries instead of
 // the wall clock, so a test can make an attempt slow without a slow runner (#320). Only tests
 // set any of them.
-export function startServer({ gameDir, port = 8877, token, studyUrl, controlProtocolVersion, receiptCheckpoint, publishCheckpoint = () => {}, actionControlRetryMs = 250, onActionControlBusy, actionControlRetryClock = {} }) {
+export function startServer({ gameDir, port = 8877, token, studyUrl, controlProtocolVersion, receiptCheckpoint, publishCheckpoint = () => {}, actionControlRetryMs = 250, onActionControlBusy, actionControlRetryClock = {}, hintInitClock = {} }) {
   if (!gameDir) throw new Error('gameDir required');
   if (typeof token !== 'string' || token.length === 0) throw new Error('token required');
   if (actionControlRetryClock === null || typeof actionControlRetryClock !== 'object'
     || ['now', 'sleep'].some((key) => actionControlRetryClock[key] !== undefined && typeof actionControlRetryClock[key] !== 'function')) {
     throw new Error('actionControlRetryClock takes optional now and sleep functions');
+  }
+  // #347 C test seam: the monotonic clock that spaces the hint initialization's retries.
+  if (hintInitClock === null || typeof hintInitClock !== 'object'
+    || (hintInitClock.now !== undefined && typeof hintInitClock.now !== 'function')) {
+    throw new Error('hintInitClock takes an optional now function');
   }
   const trustedStudyUrl = validatedStudyUrl(studyUrl);
   const studyCapability = trustedStudyUrl?.split('#token=')[1];
@@ -1213,12 +1218,15 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
   receiptStore.reconcile({ legal: state.decision }, state.lastActionAck, state.publishId);
   let recoveryRequired = false;
   const hintContext = {};
-  const hintInitialized = verifyHintPublication({sessionDir:root,token,context:hintContext,initialize:true});
+  const hintInitialized = verifyHintPublication({sessionDir:root,token,context:hintContext,initialize:true,now:hintInitClock.now});
+  // #347 C: a hint proved before another proof turned hints off is not let out after it. Checked in the
+  // last synchronous stretch before a hint enters an answer or a frame.
+  const liveHint = hint => (hintContext.ready === true ? hint : null);
   const currentHint = async () => {
     await hintInitialized;
     const revision=state.revision;
     const proof=await verifyHintPublication({sessionDir:root,token,context:hintContext,hint:state.hint,view:state.view});
-    if (revision!==state.revision) return null;
+    if (revision!==state.revision || hintContext.ready!==true) return null;
     try {
       const receipt=receiptStore.read();
       if (receipt?.decisionId===proof.hint?.decisionId && ['accepted','delivered','consumed'].includes(receipt.phase)) return null;
@@ -1284,7 +1292,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       }
       return;
     }
-    const revision=state.revision; const history=state.history; const hint=await currentHint();
+    const revision=state.revision; const history=state.history; const hint=liveHint(await currentHint());
     for (const entry of history) {
       if (entry.revision <= client.lastRevision) continue;
       const payload = entry.payload?.review !== undefined && state.hostReview
@@ -1312,14 +1320,17 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
     }
     if (body.hint != null) {
       await hintInitialized;
-      const proof=await verifyHintPublication({sessionDir:root,token,context:hintContext,hint:body.hint,view:body.view});
+      // #347 C: the façade alone decides whether hints stay off for this relay's life; a publication
+      // whose proof failed for a passing reason drops only its own hint. A publication may retry a
+      // failed initialization (bounded in tools/hint-proof.js).
+      const proof=await verifyHintPublication({sessionDir:root,token,context:hintContext,hint:body.hint,view:body.view,retry:true});
       hintDisposition=proof.disposition;
       if (hintDisposition==='mismatch') {
         state.hint=null;clearHintClients(currentDecisionId());
         sendJson(res,400,{ok:false,code:'HINT_PROOF_MISMATCH'});return;
       }
-      if (hintDisposition==='unverifiable') hintContext.ready=false;
-      body={...body,hint:proof.hint};
+      if (proof.hint!=null && hintContext.ready!==true) hintDisposition='unverifiable';
+      body={...body,hint:liveHint(proof.hint)};
     }
 
     try { assertNoStudyCapability(body); }
@@ -1806,7 +1817,7 @@ export function startServer({ gameDir, port = 8877, token, studyUrl, controlProt
       // Preserve the last committed player snapshot (and the loop's identity
       // probe) while recovering; observers must wait for proven projection.
       if (!loopProbe && spectatorAudience(state.view, seat) && !checkRecovery(res)) return;
-      const snap = loopProbe ? hostSnapshot(state) : publicSnapshot(state, seat === HOST_ID ? await currentHint() : null, seat);
+      const snap = loopProbe ? hostSnapshot(state) : publicSnapshot(state, seat === HOST_ID ? liveHint(await currentHint()) : null, seat);
       sendJson(res, snap.code === 'VIEW_NOT_READY' ? 503 : 200, { ...snap, ...(trustedStudyUrl && seat === HOST_ID && (loopProbe || !spectatorAudience(state.view, seat)) ? { studyUrl: trustedStudyUrl } : {}) });
       return;
     }
