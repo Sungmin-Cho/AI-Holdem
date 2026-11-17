@@ -825,12 +825,12 @@ test('#347 C: the first descriptor content the relay reads binds later tries eve
   assert.notEqual(context.pinnedRaw, undefined, 'the late read pinned its content');
   await new Promise((resolve) => setTimeout(resolve, 50));
   mock.mock.restore();
-  // The same file, the same length, one byte different: only the late content tells.
+  // The same file, the same length, another valid coverage descriptor: only the late content tells.
+  const { V2_REFERENCE_SOURCE } = await import('../shared/reference.js');
   const file = path.join(f.dir, 'reference-source.json');
-  const other = fs.readFileSync(file);
-  const at = other.indexOf(Buffer.from('"schemaVersion"'));
-  other[at + 1] = other[at + 1] === 0x73 ? 0x53 : 0x73;
-  fs.writeFileSync(file, other);
+  const size = fs.lstatSync(file).size;
+  fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, source: V2_REFERENCE_SOURCE }));
+  assert.equal(fs.lstatSync(file).size, size, 'the same length');
   clock += RETRY_INTERVAL_MS;
   assert.deepEqual(await verifyHintPublication({ sessionDir: f.dir, token: f.token, context, hint: prepared.hint, view: prepared.view, retry: true }),
     { hint: null, disposition: 'unverifiable' });
@@ -1200,5 +1200,21 @@ test('#347 C: a size seen at the first stat counts even when the open then fails
   fs.writeFileSync(file, original);
   clock += RETRY_INTERVAL_MS;
   assert.deepEqual(await publish(), { hint: null, disposition: 'unverifiable' });
+  assert.equal(context.ready, false);
+});
+
+test('#347 C: a descriptor with a second name is refused, and stays refused once the name is gone', async (t) => {
+  let clock = 0;
+  const f = await hintFixture(t);
+  const prepared = await f.prepare();
+  assert.equal(prepared.hint?.status, 'supported');
+  const file = path.join(f.dir, 'reference-source.json'), second = path.join(f.dir, 'reference-source.second');
+  fs.linkSync(file, second);
+  const context = {};
+  assert.deepEqual(await verifyHintPublication({ sessionDir: f.dir, token: f.token, context, initialize: true, now: () => clock }), { ready: false });
+  fs.unlinkSync(second);
+  clock += RETRY_INTERVAL_MS;
+  assert.deepEqual(await verifyHintPublication({ sessionDir: f.dir, token: f.token, context, hint: prepared.hint, view: prepared.view, retry: true }),
+    { hint: null, disposition: 'unverifiable' });
   assert.equal(context.ready, false);
 });
