@@ -8,7 +8,8 @@ import { startServer } from '../../server/server.js';
 import { resolveSessionReference } from '../../tools/reference-source.js';
 import { createHintControl } from '../../tools/hint-control.js';
 import { gameEpochOf } from '../../publish-contract.js';
-export async function hintFixture(t,{hints='on',dealBias}={}) {
+// `serverOptions` reach every relay this fixture starts (#347 C: the hint initialization clock).
+export async function hintFixture(t,{hints='on',dealBias,serverOptions={}}={}) {
   const dir=createOwnedTempDir('holdem-hint');
   const engine=fileURLToPath(new URL('../../engine/cli.js',import.meta.url));
   const cli=(...args)=>JSON.parse(execFileSync(process.execPath,[engine,...args,'--game-dir',dir],{encoding:'utf8',stdio:['ignore','pipe','pipe']}));
@@ -19,7 +20,7 @@ export async function hintFixture(t,{hints='on',dealBias}={}) {
   fs.writeFileSync(path.join(dir,'state.json'),JSON.stringify(started));
   resolveSessionReference(dir,{createNew:true});
   const token=state.sessionToken,epoch=gameEpochOf(token);
-  let relay=await startServer({gameDir:dir,port:0,token});
+  let relay=await startServer({gameDir:dir,port:0,token,...serverOptions});
   t.after(async()=>{if(relay.server.listening)await relay.close();});
   const request=async(endpoint,body)=>{
     const response=await fetch(`http://127.0.0.1:${relay.port}/api/${endpoint}?token=${token}`,{
@@ -34,7 +35,7 @@ export async function hintFixture(t,{hints='on',dealBias}={}) {
   return {dir,cli,request,epoch,token,control,logged,
     prepare:()=>control.prepare(cli('step')),
     state:()=>JSON.parse(fs.readFileSync(path.join(dir,'state.json'))),
-    restart:async()=>{await relay.close();relay=await startServer({gameDir:dir,port:0,token});},
+    restart:async()=>{await relay.close();relay=await startServer({gameDir:dir,port:0,token,...serverOptions});},
     url:()=>`http://127.0.0.1:${relay.port}`,
   };
 }

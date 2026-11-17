@@ -136,7 +136,7 @@ tools/game-loop.js  (사이드카, detached 프로세스)
 
 ## 5. 횡단 관심사
 
-- **락**: pid(+startTime) identity 기반 owned-lock 프리미티브 하나(`engine/state.js`의 `acquireOwnedLock`/`readOwnedLock`/`withMutation`/`withNamedLock`)가 엔진 mutex, 사이드카 수명 락(`loop.lock.d/`), 게시 락(`publish.lock.d/`) 전부에 재사용된다. 새 락 구현을 따로 만들지 않는다. 회수는 stale pid 파일에 하드링크 aside를 붙여 inode를 검증하고 그 aside가 디렉터리를 비어 있지 않게 고정하는 동안만 지운다(경로 재바인딩 방지); 획득은 고유 이름 임시 디렉터리에 pid를 먼저 기록하고 rename으로 설치해 산 락이 한순간도 비어 있지 않게 한다. 회수에는 rename을 쓰지 않는다.
+- **락**: pid(+startTime) identity 기반 owned-lock 프리미티브 하나(`engine/state.js`의 `acquireOwnedLock`/`readOwnedLock`/`withMutation`/`withNamedLock`)가 엔진 mutex, 사이드카 수명 락(`loop.lock.d/`), 게시 락(`publish.lock.d/`) 전부에 재사용된다. 새 락 구현을 따로 만들지 않는다. 회수는 stale pid 파일에 하드링크 aside를 붙여 inode를 검증하고 그 aside가 디렉터리를 비어 있지 않게 고정하는 동안만 지운다(경로 재바인딩 방지); 획득은 고유 이름 임시 디렉터리에 pid를 먼저 기록하고 rename으로 설치해 산 락이 한순간도 비어 있지 않게 한다. 회수에는 rename을 쓰지 않는다. 학습 서비스의 읽는 쪽은 회수 이름이 붙은(이름이 둘인) pid 파일을 받아들이지 않는다. 회수자가 죽어 남긴 이름은 서비스 자식만, 락 디렉터리의 경계를 검증한 뒤 치운다(#347 C).
 - **게시 계약**: `publish-contract.js`가 body-byte 상한·`publishId` 상한·`gameEpoch` 파생을 `server/`와 `tools/` 양쪽에 단일 소스로 공급해, 두 프로세스가 같은 상수를 따로 정의하지 않게 한다. 복기 채널은 `handReplay` 트리거(`handNos`)만 받고 내용은 서버가 아카이브에서 재계산한다. 형태 불량만 `BAD_HAND_REPLAY` 400이고, 그 밖의 실패는 표식(`REPLAY_NOT_COMPLETED`·`REPLAY_UNAVAILABLE`)으로 강등한 채 `view`·`events`를 커밋한다.
 - **원자적 쓰기**: JSON 상태 파일은 `engine/state.js`의 `writeJsonAtomic`이, 리뷰 같은 텍스트 산출물은 `tools/game-loop.js`의 `writeTextAtomic`이 각각 tmp-write-then-rename으로 쓴다 — 프로세스가 도중에 죽어도 부분 쓰기로 상태가 깨지지 않는다.
 - **contained I/O**: `tools/training-store.js`의 `openContained`/`writeContained`는 세그먼트 문법(`BAD_SEGMENT`)·조상 `lstat`(symlink 거부)·`O_NOFOLLOW`·열기 후 조상 재-`lstat`(dev/ino)로 경계를 좁힌다. Node 공개 API에 `openat`이 없어 이 검사-열기-재검사는 **완전 봉쇄가 아니다** — TOCTOU 창은 줄어들 뿐이고, 호출자는 root를 신뢰 경계로 둬야 한다. `writeContained({mode:'create'})`는 `link(tmp, dest)`만 허용하며(EEXIST → `EXISTS`) 존재 검사 후 rename으로 덮어쓰지 않는다.
@@ -190,7 +190,7 @@ open v2 stores with an older binary. Issue #147 hint publication remains separat
 
 새 store 세션은 사전 힌트가 기본적으로 꺼져 있다. `--hints on`으로 켜면 현재 사용자 프리플랍 판단의 휴리스틱 기준표(새 세션 v3, 기존 세션 v2) 빈도를 표시한다. `--hints off`는 수치를 표시하지 않는다. 설정은 세션 동안 고정되며 재개 시 생략하면 기존 값을 따른다. 구버전 세션에는 힌트를 추가하지 않으며 새 세션을 시작해야 한다. 힌트 게시 전에 보조 기록을 영속 저장하므로 실제 화면을 보지 못했어도 보조받은 판단으로 남을 수 있다. 해당 판단은 독립 점수·분포·오답·재시험·목표에서 제외하고, 해당 핸드 전체는 자기 성향의 독립 60핸드 표본에서 제외한다. 투영은 계속 비채점이며 기존 v1 출처는 보존한다.
 
-힌트 숫자의 권한은 엔진 `hint-expose` 마커와 순수 사전 조회 결과의 재계산으로 검증한다. relay의 `tools/hint-proof.js` 예외는 제한된 읽기와 검증만 허용한다. SSE 이력에는 숫자를 저장하지 않고 현재 판단만 재검증하여 전달한다. 액션 durable 접수 직후 revision 없는 `hint-clear`로 숨기며, 브라우저는 별도 세대로 오래된 snapshot의 재표시를 막는다. Profile/event schema 6은 명시적 assistance를 저장하고 기존 1~5 저널은 다시 쓰지 않는다. 새 drill session은 schema 3이며 기존 1/2의 pending 비교 형식을 유지한다. 이 형식을 쓴 store는 호환 버전으로 roll-forward하며 구버전 프로그램으로 열지 않는다.
+힌트 숫자의 권한은 엔진 `hint-expose` 마커와 순수 사전 조회 결과의 재계산으로 검증한다. relay의 `tools/hint-proof.js` 예외는 제한된 읽기와 검증만 허용한다. relay는 명시적 판정이나 출처 descriptor가 바뀐 증거(relay가 처음 본 정체·내용과 다름, 읽는 중 교체)에만 그 수명 동안 힌트를 끄고, 읽기 기한 초과 같은 일시 실패는 그 게시의 힌트만 버린다. 판정 없이 끝난 초기화는 힌트가 실린 게시에서 최대 3번, 5초 간격으로 다시 한다(#347 C). SSE 이력에는 숫자를 저장하지 않고 현재 판단만 재검증하여 전달한다. 액션 durable 접수 직후 revision 없는 `hint-clear`로 숨기며, 브라우저는 별도 세대로 오래된 snapshot의 재표시를 막는다. Profile/event schema 6은 명시적 assistance를 저장하고 기존 1~5 저널은 다시 쓰지 않는다. 새 drill session은 schema 3이며 기존 1/2의 pending 비교 형식을 유지한다. 이 형식을 쓴 store는 호환 버전으로 roll-forward하며 구버전 프로그램으로 열지 않는다.
 
 Schema 1~5 derived profile을 `show` 등으로 읽어 schema 6으로 재구축하는 것도 roll-forward 경계다. 원본 저널을 보존한 채 호환 바이너리에서 재구축하며, `--hints off`나 구 profile 백업만으로 이미 추가된 schema 6 저널을 downgrade하지 않는다.
 
