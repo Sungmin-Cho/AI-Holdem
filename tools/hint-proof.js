@@ -61,7 +61,7 @@ async function readEvidence(root, name, maxBytes, observer = {}, lease = { activ
   try {
     const stat = await handleStatExact(handle);
     if (stat.isFile()) seen(stat);
-    if (!stat.isFile() || stat.size > maxBytes || stat.dev !== before.dev || stat.ino !== before.ino) throw changed();
+    if (!stat.isFile() || stat.size > maxBytes || stat.size !== before.size || stat.dev !== before.dev || stat.ino !== before.ino) throw changed();
     const bytes = Buffer.alloc(stat.size+1);
     let bytesRead = 0;
     while (bytesRead < bytes.length) {
@@ -69,14 +69,15 @@ async function readEvidence(root, name, maxBytes, observer = {}, lease = { activ
       if (!result.bytesRead) break;
       bytesRead += result.bytesRead;
     }
-    if (bytesRead !== stat.size) throw changed(); // shorter or longer than its stat: known before the next stat
+    if (bytesRead !== stat.size) throw changed(); // shorter or longer than its stat
+    const evidence = { raw:bytes.subarray(0,bytesRead).toString('utf8'), dev:stat.dev, ino:stat.ino };
+    // Judged now: what was read is a fact before the stat after it, whose own failure must not hide it.
+    observer.content?.(evidence, lease);
     let after;
     try { after = await lstatExactAsync(file); }
     catch (error) { if (error?.code === 'ENOENT') throw changed(); throw error; }
     if (after.isFile() && !after.isSymbolicLink()) seen(after);
     if (after.dev !== stat.dev || after.ino !== stat.ino || after.size !== stat.size) throw changed();
-    const evidence = { raw:bytes.subarray(0,bytesRead).toString('utf8'), dev:stat.dev, ino:stat.ino };
-    observer.content?.(evidence, lease);
     return evidence;
   } finally { await handle.close().catch(() => {}); } // a failed close never replaces what the read found
 }

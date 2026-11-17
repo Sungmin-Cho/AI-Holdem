@@ -722,7 +722,7 @@ function optionsForChild(options) {
   if (options.port !== undefined && options.port !== 0) throw new TypeError('study port must be 0');
   const testOptions = options.testOptions ?? {};
   if (!testOptions || typeof testOptions !== 'object' || Array.isArray(testOptions)
-    || Object.keys(testOptions).some((key) => !['idleTimeoutMs','checkpointMs','publishDelayMs','reclaimHoldFile'].includes(key))) throw new TypeError('invalid study test options');
+    || Object.keys(testOptions).some((key) => !['idleTimeoutMs','checkpointMs','publishDelayMs','reclaimHoldFile','clearHoldFile'].includes(key))) throw new TypeError('invalid study test options');
   const idleTimeoutMs = testOptions.idleTimeoutMs ?? 10 * 60 * 1000;
   const checkpointMs = testOptions.checkpointMs ?? 1000;
   // #256 test seam: hold the first descriptor publish, so a client provably meets the new
@@ -730,12 +730,15 @@ function optionsForChild(options) {
   const publishDelayMs = testOptions.publishDelayMs ?? 0;
   // #319 F4 test seam: the service child's reclaim of a dead owner's lock waits, with its hard link
   // pinning the pid file, until this file exists, so a client provably meets a file with two names.
-  const { reclaimHoldFile } = testOptions;
+  // #347 C test seam (`clearHoldFile`): a service child about to clear dead reclaimers' names first
+  // writes `<file>.<pid>.reached` and waits until the file exists, so a test can stop it there.
+  const { reclaimHoldFile, clearHoldFile } = testOptions;
   if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 100 || idleTimeoutMs > 600000
     || !Number.isSafeInteger(checkpointMs) || checkpointMs < 25 || checkpointMs > 1000
     || !Number.isSafeInteger(publishDelayMs) || publishDelayMs < 0 || publishDelayMs > 5000
-    || (reclaimHoldFile !== undefined && (typeof reclaimHoldFile !== 'string' || !path.isAbsolute(reclaimHoldFile)))) throw new TypeError('invalid study lifetime');
-  return { idleTimeoutMs, checkpointMs, ...(publishDelayMs && { publishDelayMs }), ...(reclaimHoldFile && { reclaimHoldFile }) };
+    || (reclaimHoldFile !== undefined && (typeof reclaimHoldFile !== 'string' || !path.isAbsolute(reclaimHoldFile)))
+    || (clearHoldFile !== undefined && (typeof clearHoldFile !== 'string' || !path.isAbsolute(clearHoldFile)))) throw new TypeError('invalid study lifetime');
+  return { idleTimeoutMs, checkpointMs, ...(publishDelayMs && { publishDelayMs }), ...(reclaimHoldFile && { reclaimHoldFile }), ...(clearHoldFile && { clearHoldFile }) };
 }
 
 // #306: on Windows a name deleted while another process reads it stays pending — before libuv 1.49
@@ -1141,6 +1144,7 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
       // #347 C: only this child clears a dead reclaimer's name, in the directory just validated, and
       // reads the lock again — a pid file that still has a second name is refused as before.
       if (error?.reclaimOrphaned !== true) throw error;
+      if (config.clearHoldFile) { fs.writeFileSync(`${config.clearHoldFile}.${process.pid}.reached`, ''); holdUntilFile(config.clearHoldFile); }
       clearDeadReclaims(ctx);
       lock = readLock(ctx);
     }
