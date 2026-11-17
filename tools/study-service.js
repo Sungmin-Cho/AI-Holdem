@@ -7,7 +7,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, ownedProcessStartTime, parseOwnedLockIdentity, isReclaimAsideName, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
+import { acquireOwnedLock, releaseOwnedLock, ownedIdentityStatus, ownedProcessStartTime, parseOwnedLockIdentity, isReclaimAsideName, isDeadReclaimAsideName, sweepDeadReclaimAsides, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
 import { startDrillServer } from './drill-server.js';
 import { lstatExact, fstatExact, plainIdOf } from '../shared/exact-stat.js';
 import { boundedNetworkCall } from './bounded-network-call.js';
@@ -394,8 +394,8 @@ function unsafeFile(stat, privateMode, file) {
 function safeFile(stat, privateMode, file) {
   return unsafeFile(stat, privateMode, file) === null;
 }
-function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized = false, reclaimInProgress } = {}) {
-  if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => readPrivate(ctx, file, maxBytes, { privateMode, allowOversized, reclaimInProgress }));
+function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized = false, reclaimState } = {}) {
+  if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => readPrivate(ctx, file, maxBytes, { privateMode, allowOversized, reclaimState }));
   assertContext(ctx);
   const before = statOrNull(file);
   if (!before) return null;
@@ -403,18 +403,21 @@ function readPrivate(ctx, file, maxBytes, { privateMode = true, allowOversized =
   const refusalOf = (stat) => unsafeFile(stat, privateMode, file) ?? (!allowOversized && stat.size > maxBytes ? 'size' : null);
   const refuse = (stage, refusal) => {
     if (missing()) return null;
-    let reclaimPending = false;
-    if (refusal === 'nlink' && reclaimInProgress) {
-      reclaimPending = reclaimInProgress();
-      if (!reclaimPending) {
+    let fields;
+    if (refusal === 'nlink' && reclaimState) {
+      const reclaim = reclaimState();
+      if (reclaim === 'pending') fields = { reclaimPending: true };
+      // #347 C: every reclaim name beside the file is a dead reclaimer's — waiting will not end it.
+      else if (reclaim === 'orphaned') fields = { reclaimOrphaned: true };
+      else {
         // The listing can land just after the reclaim ended: the file is gone, or has one name again.
         // One stat answers both, so nothing can change between the two questions.
         const now = statOrNull(file);
         if (vanishedStat(now, before)) return null;
-        reclaimPending = now.nlink === 1;
+        if (now.nlink === 1) fields = { reclaimPending: true };
       }
     }
-    fail('STUDY_DESCRIPTOR_CORRUPT', `read:${stage}:${refusal}`, undefined, reclaimPending ? { reclaimPending } : undefined);
+    fail('STUDY_DESCRIPTOR_CORRUPT', `read:${stage}:${refusal}`, undefined, fields);
   };
   const early = refusalOf(before);
   if (early) return refuse('before', early);
@@ -478,11 +481,17 @@ function vanishedPath(file, before, options) {
 }
 // #319 F4: a reclaim hard-links a dead owner's pid file inside the lock directory before it removes
 // the file (engine/state.js detachStalePidFile), so for that moment the file has two names and the
-// link count refuses it. Only the presence of such a name is read here: it makes the refusal a read
-// to judge again (`readSettled`), never a file to accept. A listing that fails is not evidence.
-function hasReclaimAside(lockDir) {
-  try { return fs.readdirSync(lockDir).some(isReclaimAsideName); }
-  catch { return false; }
+// link count refuses it. Only the names are read here: a reclaim name makes the refusal a read to
+// judge again (`readSettled`), never a file to accept. A listing that fails is not evidence.
+// #347 C: when every reclaim name belongs to a reclaimer proven gone, the reclaim died after it pinned
+// the file and nothing will end it but the service child clearing those names: 'orphaned', which is
+// not read again. A live reclaimer, or one not proven gone, is 'pending' as before.
+function reclaimAsideState(lockDir) {
+  let names;
+  try { names = fs.readdirSync(lockDir).filter(isReclaimAsideName); }
+  catch { return null; }
+  if (names.length === 0) return null;
+  return names.every(isDeadReclaimAsideName) ? 'orphaned' : 'pending';
 }
 function readLock(ctx, parent = false) {
   if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => readLock(ctx, parent));
@@ -501,7 +510,7 @@ function readLock(ctx, parent = false) {
     throw error;
   }
   const exact = exactInode(file);
-  const pidFile = readPrivate(ctx, path.join(file, 'pid'), 256, { privateMode: false, reclaimInProgress: () => hasReclaimAside(file) });
+  const pidFile = readPrivate(ctx, path.join(file, 'pid'), 256, { privateMode: false, reclaimState: () => reclaimAsideState(file) });
   let after;
   try { after = directory(file); }
   catch (error) {
@@ -509,7 +518,13 @@ function readLock(ctx, parent = false) {
     throw error;
   }
   if (!sameInode(checked, after)) fail();
-  if (!pidFile) return { status: 'unknown', stat: checked, exact };
+  if (!pidFile) {
+    // #347 C: no pid file, and the only names left are reclaims whose reclaimers are gone — a reclaim
+    // that removed the dead owner's file and died before its own name went. Not an owner to wait for:
+    // the service child clears it, as it does a dead reclaimer's second name on a pid file.
+    if (!parent && reclaimAsideState(file) === 'orphaned') fail('STUDY_DESCRIPTOR_CORRUPT', 'lock:orphaned', undefined, { reclaimOrphaned: true });
+    return { status: 'unknown', stat: checked, exact };
+  }
   const parsed = parseOwnedLockIdentity(pidFile.text);
   if (!parsed) return { status: 'unknown', stat: checked, exact };
   const { pid, startTime, evidence = null } = parsed;
@@ -765,8 +780,20 @@ export async function readSettled(read, deadline, { platform = process.platform 
 
 async function ensureOwned(ctx, options, deadline, coldDeadline) {
   const config = optionsForChild(options);
-  let { owner, descriptor } = await readSettled(() => ({ owner: readLock(ctx), descriptor: readDescriptor(ctx) }), deadline);
+  let owner, descriptor;
+  try {
+    ({ owner, descriptor } = await readSettled(() => ({ owner: readLock(ctx), descriptor: readDescriptor(ctx) }), deadline));
+  } catch (error) {
+    // #347 C: the lock's pid file has a second name and every such name is a reclaim whose reclaimer
+    // is gone. Nothing can be read through it and waiting will not end it; only the service child
+    // removes those names (a client never writes). Start one as for an absent owner, with the
+    // descriptor checked as for one; the child checks the record against it once it can read it.
+    if (error?.reclaimOrphaned !== true) throw error;
+    owner = null;
+    descriptor = await readSettled(() => readDescriptor(ctx), deadline);
+  }
   const staleEvidence = descriptor.state === 'valid' ? lockEvidenceFor(descriptor.value, owner) : null;
+  let spawnedChild = false, spawnedChildExited = false;
   const staleDescriptor = descriptor.state === 'valid' && descriptor.value.storeIdentity === ctx.storeIdentity
     && identityStatus(descriptor.value.pid, descriptor.value.startTime, staleEvidence) === 'dead' ? descriptor.value : undefined;
   if (owner?.status === 'alive') {
@@ -798,14 +825,21 @@ async function ensureOwned(ctx, options, deadline, coldDeadline) {
     if (childLog !== undefined) fs.closeSync(childLog);
     let spawnError = null;
     child.on('error', (error) => { spawnError = error; });
+    child.once('exit', () => { spawnedChildExited = true; });
+    spawnedChild = true;
     child.unref();
     options.onChild?.(child);
     await sleep(25);
     if (spawnError) fail();
   }
   while (platformNow() < deadline) {
-    // The child this ensure started may be reclaiming a dead owner's lock right now (#306).
-    owner = await readSettled(() => { assertContext(ctx); return readLock(ctx); }, deadline);
+    // The child this ensure started may be reclaiming a dead owner's lock right now (#306), or
+    // clearing a dead reclaimer's name (#347 C) — until it has ended, that refusal is not final.
+    try { owner = await readSettled(() => { assertContext(ctx); return readLock(ctx); }, deadline); }
+    catch (error) {
+      if (error?.reclaimOrphaned !== true || !spawnedChild || spawnedChildExited) throw error;
+      owner = null;
+    }
     if (owner?.status === 'alive') {
       deadline = Math.min(deadline, platformNow() + platformTimeout(WAIT_MS));
       extendPlatformDeadline(deadline);
@@ -1063,6 +1097,31 @@ function publish(ctx, own, value) {
     markAclDirty();
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
+// #347 C: the service child's half of clearing a dead reclaimer's names. The lock directory's boundary
+// (owner, mode, Windows ACL) is validated before anything is removed and checked again after; the
+// engine re-checks that the path still names that directory before every removal.
+function clearDeadReclaims(ctx) {
+  if (process.platform === 'win32' && !inTransaction) return aclTransaction(ctx, () => clearDeadReclaims(ctx));
+  assertContext(ctx);
+  const dir = path.join(ctx.training, LOCK);
+  const checked = directory(dir);
+  const swept = sweepDeadReclaimAsides(dir, checked);
+  markAclDirty();
+  if (swept.replaced) fail('STUDY_DESCRIPTOR_CORRUPT', 'reclaim:replaced');
+  if (!swept.removedDir && !sameInode(directory(dir), checked)) fail();
+}
+// #347 C: what an ensure checks before it starts this child (ensureOwned), checked here again with
+// the lock as this child reads it — the client could not read it through a dead reclaimer's name.
+// Only a state the client itself refuses is refused, so a child its client vetted is not affected.
+function assertAcquirable(ctx, lock, descriptor) {
+  if (lock && lock.status !== 'alive' && lock.status !== 'dead') fail('STUDY_DESCRIPTOR_CORRUPT', `owner ${lock.status}`);
+  if (descriptor.state === 'corrupt') fail('STUDY_DESCRIPTOR_CORRUPT', 'descriptor corrupt');
+  if (descriptor.state !== 'valid') return;
+  if (descriptor.value.storeIdentity !== ctx.storeIdentity) fail('STUDY_DESCRIPTOR_CORRUPT', 'descriptor-store-mismatch');
+  if (lock) {
+    if (descriptor.value.pid !== lock.pid || descriptor.value.startTime !== lock.startTime) fail('STUDY_DESCRIPTOR_CORRUPT', 'owner-descriptor-mismatch');
+  } else if (descriptorIdentityStatus(descriptor.value, null) !== 'dead') fail('STUDY_DESCRIPTOR_CORRUPT', 'descriptor owner not dead');
+}
 // The reclaimHoldFile seam: bounded, so a test that died leaves no child waiting for ever.
 function holdUntilFile(file) {
   const end = Date.now() + 60_000;
@@ -1074,7 +1133,18 @@ async function runService(storeDir, config, expectedStore, expectedTraining) {
   try {
     ctx = context(storeDir);
     if (!ctx.trainingStat || ctx.storeIdentity !== expectedStore || trainingIdentity(ctx) !== expectedTraining) fail();
-    readDescriptor(ctx); readLock(ctx); // Validate private boundaries before owned-lock primitives.
+    // Validate private boundaries before owned-lock primitives.
+    const descriptor = readDescriptor(ctx);
+    let lock;
+    try { lock = readLock(ctx); }
+    catch (error) {
+      // #347 C: only this child clears a dead reclaimer's name, in the directory just validated, and
+      // reads the lock again — a pid file that still has a second name is refused as before.
+      if (error?.reclaimOrphaned !== true) throw error;
+      clearDeadReclaims(ctx);
+      lock = readLock(ctx);
+    }
+    assertAcquirable(ctx, lock, descriptor);
   } finally { setProofPhase(null); }
   // runService is child-only; do not change the caller umask or existing modes.
   process.umask(0o077);

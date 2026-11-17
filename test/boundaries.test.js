@@ -505,7 +505,9 @@ test('study service reaches engine only through named ownership primitives', () 
   // DELETE_PENDING_WAIT_MS: the owner's own bound on a pending lock name, which the client's read of one
   // is measured against (#306). isReclaimAsideName: a pure test of a lock-directory name, which tells a
   // reclaim's second name on a pid file from any other (#319 F4); it reads and changes nothing.
-  const allowed = new Set(['acquireOwnedLock', 'releaseOwnedLock', 'ownedIdentityStatus', 'ownedProcessStartTime', 'parseOwnedLockIdentity', 'DELETE_PENDING_WAIT_MS', 'isReclaimAsideName']);
+  // isDeadReclaimAsideName: whether such a name's reclaimer is proven gone; it only reads. sweepDeadReclaimAsides:
+  // the service child's removal of those names in a lock directory it validated (#347 C).
+  const allowed = new Set(['acquireOwnedLock', 'releaseOwnedLock', 'ownedIdentityStatus', 'ownedProcessStartTime', 'parseOwnedLockIdentity', 'DELETE_PENDING_WAIT_MS', 'isReclaimAsideName', 'isDeadReclaimAsideName', 'sweepDeadReclaimAsides']);
   assert.ok(edges.length > 0);
   for (const edge of edges) {
     assert.equal(edge.to, 'engine/state.js');

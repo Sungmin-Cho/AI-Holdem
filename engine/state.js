@@ -286,20 +286,24 @@ function listReclaimAsides(dir) {
 }
 
 // 회수자가 죽어 남긴 aside만 지운다(고유 이름 — 경로 재바인딩 불가). 살아 있는 회수자의
-// aside는 진행 중인 회수의 흔적이므로 건드리지 않는다.
-function sweepOrphanAsides(dir, asides = listReclaimAsides(dir)) {
+// aside는 진행 중인 회수의 흔적이므로 건드리지 않는다. `stillHere`가 false를 돌려주면 그 자리에서
+// 멈춘다(#347 C: 경계를 검증한 디렉터리가 더 이상 그 경로에 없다).
+function sweepOrphanAsides(dir, asides = listReclaimAsides(dir), stillHere = () => true) {
   let removed = 0;
   let remaining = 0;
+  const names = [];
   for (const aside of asides) {
     if (isProcessAlive(aside.reclaimerPid)) { remaining += 1; continue; }
+    if (!stillHere()) return { removed, remaining, names, stopped: true };
     try {
       fs.unlinkSync(path.join(dir, aside.name));
       removed += 1;
+      names.push(aside.name);
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
     }
   }
-  return { removed, remaining };
+  return { removed, remaining, names, stopped: false };
 }
 
 // 비재귀 rmdir. 비어 있지 않은 디렉터리(pid를 기록한 산 락 포함)는 절대 쓸리지 않는다.
@@ -388,6 +392,66 @@ export function removeDeletedLockDir(dir, expected, {
       throw failure;
     }
   }
+}
+
+// #347 C: a reclaimer that died between linking a dead owner's pid file and removing it leaves the
+// file with two names. The study service's readers refuse such a file (#319 F4) before they reach the
+// owned-lock primitives that would clear it, so its service child clears it first — through these two.
+// A name is dead only when its reclaimer is proven gone; anything else (alive, or unprovable) stays.
+export function isDeadReclaimAsideName(name) {
+  const match = RECLAIM_ASIDE.exec(String(name));
+  if (!match) return false;
+  try { return !isProcessAlive(Number(match[1])); } catch { return false; }
+}
+
+const lstatIdentity = (dir) => {
+  try {
+    const stat = fs.lstatSync(dir, { bigint: true });
+    return stat.isDirectory() ? { dev: stat.dev, ino: stat.ino } : { dev: -1n, ino: -1n };
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+};
+
+// Removes the dead reclaimers' names in `dir`, which the caller validated as `expected` (its dev and
+// ino, read without following a link). The path is checked to still name that directory before each
+// listing, before every removal and before the directory removal; once it does not, nothing more is
+// removed (`replaced`). On Windows a removed name another process holds stays delete-pending (#265 A)
+// and answers EPERM; whoever removes waits for it, bounded, as removeDeletedLockDir does. Without a pid
+// file — a reclaimer removed it and died before its own name went, before or during this sweep — the
+// directory is listed once more, its dead names removed, and the emptied directory removed too,
+// non-recursively and only while it is still `expected`, as reclaimAsideLeftovers does: an empty lock
+// directory is never a live lock (a lock is installed holding its pid) and would be refused for ever.
+// A name that appears after the second listing keeps the directory; the next caller takes it up.
+export function sweepDeadReclaimAsides(dir, expected, {
+  waitMs = DELETE_PENDING_WAIT_MS, platform = process.platform,
+  ops = {}, sleep = sleepSync, now = () => performance.now(),
+} = {}) {
+  const lstat = ops.lstat ?? ((file) => fs.lstatSync(file));
+  const identity = ops.identity ?? lstatIdentity;
+  const stillHere = () => sameInode(identity(dir), expected);
+  const codeOf = (fn) => { try { fn(); return null; } catch (error) { return error.code ?? 'UNKNOWN'; } };
+  const result = { replaced: false, removed: 0, remaining: 0, removedDir: false };
+  const pass = () => {
+    if (!stillHere()) return false;
+    const swept = sweepOrphanAsides(dir, listReclaimAsides(dir), stillHere);
+    result.removed += swept.removed;
+    result.remaining = swept.remaining;
+    if (platform === 'win32' && swept.names.length > 0) {
+      const deadline = now() + Math.max(0, Math.min(DELETE_PENDING_WAIT_MS, waitMs ?? DELETE_PENDING_WAIT_MS));
+      const pending = () => swept.names.some((name) => codeOf(() => lstat(path.join(dir, name))) === 'EPERM');
+      while (pending() && now() < deadline) sleep(DELETE_PENDING_RETRY_MS);
+    }
+    return !swept.stopped;
+  };
+  if (!pass()) return { ...result, replaced: true };
+  if (codeOf(() => lstat(path.join(dir, 'pid'))) !== 'ENOENT') return result;
+  if (!pass()) return { ...result, replaced: true };
+  if (result.remaining > 0) return result;
+  if (!stillHere()) return { ...result, replaced: true };
+  result.removedDir = removeDeletedLockDir(dir, expected, { waitMs, platform, sleep, now });
+  return result;
 }
 
 /**
