@@ -37,19 +37,18 @@ const readBounded = (root, name, maxBytes, observer) => bounded(lease => readEvi
 // waiting: `identity({dev, ino})` for every identity it sees of a regular file (the first lstat, the
 // handle's fstat, the lstat after reading), `anomaly()` when the file is replaced, gone or not a small
 // regular file, and `content(evidence)` with the validated content before the file is closed (a slow
-// or failing close cannot hide it). `missingIsAnomaly()`: the file was seen before, so its absence is
-// a change too.
+// or failing close cannot hide it). `missingIsAnomaly()`, asked when the file is found missing: the
+// file was seen before, so its absence is a change too.
 async function readEvidence(root, name, maxBytes, observer = {}, lease = { active: true }) {
   const file = path.join(root,name);
   const anomaly = (code, message) => { observer.anomaly?.(); return coded(code, message); };
   const unsafe = () => anomaly('HINT_EVIDENCE_UNSAFE', 'unsafe hint evidence');
   const changed = () => anomaly('HINT_EVIDENCE_CHANGED', 'changed hint evidence');
   const seen = stat => observer.identity?.({ dev:stat.dev, ino:stat.ino }, lease);
-  const missingIsAnomaly = observer.missingIsAnomaly?.() ?? false;
   // Exact identities (#308): a Number-valued ino past 2^53 (Windows) can match a replacement.
   let before;
   try { before = await lstatExactAsync(file); }
-  catch (error) { if (error?.code === 'ENOENT' && missingIsAnomaly) throw changed(); throw error; }
+  catch (error) { if (error?.code === 'ENOENT' && observer.missingIsAnomaly?.()) throw changed(); throw error; }
   if (!before.isFile() || before.isSymbolicLink() || before.size > maxBytes) throw unsafe();
   seen(before);
   let handle;
@@ -70,11 +69,12 @@ async function readEvidence(root, name, maxBytes, observer = {}, lease = { activ
       if (!result.bytesRead) break;
       bytesRead += result.bytesRead;
     }
+    if (bytesRead !== stat.size) throw changed(); // shorter or longer than its stat: known before the next stat
     let after;
     try { after = await lstatExactAsync(file); }
     catch (error) { if (error?.code === 'ENOENT') throw changed(); throw error; }
     if (after.isFile() && !after.isSymbolicLink()) seen(after);
-    if (bytesRead !== stat.size || after.dev !== stat.dev || after.ino !== stat.ino || after.size !== stat.size) throw changed();
+    if (after.dev !== stat.dev || after.ino !== stat.ino || after.size !== stat.size) throw changed();
     const evidence = { raw:bytes.subarray(0,bytesRead).toString('utf8'), dev:stat.dev, ino:stat.ino };
     observer.content?.(evidence, lease);
     return evidence;
