@@ -10,12 +10,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { createOwnedTempDir, registerOwnedProcess } from './helpers/owned-fixtures.mjs';
 import { studyBudget } from './helpers/platform.js';
 import { descriptorPath, lockPath, launch, service, until } from './helpers/study-service-fixtures.mjs';
 import { acquireOwnedLock, releaseOwnedLock, readOwnedLock, removeDeletedLockDir, withNamedLock, DELETE_PENDING_WAIT_MS } from '../engine/state.js';
 import { platformTimeout, platformNow, withPlatformDeadline } from '../shared/platform-files.js';
+import { plainIdOf } from '../shared/exact-stat.js';
 import { hasLiveLockHolder, LOCK_NAME } from '../tools/coach-control.js';
 
 const [UV_MAJOR, UV_MINOR] = process.versions.uv.split('.').map(Number);
@@ -1231,6 +1233,452 @@ test('#319 F4: only a refusal marked as a pinned reclaim is read again on any pl
   for (const reclaimHoldFile of ['relative/path', 5, '']) {
     await assert.rejects(ensureStudyService(createOwnedTempDir('holdem-reclaim-hold'), { testOptions: { reclaimHoldFile } }), TypeError);
   }
+});
+
+// #347 C: a reclaimer that dies between pinning a dead owner's pid file (its hard link in the lock
+// directory) and removing the file leaves the file with two names for ever. Readers refuse such a
+// file, so before this change no study service could start on that store again. Now a client that
+// finds only dead reclaimers' names spawns the service child, the child — and only the child —
+// removes those names after validating the lock directory, and reads the lock again; a pid file
+// with any other second name is still refused, and a live reclaimer's name is never touched.
+
+// The real engine reclaim, in its own process, killed at its afterLink hook: the lock keeps the dead
+// owner's pid file and a reclaim name whose reclaimer is gone. Returns the dead reclaimer's pid.
+async function killedReclaim(dir, name) {
+  const href = new URL('../engine/state.js', import.meta.url).href;
+  const child = registerOwnedProcess(spawn(process.execPath, ['--input-type=module', '-e', `
+import fs from 'node:fs';
+import { acquireOwnedLock } from ${JSON.stringify(href)};
+acquireOwnedLock(process.argv[1], process.argv[2], { hooks: { afterLink() {
+  fs.writeSync(1, 'linked\\n');
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 120_000);
+} } });`, dir, name], { stdio: ['ignore', 'pipe', 'pipe'] }), 'killed reclaimer');
+  let out = '', err = '';
+  child.stdout.on('data', (chunk) => { out += chunk; });
+  child.stderr.on('data', (chunk) => { err += chunk; });
+  const closed = new Promise((resolve) => child.on('close', resolve));
+  await new Promise((resolve, reject) => {
+    child.stdout.on('data', () => { if (out.includes('linked\n')) resolve(); });
+    closed.then((code) => reject(new Error(`reclaimer exited ${code} before it linked: ${err}`)));
+  });
+  child.kill('SIGKILL');
+  await closed;
+  const lock = path.join(dir, name);
+  const names = fs.readdirSync(lock).sort();
+  assert.deepEqual(names, ['pid', names[1]], `the lock keeps the pid file and one reclaim name: ${names}`);
+  assert.match(names[1], new RegExp(`^pid\\.reclaim\\.${child.pid}\\.[0-9a-f]{8}$`));
+  assert.equal(fs.lstatSync(path.join(lock, 'pid')).nlink, 2);
+  assert.equal(failureCode(() => process.kill(child.pid, 0)), 'ESRCH', 'the reclaimer is gone');
+  return child.pid;
+}
+
+// A pid no process has: one this test started and saw exit.
+async function deadPid() {
+  const child = registerOwnedProcess(spawn(process.execPath, ['-e', ''], { stdio: 'ignore' }), 'dead pid');
+  await new Promise((resolve) => child.on('close', resolve));
+  assert.equal(failureCode(() => process.kill(child.pid, 0)), 'ESRCH');
+  return child.pid;
+}
+
+// Removals this (client) process makes inside `dir`.
+function removalsIn(t, dir) {
+  const removals = [];
+  for (const method of ['unlinkSync', 'rmdirSync', 'rmSync']) {
+    const original = fs[method].bind(fs);
+    t.mock.method(fs, method, (target, ...rest) => {
+      if (path.resolve(String(target)).startsWith(path.resolve(dir))) removals.push(`${method} ${path.basename(String(target))}`);
+      return original(target, ...rest);
+    });
+  }
+  return removals;
+}
+
+test('#347 C: a lock whose reclaimer died after pinning the dead owner\'s pid file gets a new service; the client removes nothing', { timeout: STOP_BUDGET }, async (t) => {
+  const { first, api } = await stoppedWithDeadLock(t);
+  const dir = lockPath(first.storeDir);
+  await killedReclaim(path.dirname(dir), 'study.lock.d');
+  const removals = removalsIn(t, dir);
+  const children = [];
+  const handle = await api.ensureStudyService(first.storeDir, {
+    onChild(child) { child.ref(); children.push(registerOwnedProcess(child, 'study service')); },
+  });
+  t.after(() => api.stopStudyService(first.storeDir, { expectedInstanceId: handle.instanceId }).catch(() => {}));
+  assert.deepEqual(removals, [], 'the client removed nothing in the lock directory');
+  assert.equal(children.length, 1, 'one service child');
+  assert.deepEqual(fs.readdirSync(dir), ['pid'], 'the dead reclaimer\'s name is gone');
+  assert.equal(fs.lstatSync(path.join(dir, 'pid')).nlink, 1);
+  assert.notEqual(handle.instanceId, first.handle.instanceId);
+  assert.equal((await api.inspectStudyService(first.storeDir)).instanceId, handle.instanceId);
+});
+
+test('#347 C: a lock left with no pid file and only a dead reclaimer\'s name gets a new service', { timeout: STOP_BUDGET }, async (t) => {
+  const { first, api, pidFile } = await stoppedWithDeadLock(t);
+  const dir = lockPath(first.storeDir);
+  // A reclaimer removed the dead owner's pid file and died before its own name went (the engine has no
+  // hook between those two steps, so the name is made here).
+  fs.linkSync(pidFile, path.join(dir, `pid.reclaim.${await deadPid()}.0badc0de`));
+  fs.unlinkSync(pidFile);
+  const removals = removalsIn(t, dir);
+  const children = [];
+  const handle = await api.ensureStudyService(first.storeDir, {
+    onChild(child) { child.ref(); children.push(registerOwnedProcess(child, 'study service')); },
+  });
+  t.after(() => api.stopStudyService(first.storeDir, { expectedInstanceId: handle.instanceId }).catch(() => {}));
+  assert.deepEqual(removals, [], 'the client removed nothing in the lock directory');
+  assert.equal(children.length, 1);
+  assert.deepEqual(fs.readdirSync(dir), ['pid']);
+  assert.equal((await api.inspectStudyService(first.storeDir)).instanceId, handle.instanceId);
+});
+
+test('#347 C: a live reclaimer\'s name is waited for and refused as before; no service child starts', { timeout: STOP_BUDGET }, async (t) => {
+  const { first, api, pidFile } = await stoppedWithDeadLock(t);
+  const aside = path.join(lockPath(first.storeDir), `pid.reclaim.${process.pid}.abcd1234`);
+  fs.linkSync(pidFile, aside);
+  t.after(() => fs.rmSync(aside, { force: true }));
+  const { seen } = lockListings(t);
+  const children = [];
+  const error = await api.ensureStudyService(first.storeDir, {
+    onChild(child) { children.push(registerOwnedProcess(child, 'study service')); },
+  }).then(() => null, (failure) => failure);
+  assert.match(String(error?.message), /^STUDY_DESCRIPTOR_CORRUPT read:before:nlink$/, String(error?.stack ?? error));
+  assert.ok(seen.length >= 2, `read again before refusing: ${seen.length}`);
+  assert.equal(children.length, 0, 'no service child');
+  assert.equal(fs.lstatSync(pidFile).nlink, 2);
+  assert.equal(fs.existsSync(aside), true, 'the live reclaimer\'s name stays');
+});
+
+test('#347 C: inspect, stop and attach refuse a dead reclaimer\'s name at once and remove nothing', { timeout: STOP_BUDGET }, async (t) => {
+  const { first, api } = await stoppedWithDeadLock(t);
+  const dir = lockPath(first.storeDir);
+  await killedReclaim(path.dirname(dir), 'study.lock.d');
+  const names = fs.readdirSync(dir).sort();
+  const removals = removalsIn(t, dir);
+  const { seen } = lockListings(t);
+  for (const [label, call] of [
+    ['inspect', () => api.inspectStudyService(first.storeDir)],
+    ['stop', () => api.stopStudyService(first.storeDir, { expectedInstanceId: randomUUID() })],
+    ['attach', () => api.ensureStudyService(first.storeDir, { existingOnly: true, parentIdentity: { pid: process.pid, startTime: 'utc-v1:attach' } })],
+  ]) {
+    seen.length = 0;
+    const error = await call().then(() => null, (failure) => failure);
+    assert.match(String(error?.message), /^STUDY_DESCRIPTOR_CORRUPT read:before:nlink$/, `${label}: ${error?.stack ?? error}`);
+    assert.equal(seen.length, 1, `${label}: no read again for a reclaimer that is gone`);
+    assert.deepEqual(fs.readdirSync(dir).sort(), names, `${label} changed nothing`);
+  }
+  assert.deepEqual(removals, []);
+});
+
+// The service child started the way an ensure starts it (`--serve <root> <config> <store> <training>`),
+// with the two identities computed the way the client computes them (tools/study-service.js
+// `context`, `trainingIdentity`). Returns its exit code and stderr.
+function serveChild(t, storeDir) {
+  const root = fs.realpathSync(storeDir);
+  const training = path.join(root, '.training');
+  const identity = (file, stat) => createHash('sha256').update(JSON.stringify([file, plainIdOf(stat.dev), plainIdOf(stat.ino)])).digest('hex');
+  const store = identity(root, fs.lstatSync(path.resolve(storeDir), { bigint: true }));
+  const trainingId = identity(training, fs.lstatSync(training, { bigint: true }));
+  const self = new URL('../tools/study-service.js', import.meta.url);
+  const child = registerOwnedProcess(spawn(process.execPath, [fileURLToPath(self), '--serve', root,
+    JSON.stringify({ idleTimeoutMs: 600_000, checkpointMs: 1000 }), store, trainingId], { stdio: ['ignore', 'ignore', 'pipe'] }), 'study service');
+  let err = '';
+  child.stderr.on('data', (chunk) => { err += chunk; });
+  const closed = new Promise((resolve) => child.on('close', (code) => resolve({ code, err })));
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM'); });
+  return { child, closed };
+}
+
+// A process that holds `name` under `dir` alive until the test ends.
+async function liveOwner(t, dir, name) {
+  const href = new URL('../engine/state.js', import.meta.url).href;
+  const child = registerOwnedProcess(spawn(process.execPath, ['--input-type=module', '-e', `
+import fs from 'node:fs';
+import { acquireOwnedLock } from ${JSON.stringify(href)};
+acquireOwnedLock(process.argv[1], process.argv[2]);
+fs.writeSync(1, 'held\\n');
+setInterval(() => {}, 60_000);`, dir, name], { stdio: ['ignore', 'pipe', 'pipe'] }), 'live owner');
+  t.after(() => child.kill('SIGKILL'));
+  let out = '', err = '';
+  child.stdout.on('data', (chunk) => { out += chunk; });
+  child.stderr.on('data', (chunk) => { err += chunk; });
+  await new Promise((resolve, reject) => {
+    child.stdout.on('data', () => { if (out.includes('held\n')) resolve(); });
+    child.on('close', (code) => reject(new Error(`owner exited ${code} before holding: ${err}`)));
+  });
+  return child;
+}
+
+test('#347 C: the service child clears only dead reclaimers\' names and still refuses what it refused before', { timeout: 4 * STOP_BUDGET }, async (t) => {
+  // The identities serveChild computes are right: on a store whose owner died the child serves.
+  await t.test('control: the child serves a store whose owner died', async (tt) => {
+    const { first, api } = await stoppedWithDeadLock(tt);
+    const { closed } = serveChild(tt, first.storeDir);
+    await until(() => readOwnedLock(path.join(first.storeDir, '.training'), 'study.lock.d')?.status === 'alive'
+      && fs.existsSync(descriptorPath(first.storeDir)));
+    const running = await api.inspectStudyService(first.storeDir);
+    assert.equal(running.status, 'running');
+    await api.stopStudyService(first.storeDir, { expectedInstanceId: running.instanceId });
+    await closed;
+  });
+
+  await t.test('a descriptor naming another dead process is not overwritten', async (tt) => {
+    const first = await launch(tt);
+    const training = path.join(first.storeDir, '.training');
+    const dir = lockPath(first.storeDir);
+    const bytes = fs.readFileSync(descriptorPath(first.storeDir));
+    first.children[0].kill('SIGKILL');
+    await until(() => failureCode(() => process.kill(first.handle.pid, 0)) === 'ESRCH');
+    // The lock now names another dead process; the descriptor still names the service killed above.
+    fs.rmSync(dir, { recursive: true, force: true });
+    await deadOwnedLock(training, 'study.lock.d');
+    await killedReclaim(training, 'study.lock.d');
+    const { code, err } = await serveChild(tt, first.storeDir).closed;
+    assert.equal(code, 1, err);
+    assert.match(err, /STUDY_DESCRIPTOR_CORRUPT owner-descriptor-mismatch/, err);
+    assert.deepEqual(fs.readdirSync(dir), ['pid'], 'the dead reclaimer\'s name was cleared first');
+    assert.deepEqual(fs.readFileSync(descriptorPath(first.storeDir)), bytes, 'the descriptor is untouched');
+  });
+
+  await t.test('a pid file with a second name outside the lock stays refused after the sweep', async (tt) => {
+    const { first, pidFile } = await stoppedWithDeadLock(tt);
+    const dir = lockPath(first.storeDir);
+    await killedReclaim(path.dirname(dir), 'study.lock.d');
+    const foreign = path.join(first.storeDir, 'pid-second-name');
+    fs.linkSync(pidFile, foreign);
+    tt.after(() => fs.rmSync(foreign, { force: true }));
+    const { code, err } = await serveChild(tt, first.storeDir).closed;
+    assert.equal(code, 1, err);
+    assert.match(err, /STUDY_DESCRIPTOR_CORRUPT read:before:nlink/, err);
+    assert.deepEqual(fs.readdirSync(dir), ['pid'], 'the dead reclaimer\'s name was cleared');
+    assert.equal(fs.lstatSync(pidFile).nlink, 2, 'the foreign name is left, and refused');
+  });
+
+  await t.test('a live owner keeps its lock; only the dead reclaimer\'s name goes', async (tt) => {
+    const { first } = await stoppedWithDeadLock(tt);
+    const training = path.join(first.storeDir, '.training');
+    const dir = lockPath(first.storeDir);
+    fs.rmSync(dir, { recursive: true, force: true });
+    await liveOwner(tt, training, 'study.lock.d');
+    const gone = `pid.reclaim.${await deadPid()}.0badc0de`;
+    fs.linkSync(path.join(dir, 'pid'), path.join(dir, gone));
+    const before = fs.readFileSync(path.join(dir, 'pid'));
+    const { code, err } = await serveChild(tt, first.storeDir).closed;
+    assert.equal(code, 1, err);
+    assert.match(err, /STUDY_CHILD_FAILED LOCKED/, err);
+    assert.deepEqual(fs.readdirSync(dir), ['pid']);
+    assert.deepEqual(fs.readFileSync(path.join(dir, 'pid')), before, 'the live owner\'s record is untouched');
+    assert.equal(readOwnedLock(training, 'study.lock.d')?.status, 'alive');
+  });
+
+  await t.test('a record the client could not judge (legacy, two lines) is refused after the sweep', async (tt) => {
+    const { first, pidFile } = await stoppedWithDeadLock(tt);
+    const dir = lockPath(first.storeDir);
+    fs.writeFileSync(pidFile, `${await deadPid()}\nlegacy-start`);
+    fs.linkSync(pidFile, path.join(dir, `pid.reclaim.${await deadPid()}.0badc0de`));
+    const { code, err } = await serveChild(tt, first.storeDir).closed;
+    assert.equal(code, 1, err);
+    assert.match(err, /STUDY_DESCRIPTOR_CORRUPT owner unknown/, err);
+    assert.deepEqual(fs.readdirSync(dir), ['pid']);
+  });
+
+  await t.test('without a dead reclaimer\'s name the child refuses what its client refuses', async (tt) => {
+    for (const [label, arrange, refusal] of [
+      ['a corrupt descriptor', (store) => fs.writeFileSync(descriptorPath(store), '{', { mode: 0o600 }), /STUDY_DESCRIPTOR_CORRUPT descriptor corrupt/],
+      ['a lock record that cannot be judged', (store) => fs.writeFileSync(path.join(lockPath(store), 'pid'), 'not a record'), /STUDY_DESCRIPTOR_CORRUPT owner unknown/],
+    ]) {
+      const { first } = await stoppedWithDeadLock(tt);
+      arrange(first.storeDir);
+      const { code, err } = await serveChild(tt, first.storeDir).closed;
+      assert.equal(code, 1, `${label}: ${err}`);
+      assert.match(err, refusal, label);
+    }
+    // No lock record, and a valid descriptor of this store naming a live process (this test's).
+    const live = await launch(tt);
+    const file = descriptorPath(live.storeDir);
+    const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+    live.children[0].kill('SIGKILL');
+    await until(() => failureCode(() => process.kill(live.handle.pid, 0)) === 'ESRCH');
+    fs.rmSync(lockPath(live.storeDir), { recursive: true, force: true });
+    const training = path.join(live.storeDir, '.training');
+    const probe = acquireOwnedLock(training, 'identity-probe.lock.d');
+    fs.writeFileSync(file, JSON.stringify({ ...value, pid: probe.pid, startTime: probe.startTime }));
+    releaseOwnedLock(probe);
+    const { code, err } = await serveChild(tt, live.storeDir).closed;
+    assert.equal(code, 1, err);
+    assert.match(err, /STUDY_DESCRIPTOR_CORRUPT descriptor owner not dead/, err);
+  });
+
+  await t.test('a descriptor of another store is refused after the sweep', async (tt) => {
+    const first = await launch(tt);
+    const dir = lockPath(first.storeDir);
+    first.children[0].kill('SIGKILL');
+    await until(() => failureCode(() => process.kill(first.handle.pid, 0)) === 'ESRCH');
+    // The dead service's own record and descriptor, the descriptor rewritten in place for another store.
+    const file = descriptorPath(first.storeDir);
+    fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), storeIdentity: 'f'.repeat(64) }));
+    const bytes = fs.readFileSync(file);
+    fs.linkSync(path.join(dir, 'pid'), path.join(dir, `pid.reclaim.${await deadPid()}.0badc0de`));
+    const { code, err } = await serveChild(tt, first.storeDir).closed;
+    assert.equal(code, 1, err);
+    assert.match(err, /STUDY_DESCRIPTOR_CORRUPT descriptor-store-mismatch/, err);
+    assert.deepEqual(fs.readdirSync(dir), ['pid']);
+    assert.deepEqual(fs.readFileSync(file), bytes);
+  });
+});
+
+test('#347 C: an ensure whose service child ends before it clears a dead reclaimer\'s name fails at once', { timeout: STOP_BUDGET }, async (t) => {
+  const { first, api } = await stoppedWithDeadLock(t);
+  const dir = lockPath(first.storeDir);
+  await killedReclaim(path.dirname(dir), 'study.lock.d');
+  const names = fs.readdirSync(dir).sort();
+  const { COLD_START_MS } = await service();
+  const children = [];
+  const started = performance.now();
+  const error = await api.ensureStudyService(first.storeDir, {
+    onChild(child) { children.push(registerOwnedProcess(child, 'study service')); child.kill('SIGKILL'); },
+  }).then(() => null, (failure) => failure);
+  const elapsed = performance.now() - started;
+  assert.equal(children.length, 1, 'the ensure started a child for the dead reclaimer\'s name');
+  assert.match(String(error?.message), /^STUDY_DESCRIPTOR_CORRUPT read:\w+:nlink$/, String(error?.stack ?? error));
+  assert.equal(error.reclaimOrphaned, true);
+  assert.ok(elapsed < COLD_START_MS / 2, `failed after ${Math.round(elapsed)} ms, not at the cold-start deadline`);
+  assert.deepEqual(fs.readdirSync(dir).sort(), names, 'nothing was cleared');
+});
+
+test('#347 C: a dead reclaimer\'s name another process holds open is waited out before the service starts', { timeout: STOP_BUDGET }, async (t) => {
+  const { first, api } = await stoppedWithDeadLock(t);
+  const dir = lockPath(first.storeDir);
+  await killedReclaim(path.dirname(dir), 'study.lock.d');
+  const aside = path.join(dir, fs.readdirSync(dir).find((name) => name !== 'pid'));
+  // The holder closes 500 ms after it sees the name deleted yet still there (EPERM), at once otherwise.
+  const holder = holdOpen(aside, { lingerMs: 0, pendingLingerMs: 500 });
+  await holder.held;
+  const handle = await api.ensureStudyService(first.storeDir, {
+    onChild(child) { child.ref(); registerOwnedProcess(child, 'study service'); },
+  });
+  t.after(() => api.stopStudyService(first.storeDir, { expectedInstanceId: handle.instanceId }).catch(() => {}));
+  const { code, out, err } = await holder.closed;
+  assert.equal(code, 0, err);
+  if (DELETE_PENDING) assert.match(out, /seen EPERM/, 'the name stayed behind its holder');
+  assert.deepEqual(fs.readdirSync(dir), ['pid']);
+  assert.equal((await api.inspectStudyService(first.storeDir)).instanceId, handle.instanceId);
+});
+
+// engine/state.js, the two narrow exports #347 C adds for the study service.
+function reclaimDir(names, { pid = true } = {}) {
+  const dir = path.join(createOwnedTempDir('holdem-dead-reclaims'), 'held.lock.d');
+  fs.mkdirSync(dir);
+  const file = path.join(dir, pid ? 'pid' : 'seed');
+  fs.writeFileSync(file, '1');
+  for (const name of names) fs.linkSync(file, path.join(dir, name));
+  if (!pid) fs.unlinkSync(file);
+  return dir;
+}
+const dirIdentity = (dir) => { const stat = fs.lstatSync(dir, { bigint: true }); return { dev: stat.dev, ino: stat.ino }; };
+
+test('#347 C: the engine sweep removes only dead reclaimers\' names, nothing in a replaced directory, and a directory it emptied', async (t) => {
+  const engine = await import('../engine/state.js');
+  const dead = await deadPid();
+  const live = `pid.reclaim.${process.pid}.0000beef`, gone = `pid.reclaim.${dead}.0badc0de`;
+  assert.equal(engine.isDeadReclaimAsideName(gone), true);
+  assert.equal(engine.isDeadReclaimAsideName(live), false);
+  for (const name of ['pid', 'pid.other', `pid.reclaim.${dead}.xyz`]) assert.equal(engine.isDeadReclaimAsideName(name), false, name);
+
+  const mixed = reclaimDir([live, gone]);
+  assert.deepEqual(engine.sweepDeadReclaimAsides(mixed, dirIdentity(mixed)), { replaced: false, removed: 1, remaining: 1, removedDir: false });
+  assert.deepEqual(fs.readdirSync(mixed).sort(), ['pid', live].sort());
+
+  // A reclaimer removed the pid file and died before its own name went: the sweep leaves nothing
+  // that would be refused for ever (an empty lock directory), as the engine's own leftovers path does.
+  const emptied = reclaimDir([gone], { pid: false });
+  assert.deepEqual(engine.sweepDeadReclaimAsides(emptied, dirIdentity(emptied)), { replaced: false, removed: 1, remaining: 0, removedDir: true });
+  assert.equal(absent(emptied), true);
+
+  // The path names another directory than the one validated: nothing is removed anywhere.
+  const validated = reclaimDir([gone]);
+  const expected = dirIdentity(validated);
+  fs.renameSync(validated, `${validated}.moved`);
+  const other = reclaimDir([gone]);
+  fs.symlinkSync(other, validated, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.deepEqual(engine.sweepDeadReclaimAsides(validated, expected), { replaced: true, removed: 0, remaining: 0, removedDir: false });
+  assert.deepEqual(fs.readdirSync(other).sort(), [gone, 'pid'].sort());
+  assert.deepEqual(fs.readdirSync(`${validated}.moved`).sort(), [gone, 'pid'].sort());
+});
+
+test('#347 C: the engine sweep stops where the directory stops being the one it was given', async () => {
+  const engine = await import('../engine/state.js');
+  const one = `pid.reclaim.${await deadPid()}.0badc0de`, two = `pid.reclaim.${await deadPid()}.0badc0df`;
+  // The identity is asked before each listing, before each removal and before the directory removal.
+  for (const [moment, stopAt, pid, removed] of [
+    ['before the listing', 1, true, 0], ['between the removals', 3, true, 1],
+    ['before the second listing', 4, false, 2], ['before the directory removal', 5, false, 2],
+  ]) {
+    const dir = reclaimDir([one, two], { pid });
+    const expected = dirIdentity(dir);
+    let asked = 0;
+    const identity = (target) => (++asked >= stopAt ? { dev: -1n, ino: -1n } : dirIdentity(target));
+    const result = engine.sweepDeadReclaimAsides(dir, expected, { ops: { identity } });
+    assert.deepEqual(result, { replaced: true, removed, remaining: 0, removedDir: false }, moment);
+    assert.equal(fs.existsSync(dir), true, `${moment}: the directory stays`);
+    assert.equal(fs.readdirSync(dir).filter((name) => name.startsWith('pid.reclaim.')).length, 2 - removed, moment);
+  }
+});
+
+test('#347 C: a lock installed while the engine sweep runs keeps its directory and pid file', async () => {
+  const engine = await import('../engine/state.js');
+  const gone = `pid.reclaim.${await deadPid()}.0badc0de`;
+  const dir = reclaimDir([gone], { pid: false });
+  const expected = dirIdentity(dir);
+  let asked = 0;
+  // Right after the listing, another owner's lock takes the path: the old directory moves away and a
+  // new one is installed holding its pid.
+  const identity = (target) => {
+    if (++asked === 2) {
+      fs.renameSync(dir, `${dir}.old`);
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'pid'), 'new owner');
+    }
+    return dirIdentity(target);
+  };
+  assert.deepEqual(engine.sweepDeadReclaimAsides(dir, expected, { ops: { identity } }), { replaced: true, removed: 0, remaining: 0, removedDir: false });
+  assert.deepEqual(fs.readdirSync(dir), ['pid']);
+  assert.equal(fs.readFileSync(path.join(dir, 'pid'), 'utf8'), 'new owner');
+  assert.deepEqual(fs.readdirSync(`${dir}.old`), [gone]);
+});
+
+test('#347 C: without a pid file the engine sweep lists again and removes a dead name that appeared meanwhile', async () => {
+  const engine = await import('../engine/state.js');
+  const first = `pid.reclaim.${await deadPid()}.0badc0de`, later = `pid.reclaim.${await deadPid()}.0badc0df`;
+  const dir = reclaimDir([first], { pid: false });
+  let asked = 0;
+  // Another reclaimer leaves its name after the first listing and dies.
+  const identity = (target) => {
+    if (++asked === 2) fs.writeFileSync(path.join(dir, later), '');
+    return dirIdentity(target);
+  };
+  assert.deepEqual(engine.sweepDeadReclaimAsides(dir, dirIdentity(dir), { ops: { identity } }), { replaced: false, removed: 2, remaining: 0, removedDir: true });
+  assert.equal(absent(dir), true);
+});
+
+test('#347 C: on Windows the engine sweep waits out a removed name still pending, within the bound; elsewhere it does not wait', async () => {
+  const engine = await import('../engine/state.js');
+  const gone = `pid.reclaim.${await deadPid()}.0badc0de`;
+  const run = (platform, pendingReads) => {
+    const dir = reclaimDir([gone]);
+    let clock = 0, sleeps = 0, pending = pendingReads;
+    const ops = { lstat: (file) => {
+      if (path.basename(file) === gone && pending > 0) { pending -= 1; throw Object.assign(new Error('pending'), { code: 'EPERM' }); }
+      return fs.lstatSync(file);
+    } };
+    const result = engine.sweepDeadReclaimAsides(dir, dirIdentity(dir), { platform, ops, sleep: (ms) => { sleeps += 1; clock += ms; }, now: () => clock });
+    return { result, sleeps, clock, dir };
+  };
+  const windows = run('win32', 2);
+  assert.equal(windows.result.removed, 1);
+  assert.equal(windows.sleeps, 2, 'waited while the name answered EPERM');
+  assert.deepEqual(fs.readdirSync(windows.dir), ['pid']);
+  assert.equal(run('linux', 2).sleeps, 0, 'no wait elsewhere');
+  const forever = run('win32', Infinity);
+  assert.ok(forever.clock >= DELETE_PENDING_WAIT_MS && forever.clock <= DELETE_PENDING_WAIT_MS + 25, `bounded: ${forever.clock}`);
 });
 
 test('#306: a batch proof that fails leaves no proved set for the next transaction of its scope', async () => {
