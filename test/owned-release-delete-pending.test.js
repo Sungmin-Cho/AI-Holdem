@@ -1608,6 +1608,27 @@ test('#347 C: an ensure whose service child ends before it clears a dead reclaim
   }
 });
 
+test('#347 C: a dead reclaimer\'s name another process holds open is waited out before the service starts', { timeout: STOP_BUDGET }, async (t) => {
+  const { first, api } = await stoppedWithDeadLock(t);
+  const dir = lockPath(first.storeDir);
+  await killedReclaim(path.dirname(dir), 'study.lock.d');
+  const aside = path.join(dir, fs.readdirSync(dir).find((name) => name !== 'pid'));
+  // The holder closes 500 ms after it sees the name deleted yet still there (EPERM), at once otherwise.
+  const holder = holdOpen(aside, { lingerMs: 0, pendingLingerMs: 500 });
+  await holder.held;
+  const handle = await api.ensureStudyService(first.storeDir, {
+    onChild(child) { child.ref(); registerOwnedProcess(child, 'study service'); },
+  });
+  t.after(() => api.stopStudyService(first.storeDir, { expectedInstanceId: handle.instanceId }).catch(() => {}));
+  const { code, out, err } = await holder.closed;
+  assert.equal(code, 0, err);
+  if (DELETE_PENDING) assert.match(out, /seen EPERM/, 'the name stayed behind its holder');
+  assert.equal(absent(aside), true);
+  assert.deepEqual(fs.readdirSync(dir), ['pid']);
+  assert.equal(fs.lstatSync(path.join(dir, 'pid')).nlink, 1);
+  assert.equal((await api.inspectStudyService(first.storeDir)).instanceId, handle.instanceId);
+});
+
 // engine/state.js, the two narrow exports #347 C adds for the study service.
 function reclaimDir(names, { pid = true } = {}) {
   const dir = path.join(createOwnedTempDir('holdem-dead-reclaims'), 'held.lock.d');

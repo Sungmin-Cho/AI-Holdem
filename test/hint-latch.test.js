@@ -798,22 +798,39 @@ test('#347 C: the first descriptor content the relay reads binds later tries eve
   const prepared = await f.prepare();
   assert.equal(prepared.hint?.status, 'supported');
   const context = {};
-  // The first try's descriptor read finishes only after its deadline (its stat after reading is slow).
-  const lstat = fs.promises.lstat;
-  let seen = 0, late = false;
-  const mock = t.mock.method(fs.promises, 'lstat', function (file, ...rest) {
-    if (path.basename(String(file)) === 'reference-source.json' && ++seen === 2) {
-      return new Promise((resolve) => setTimeout(resolve, HOLD_MS)).then(() => { late = true; return lstat.call(this, file, ...rest); });
-    }
-    return lstat.call(this, file, ...rest);
+  // The first try's descriptor read gets its bytes only after its deadline (the read itself is slow).
+  const open = fs.promises.open;
+  let delayed = 0, late = false;
+  const mock = t.mock.method(fs.promises, 'open', async function (name, ...rest) {
+    const handle = await open.call(this, name, ...rest);
+    if (path.basename(String(name)) !== 'reference-source.json' || delayed > 0) return handle;
+    delayed += 1;
+    // Only the first read call is slow; the read loop's later calls answer at once.
+    const read = handle.read.bind(handle);
+    let first = true;
+    handle.read = (...args) => {
+      if (!first) return read(...args);
+      first = false;
+      return new Promise((resolve) => setTimeout(resolve, HOLD_MS)).then(() => { late = true; return read(...args); });
+    };
+    return handle;
   });
   assert.deepEqual(await verifyHintPublication({ sessionDir: f.dir, token: f.token, context, initialize: true, now: () => clock }), { ready: false });
-  await new Promise((resolve) => setTimeout(resolve, HOLD_MS));
-  assert.equal(late, true, 'the read finished after its deadline');
+  assert.equal(late, false, 'the try ended at its deadline, before its bytes came');
+  // The abandoned read finishes on its own: wait until it has handed over its content.
+  for (const until = performance.now() + 10 * HOLD_MS; context.pinnedRaw === undefined && performance.now() < until;) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(late, true);
+  assert.notEqual(context.pinnedRaw, undefined, 'the late read pinned its content');
+  await new Promise((resolve) => setTimeout(resolve, 50));
   mock.mock.restore();
-  // The same file, other bytes (the same source, laid out differently): only the late content tells.
+  // The same file, the same length, one byte different: only the late content tells.
   const file = path.join(f.dir, 'reference-source.json');
-  fs.writeFileSync(file, JSON.stringify(JSON.parse(fs.readFileSync(file, 'utf8')), null, 1));
+  const other = fs.readFileSync(file);
+  const at = other.indexOf(Buffer.from('"schemaVersion"'));
+  other[at + 1] = other[at + 1] === 0x73 ? 0x53 : 0x73;
+  fs.writeFileSync(file, other);
   clock += RETRY_INTERVAL_MS;
   assert.deepEqual(await verifyHintPublication({ sessionDir: f.dir, token: f.token, context, hint: prepared.hint, view: prepared.view, retry: true }),
     { hint: null, disposition: 'unverifiable' });
@@ -857,7 +874,7 @@ test('#347 C: a late anomaly that lands while a retry runs keeps that retry from
   // not a regular file (the session directory's own stat). The retry's second capture is held until
   // that answer has come.
   const lstat = fs.promises.lstat;
-  let seen = 0, lateAnswer;
+  let seen = 0, retrySeen = 0, retrying = false, lateAnswer;
   const answered = new Promise((resolve) => { lateAnswer = resolve; });
   t.mock.method(fs.promises, 'lstat', function (file, ...rest) {
     if (path.basename(String(file)) === 'reference-source.json') {
@@ -867,16 +884,18 @@ test('#347 C: a late anomaly that lands while a retry runs keeps that retry from
           .then(() => lstat.call(this, path.dirname(String(file)), ...rest))
           .finally(() => setTimeout(lateAnswer, 10));
       }
-      if (seen === 4) return answered.then(() => lstat.call(this, file, ...rest));
+      // The retry's stats of the descriptor: its first capture (two), then its second capture's first.
+      if (retrying && ++retrySeen === 3) return answered.then(() => lstat.call(this, file, ...rest));
     }
     return lstat.call(this, file, ...rest);
   });
   assert.deepEqual(await verifyHintPublication({ sessionDir: f.dir, token: f.token, context, initialize: true, now: () => clock }), { ready: false });
   clock += RETRY_INTERVAL_MS;
+  retrying = true;
   const started = performance.now();
   assert.deepEqual(await verifyHintPublication({ sessionDir: f.dir, token: f.token, context, hint: prepared.hint, view: prepared.view, retry: true }),
     { hint: null, disposition: 'unverifiable' });
-  assert.ok(seen >= 4, `the retry reached its second capture: ${seen}`);
+  assert.ok(retrySeen >= 3, `the retry reached its second capture: ${retrySeen}`);
   assert.ok(performance.now() - started < 1000, 'the held capture finished inside its bound');
   assert.equal(context.ready, false);
 });
@@ -964,6 +983,7 @@ test('#347 C: the content pin alone: another valid descriptor written into the s
   const after = fs.lstatSync(file, { bigint: true });
   assert.equal(after.ino, identity.ino);
   assert.equal(after.dev, identity.dev);
+  assert.equal(after.size, identity.size, 'the same length, so the identity pin (dev, ino, size) cannot tell');
   clock += RETRY_INTERVAL_MS;
   assert.deepEqual(await verifyHintPublication({ sessionDir: f.dir, token: f.token, context, hint: prepared.hint, view: prepared.view, retry: true }),
     { hint: null, disposition: 'unverifiable' });
@@ -1149,6 +1169,33 @@ test('#347 C: other content read whole is a change even when the stat after read
   });
   assert.deepEqual(await publish(), { hint: null, disposition: 'unverifiable' });
   assert.equal(seen, 2, 'the stat after reading failed');
+  mock.mock.restore();
+  fs.writeFileSync(file, original);
+  clock += RETRY_INTERVAL_MS;
+  assert.deepEqual(await publish(), { hint: null, disposition: 'unverifiable' });
+  assert.equal(context.ready, false);
+});
+
+test('#347 C: a size seen at the first stat counts even when the open then fails', async (t) => {
+  let clock = 0;
+  const f = await hintFixture(t);
+  const prepared = await f.prepare();
+  assert.equal(prepared.hint?.status, 'supported');
+  const context = {};
+  assert.deepEqual(await verifyHintPublication({ sessionDir: f.dir, token: f.token, context, initialize: true, now: () => clock }), { ready: true });
+  const publish = () => verifyHintPublication({ sessionDir: f.dir, token: f.token, context, hint: prepared.hint, view: prepared.view, retry: true });
+  // The same file shortened by a byte; the read sees that at its first stat and then cannot open it.
+  const file = path.join(f.dir, 'reference-source.json');
+  const original = fs.readFileSync(file);
+  fs.writeFileSync(file, original.subarray(0, original.length - 1));
+  const open = fs.promises.open;
+  let refused = 0;
+  const mock = t.mock.method(fs.promises, 'open', function (name, ...rest) {
+    if (path.basename(String(name)) === 'reference-source.json') { refused += 1; return Promise.reject(Object.assign(new Error('busy'), { code: 'EBUSY', syscall: 'open' })); }
+    return open.call(this, name, ...rest);
+  });
+  assert.deepEqual(await publish(), { hint: null, disposition: 'unverifiable' });
+  assert.equal(refused, 1);
   mock.mock.restore();
   fs.writeFileSync(file, original);
   clock += RETRY_INTERVAL_MS;
